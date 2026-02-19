@@ -26,6 +26,7 @@ cp .env.example .env   # fill in your values
 See [`docs/ref/`](docs/ref/) for full reference material:
 
 - [Tax rules and ACB formulas](docs/ref/crypto-tax-reference-quebec-2025.md)
+- [Database schema](docs/ref/database-schema.md)
 - [Data pipeline](docs/ref/data-pipeline.mermaid)
 - [TUI design and keyboard bindings](docs/ref/tui-design-guidelines.md)
 - [Bitcoin node verification](docs/ref/bitcoin-node-validation-module.md)
