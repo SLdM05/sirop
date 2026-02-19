@@ -27,8 +27,10 @@ import logging
 import re
 import sys
 from contextvars import ContextVar
-from types import TracebackType
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from types import TracebackType
 
 # ──────────────────────────────────────────────────────────────
 # Internal state
@@ -65,18 +67,24 @@ _RE_CAD_AMOUNT = re.compile(
 )
 
 
+def _redact_cad(m: re.Match[str]) -> str:
+    """Keep the tax keyword, replace the amount."""
+    return f"{m.group(1)} [amount redacted]"
+
+
 def _redact(message: str) -> str:
     """Replace sensitive values in a log message with placeholder tokens."""
     message = _RE_TXID.sub("[txid redacted]", message)
     message = _RE_ADDRESS.sub("[address redacted]", message)
     message = _RE_BTC_AMOUNT.sub("[amount redacted]", message)
-    message = _RE_CAD_AMOUNT.sub(lambda m: m.group(0).split(m.group(1))[0] + m.group(1) + " [amount redacted]", message)
+    message = _RE_CAD_AMOUNT.sub(_redact_cad, message)
     return message
 
 
 # ──────────────────────────────────────────────────────────────
 # Filters
 # ──────────────────────────────────────────────────────────────
+
 
 class SensitiveDataFilter(logging.Filter):
     """Redacts PII from log messages when not in verbose mode.
@@ -87,8 +95,8 @@ class SensitiveDataFilter(logging.Filter):
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
-        record.msg = _redact(str(record.msg))
-        record.args = ()  # args already interpolated by redact above
+        record.msg = _redact(record.getMessage())
+        record.args = ()
         return True
 
 
@@ -104,14 +112,6 @@ class _ContextInjectFilter(logging.Filter):
 # ──────────────────────────────────────────────────────────────
 # Formatters
 # ──────────────────────────────────────────────────────────────
-
-_FMT_INFO = (
-    "[sirop]{stage_part} {levelname_part}{message}"
-)
-
-_FMT_DEBUG = (
-    "[sirop][{levelname}] {name_short}  {message}"
-)
 
 
 class _SiropFormatter(logging.Formatter):
@@ -132,17 +132,15 @@ class _SiropFormatter(logging.Formatter):
         if self._debug:
             # Show module name and full level for debug output
             name_short = record.name.removeprefix("sirop.")
-            return f"[sirop][{record.levelname}] {name_short}  {self.formatMessage(record)}"
+            return f"[sirop][{record.levelname}] {name_short}  {record.getMessage()}"
 
         return f"[sirop]{stage_part}{levelname_part}{record.getMessage()}"
-
-    def formatMessage(self, record: logging.LogRecord) -> str:
-        return record.getMessage()
 
 
 # ──────────────────────────────────────────────────────────────
 # Public API
 # ──────────────────────────────────────────────────────────────
+
 
 def configure_logging(*, verbose: bool = False, debug: bool = False) -> None:
     """Configure sirop logging. Call exactly once at CLI entry.
@@ -209,6 +207,7 @@ def get_logger(name: str) -> logging.Logger:
 # Stage context manager
 # ──────────────────────────────────────────────────────────────
 
+
 class StageContext:
     """Context manager that injects batch_id and stage into all log records.
 
@@ -227,7 +226,7 @@ class StageContext:
         self._stage = stage
         self._tokens: list[Any] = []
 
-    def __enter__(self) -> "StageContext":
+    def __enter__(self) -> StageContext:
         self._tokens = [
             _ctx_batch_id.set(self._batch_id),
             _ctx_stage.set(self._stage),
