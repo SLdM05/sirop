@@ -72,3 +72,12 @@ def set_active_batch(name: str, settings: Settings) -> None:
     """Write the active batch name to DATA_DIR/.active."""
     active_file = settings.data_dir / ".active"
     active_file.write_text(name, encoding="utf-8")
+
+
+def get_user_importers_dir(settings: Settings) -> Path:
+    """Return the shared custom importer registry directory.
+
+    This directory (DATA_DIR/importers/) holds user-defined YAML configs that
+    survive across batches. Callers must create it if absent before writing.
+    """
+    return settings.data_dir / "importers"
