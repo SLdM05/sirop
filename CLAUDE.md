@@ -1,0 +1,583 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+# sirop — Quebec 2025
+
+**sirop** (lowercase, always) is a Quebec maple syrup-themed crypto tax tool.
+It calculates Canadian/Quebec tax obligations from exchange and wallet
+transaction exports.
+
+## Commands
+
+```bash
+# Install dependencies
+poetry install
+
+# Run any command inside the Poetry virtualenv
+poetry run <command>
+
+# Lint and format (run before every commit)
+poetry run ruff check --fix .
+poetry run ruff format .
+
+# Type checking
+poetry run mypy .
+
+# Run all tests
+poetry run pytest
+
+# Run tests excluding slow/integration tests (no live node required)
+poetry run pytest -m "not slow and not integration"
+
+# Run a single test file
+poetry run pytest tests/path/to/test_file.py -v
+
+# Textual dev console (hot-reload CSS during TUI development)
+poetry run textual run --dev src/main.py
+
+# Add a dependency
+poetry add <package>
+
+# Add a dev-only dependency
+poetry add --group dev <package>
+```
+
+## Project Context
+
+Read these before making changes:
+
+- `docs/ref/crypto-tax-reference-quebec-2025.md` — Complete tax rules, ACB formulas,
+  form references, and data format specs
+- `docs/ref/bitcoin-node-validation-module.md` — Node verification module spec
+- `docs/ref/tui-design-guidelines.md` — TUI layout, widget design, keyboard bindings, and phase roadmap
+- `docs/ref/data-pipeline.mermaid` — Visual diagram of all 7 pipeline stages and data models
+- `docs/ref/sirop-language-guide.md` — Tool name, CLI verbs, message vocabulary, and the two-register rule
+
+## Key Rules (quick reference)
+
+- CRA mandates weighted-average ACB method (not FIFO/LIFO)
+- 50% capital gains inclusion rate for 2025 (no threshold)
+- Wallet-to-wallet transfers are NOT dispositions
+- Superficial loss rule: 61-day window (30 before + day of + 30 after)
+- All values must be in CAD using Bank of Canada daily rates
+- Quebec requires mandatory TP-21.4.39-V form ($10/day penalty)
+
+## Data Sources
+
+- Shakepay CSV (no explicit fee column — fees in spread)
+- NDAX CSV (AlphaPoint Ledgers format)
+- Sparrow Wallet CSV (no fee column — use node verification)
+- Koinly Capital Gains Report CSV (primary/validation source)
+
+## Tech Stack
+
+- Python 3.12+
+- **Poetry** for dependency management and virtualenv (`pyproject.toml`)
+- `decimal.Decimal` for all money (never float)
+- Bank of Canada Valet API for FX rates (no key required)
+- SQLite via `sqlite3` (stdlib) for batch-scoped pipeline persistence (`sirop.db`)
+- Bitcoin Core RPC or Mempool REST API for node verification
+- `ruff` for linting and formatting
+- `mypy` for static type checking
+- `pytest` for testing
+
+---
+
+## Language and Naming
+
+The tool is `sirop`. Lowercase everywhere — package name, CLI binary, module
+name, prose. Never `Sirop`.
+
+### CLI verbs (top-level commands)
+
+| Verb | Replaces | Purpose |
+|------|----------|---------|
+| `tap` | import | Read raw transaction files |
+| `boil` | calculate / process | Run the full pipeline |
+| `pour` | export / generate | Produce tax report outputs |
+| `grade` | summarize / status | Show gains, losses, ACB state |
+| `verify` | verify | Node verification (plain name is clear enough) |
+
+Sub-commands and flags use plain descriptive names. The theme lives at the
+top level only.
+
+### Two registers — strict separation
+
+**In-app chrome** (personality on): CLI output, progress messages, status
+bars, log lines, TUI headers/footers. Use the maple metaphor where it fits
+naturally. Keep it dry — one well-placed word beats forced whimsy.
+
+**Tax output** (personality off): anything in Schedule 3, Schedule G,
+TP-21.4.39-V, audit logs, or any file leaving the tool. Zero personality.
+Standard accounting vocabulary only. If the form says "Proceeds of
+disposition," the tool says "Proceeds of disposition."
+
+**Never mix registers in the same sentence.**
+
+### Key rules
+
+- Errors: clear and actionable first, flavour second. Never let the metaphor
+  obscure what went wrong.
+- Numbers are never flavoured. `$4,209.23` is `$4,209.23`.
+- When inventing new language, ask: does the sugarbush give a better word than
+  the generic one? If yes, use it. If not, use plain language.
+
+See `docs/ref/sirop-language-guide.md` for the full vocabulary and examples.
+
+---
+
+## Architecture Principles
+
+### 1. Separation of Concerns
+
+Every module has a single responsibility. No module should mix concerns.
+
+```
+src/
+├── config/          # YAML loading, env resolution, validation
+├── importers/       # CSV parsing ONLY — one importer per source
+├── normalizer/      # Currency conversion, timestamp normalization
+├── engine/          # Pure tax calculation logic (ACB, superficial loss)
+├── node/            # Bitcoin node verification (optional layer)
+├── db/              # Repository layer — SQLite read/write ONLY
+├── reports/         # Output formatting ONLY (Schedule 3, Schedule G, TP-21.4.39-V)
+├── models/          # Dataclasses and type definitions shared across modules
+└── utils/           # Stateless helpers (BoC API client, caching, date math)
+```
+
+Rules for module boundaries:
+
+- **Importers** parse raw CSV bytes into `RawTransaction` dataclasses. They know
+  nothing about tax rules, ACB, or reports. Each importer is driven by a YAML
+  column mapping — the importer code itself contains zero hardcoded column
+  names, date formats, or transaction type strings.
+- **Engine** performs pure calculations. It receives typed dataclasses and
+  returns typed results. It never reads files, calls APIs, accesses config,
+  or imports from `src/db/` — all dependencies are injected.
+- **db/** is the exclusive interface to `sirop.db`. No other module reads from
+  or writes to SQLite directly. `db/` knows nothing about tax rules or business
+  logic — it only serializes and deserializes dataclasses to rows, and wraps
+  every stage write in a single SQLite transaction.
+- **Reports** take calculated results and format them for output. They know
+  about form field names and line numbers but never about how the numbers
+  were computed.
+- **Node verification** is an optional enrichment layer. The pipeline must
+  function identically (minus verification) when the node is unavailable.
+
+### 2. Config-Driven Design
+
+**No magic constants or hardcoded values in source code.** All of the following
+must live in YAML configuration files under `config/`:
+
+```
+config/
+├── tax_rules.yaml         # Inclusion rates, loss carry rules, form line numbers
+├── importers/
+│   ├── shakepay.yaml      # Column mappings, date format, transaction type map
+│   ├── ndax.yaml          # Column mappings, date format, transaction type map
+│   ├── sparrow.yaml       # Column mappings, date format
+│   └── koinly.yaml        # Column mappings, date format, transaction type map
+├── currencies.yaml        # Supported currencies, BoC API series codes
+└── reports.yaml           # Output form field mappings, line numbers
+```
+
+Example importer config (`config/importers/shakepay.yaml`):
+
+```yaml
+name: "Shakepay"
+file_pattern: "*.csv"
+date_column: "Date"
+date_format: "%Y-%m-%dT%H:%M:%S%z"
+columns:
+  transaction_type: "Transaction Type"
+  amount_debited: "Amount Debited"
+  debit_currency: "Debit Currency"
+  amount_credited: "Amount Credited"
+  credit_currency: "Credit Currency"
+  rate: "Buy / Sell Rate"
+  spot_rate: "Spot Rate"
+  direction: "Direction"
+  source_destination: "Source / Destination"
+  txid: "Blockchain Transaction ID"
+transaction_type_map:
+  "purchase/sale": "trade"
+  "crypto cashout": "withdrawal"
+  "crypto funding": "deposit"
+  "fiat funding": "fiat_deposit"
+  "fiat cashout": "fiat_withdrawal"
+  "other": "other"
+fee_model: "spread"  # fees embedded in spread, not explicit column
+```
+
+Rules for config:
+
+- Source code references config keys, never literal column names or values
+- Adding a new exchange means adding a YAML file, not writing new Python
+- Tax rule changes (e.g., inclusion rate update) require editing `tax_rules.yaml`
+  only — zero code changes
+- Config files are validated at startup against a schema; fail fast on
+  missing or invalid keys
+
+### 3. Privacy-First / Public-Repo Safe
+
+**This repo may be made public. No private data may ever be committed.**
+
+All secrets and user-specific values go in `.env` (gitignored):
+
+```env
+# .env — NEVER committed, listed in .gitignore
+# Node connection
+BTC_NODE_BACKEND=mempool
+BTC_RPC_URL=http://127.0.0.1:8332
+BTC_RPC_USER=myuser
+BTC_RPC_PASSWORD=mypassword
+BTC_MEMPOOL_URL=http://localhost:3006/api
+
+# Wallet identifiers (xpubs, addresses — sensitive!)
+SPARROW_XPUB=xpub6...
+WATCHED_ADDRESSES=bc1q...,bc1q...
+
+# Data paths (user-specific)
+DATA_DIR=./data
+OUTPUT_DIR=./output
+```
+
+Provide a `.env.example` with placeholder values and comments for every
+variable. This is the only env reference that gets committed:
+
+```env
+# .env.example — copy to .env and fill in your values
+BTC_NODE_BACKEND=mempool          # "rpc" or "mempool"
+BTC_RPC_URL=http://127.0.0.1:8332
+BTC_RPC_USER=
+BTC_RPC_PASSWORD=
+BTC_MEMPOOL_URL=http://localhost:3006/api
+SPARROW_XPUB=
+WATCHED_ADDRESSES=
+DATA_DIR=./data
+OUTPUT_DIR=./output
+```
+
+Rules for privacy:
+
+- Use `pydantic-settings` (or `python-dotenv`) to load `.env` into typed
+  config objects. Never use `os.getenv()` scattered throughout code.
+- **No addresses, xpubs, txids, amounts, or personal identifiers** in code,
+  tests, config, comments, or commit messages
+- Test fixtures use obviously fake data (e.g., `txid: "aaa...111"`,
+  address: `bc1qfakeaddressfortesting`)
+- `.gitignore` must include: `.env`, `data/`, `output/`, `.node_cache/`,
+  `*.csv`, any file that could contain real transaction data
+- Log output should redact sensitive values by default. A `--verbose` flag
+  can reveal txids/amounts for local debugging but this mode should print
+  a clear warning that sensitive data is being logged.
+
+---
+
+## Database and Persistence Layer
+
+All pipeline state is persisted in a single SQLite file: `sirop.db` (path
+configurable via `DATA_DIR` in `.env`). The database is the single source of
+truth between pipeline stages — no in-memory lists are passed between stage
+boundaries.
+
+### Batch model
+
+A **batch** is one person's one tax year (e.g. "Alice — 2025"). Multiple
+batches coexist in the same `sirop.db`. Every pipeline table row carries a
+`batch_id` foreign key. The TUI presents a batch switcher; all queries filter
+by the active `batch_id`. This is how two people's taxes stay isolated in one
+file.
+
+### sirop.db schema
+
+**Metadata**
+
+| Table | Key columns | Purpose |
+|-------|-------------|---------|
+| `batches` | id, name, tax_year, owner, created_at | One row per person/year |
+| `schema_version` | version, applied_at | Single-row migration guard — bump on schema changes |
+| `stage_status` | batch_id, stage, status, completed_at, error | Pipeline state machine per batch |
+
+`stage_status.status` values: `pending` | `running` | `done` | `invalidated`
+
+**Cached external data**
+
+| Table | Key columns | Purpose |
+|-------|-------------|---------|
+| `boc_rates` | date, currency_pair, rate, fetched_at | BoC daily rates — fetched once per date, never re-fetched |
+
+**Pipeline tables** (all rows carry `batch_id`)
+
+| Table | Written by | Maps to |
+|-------|------------|---------|
+| `raw_transactions` | tap (import) | `models/raw.py` |
+| `transactions` | normalize | `models/transaction.py` |
+| `verified_transactions` | verify | `models/verified.py` |
+| `classified_events` | transfer matching | See note below |
+| `dispositions` | boil (ACB engine) | `models/disposition.py` |
+| `acb_state` | boil (ACB engine) | asset, pool_cost, units, snapshot_date |
+| `dispositions_adjusted` | superficial loss detection | adjusted dispositions |
+
+**Audit**
+
+| Table | Key columns | Purpose |
+|-------|-------------|---------|
+| `audit_log` | batch_id, stage, txid, field, old_value, new_value, reason | Every field-level override (node verification, manual corrections). CRA 6-year retention. |
+
+### `classified_events` — what it contains
+
+`classified_events` is **not** a copy of `transactions`. The transfer matcher
+produces it by:
+
+1. Keeping taxable events (buys, sells) as-is
+2. Creating **fee micro-dispositions** — each on-chain network fee is a small
+   taxable disposal of BTC at the block confirmation time
+3. **Excluding** wallet-to-wallet transfer records entirely
+
+`classified_events` is the sole input to the ACB engine. If an event is not
+in this table, it does not affect ACB or capital gains.
+
+### Repository layer (`src/db/repositories.py`)
+
+All DB reads and writes are mediated by this module. The contract:
+
+- **Before a stage runs**: repository reads rows filtered by `batch_id`,
+  deserializes them to typed dataclasses, and passes them to the stage
+- **After a stage runs**: repository serializes the returned dataclasses to
+  rows and writes them in a **single SQLite transaction** — if the write fails,
+  nothing is committed
+- **Pure engine modules** (`engine/`, and the pure parts of `node/`) never
+  import from `src/db/`. Storage is injected by the pipeline coordinator.
+
+### Cascading invalidation
+
+Re-running stage N for a batch:
+
+1. Delete that stage's output rows for `batch_id`
+2. Mark all downstream stages as `invalidated` in `stage_status`
+
+The pipeline coordinator checks `stage_status` before each stage:
+- `done` → skip
+- `running` → abort (another process is running)
+- `pending` or `invalidated` → execute
+
+This means `sirop boil --from normalize` re-runs normalize through report
+generation without re-tapping source files.
+
+### TUI data access
+
+The TUI reads `sirop.db` directly for live display — it never re-runs pipeline
+stages. It queries: `stage_status` (progress view), `classified_events`
+(transaction browser), `dispositions_adjusted` (gains/losses view), `acb_state`
+(ACB state viewer), and `batches` (batch switcher).
+
+---
+
+## Logging and Debug Mode
+
+All logging goes through `src/utils/logging.py`. No module imports Python's
+`logging` directly or calls `logging.basicConfig()`.
+
+### Setup
+
+```python
+# CLI entry point only:
+from crypto_tax_tool.utils.logging import configure_logging
+configure_logging(verbose=args.verbose, debug=args.debug)
+
+# Every other module:
+from crypto_tax_tool.utils.logging import get_logger
+logger = get_logger(__name__)  # becomes sirop.<module_name>
+
+# Pipeline coordinator, around each stage:
+from crypto_tax_tool.utils.logging import StageContext
+with StageContext(batch_id=batch.id, stage="normalize"):
+    ...  # all logs inside carry batch_id and stage automatically
+```
+
+`configure_logging()` is called **once** at CLI startup. Library code (importers,
+engine, db, node) never calls it. Pure engines use `logging.getLogger(__name__)`
+directly — they are unaware of sirop's logging setup.
+
+### Log levels
+
+| Level | Visible by default | Content |
+|-------|--------------------|---------|
+| `ERROR` | always | Stage failures, unrecoverable errors. Always clear, never themed. |
+| `WARNING` | always | Discrepancies, data quality issues, node fallback, superficial losses detected. |
+| `INFO` | always | Stage start/completion, row counts, key milestones. Maple theme OK here. |
+| `DEBUG` | `--debug` only | Field transforms, SQL queries, ACB step-by-step, raw values. |
+
+`--debug` implies `--verbose`.
+
+### Privacy and redaction
+
+**Default (no flags):** `SensitiveDataFilter` is attached to the log handler
+and replaces the following in every message:
+
+- 64-char hex strings (txids) → `[txid redacted]`
+- Bitcoin addresses (`bc1…`, `1…`, `3…`) → `[address redacted]`
+- BTC amounts near the keyword `BTC` → `[amount redacted]`
+- CAD amounts near tax keywords (proceeds, acb, gain, loss, fee) → `[amount redacted]`
+
+**`--verbose` mode:** Redaction filter is bypassed. A banner is printed once:
+```
+⚠  VERBOSE MODE: sensitive data (txids, amounts, addresses) is being logged.
+   Do not share this output. Run without --verbose for redacted logs.
+```
+
+### What each layer logs
+
+| Module | INFO | WARNING | DEBUG |
+|--------|------|---------|-------|
+| Importers | `"Tapping {source}..."`, row count on done | Missing fields, unknown tx types | Each parsed row (redacted by default) |
+| Normalizer | `"Checking sap levels..."` (BoC fetch/cache) | Missing rates, unusual types | Each BoC rate used, each field converted |
+| Node verifier | `"Verifying on-chain..."`, `"Block confirmed."` | `"Node unreachable — running without on-chain verification."`, each discrepancy | Raw API response fields, before/after overrides |
+| Transfer matcher | `"Tracing the flow..."`, each confirmed match | `"Loose tap — withdrawal on {date} has no matching deposit."` | Window checks |
+| ACB engine (PURE) | — (caller logs milestones) | — (caller logs, engine returns flags) | ACB state before/after each event, gain/loss steps |
+| SLD engine (PURE) | — | — | Each 61-day window check, each denied loss |
+| Repository | — | Schema version mismatch | Every SQL query (parameter count only unless `--debug --verbose`) |
+
+---
+
+## Code Quality Standards
+
+### Ruff (linting + formatting)
+
+Ruff is the sole linter and formatter. Configuration in `pyproject.toml`:
+
+```toml
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # pyflakes
+    "I",      # isort
+    "N",      # pep8-naming
+    "UP",     # pyupgrade
+    "B",      # flake8-bugbear
+    "SIM",    # flake8-simplify
+    "TCH",    # flake8-type-checking
+    "RUF",    # ruff-specific rules
+    "S",      # flake8-bandit (security)
+    "PTH",    # flake8-use-pathlib
+    "ERA",    # eradicate (commented-out code)
+    "PL",     # pylint subset
+]
+ignore = [
+    "S101",   # allow assert in tests
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["crypto_tax_tool"]
+
+[tool.ruff.format]
+quote-style = "double"
+```
+
+Run before every commit:
+
+```bash
+ruff check --fix .
+ruff format .
+```
+
+### Mypy (strict type checking)
+
+All code must pass mypy in strict mode. Configuration in `pyproject.toml`:
+
+```toml
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_any_generics = true
+no_implicit_optional = true
+check_untyped_defs = true
+```
+
+Rules for typing:
+
+- Every function has complete type annotations (params + return)
+- Use `Decimal` in type hints for all financial values, never `float`
+- Use `datetime` (timezone-aware) for all timestamps
+- Use `dataclasses` or `pydantic.BaseModel` for all structured data
+- No `Any` types without an explanatory comment
+- Prefer `Protocol` over abstract base classes for duck typing
+
+### Pytest
+
+```toml
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers -v"
+markers = [
+    "slow: marks tests that call external APIs or node",
+    "integration: marks tests requiring a live Bitcoin node",
+]
+```
+
+Rules for testing:
+
+- Every engine function (ACB calculation, superficial loss detection) must
+  have unit tests with known-answer test cases from the CRA examples
+- Importers are tested against fixture CSV files with synthetic data
+- Node verification tests use mocked API responses (no real node needed)
+- Integration tests (marked `slow`/`integration`) can call a real node
+  but are skipped in CI by default
+- Test data must use fake values only (see privacy rules above)
+
+---
+
+## Data Flow Convention
+
+Data flows through typed dataclasses between stages. Each stage boundary is
+persisted to `sirop.db` via the repository layer. No raw dicts, no in-memory
+lists passed across stage boundaries.
+
+```
+CSV file(s)
+  → tap: Importer(s)          → [repo write] → raw_transactions
+  → normalize: Normalizer     → [repo write] → transactions
+      (BoC rates read from boc_rates cache or fetched and cached)
+  → verify: NodeVerifier      → [repo write + audit_log] → verified_transactions
+      (if node unavailable: transactions rows promoted to verified_transactions as-is)
+  → transfer matching:
+      TransferMatcher         → [repo write] → classified_events
+      (buys/sells kept, fee micro-dispositions created, transfers excluded)
+  → boil: ACBEngine  PURE     → [repo write] → dispositions + acb_state
+  → SuperficialLossDetector  PURE  → [repo write] → dispositions_adjusted
+  → pour: ReportGenerator     → Schedule 3 / Schedule G / TP-21.4.39-V / Summary
+```
+
+**PURE** means the function receives typed dataclasses and returns typed
+dataclasses only. It has no knowledge of files, databases, APIs, or config.
+The repository layer handles all serialization around it.
+
+Each `[repo write]` is a single atomic SQLite transaction. If it fails, the
+stage output is rolled back and `stage_status` is not updated to `done`.
+
+---
+
+## Conventions Summary
+
+- `Decimal` for money, always. `float` in a financial calculation is a bug.
+- UTC internally. Convert to `America/Toronto` only in final report display.
+- Pathlib for all file paths. No string concatenation for paths.
+- f-strings for formatting. No `%` or `.format()`.
+- Explicit is better than implicit: no `*args/**kwargs` unless wrapping
+  an external API.
+- Functions should be small and pure where possible. If a function needs
+  more than 3 dependencies, it probably needs decomposition.
+- Errors should be specific: `InvalidCSVFormatError`, `MissingColumnError`,
+  `NodeConnectionError` — not bare `Exception` or `ValueError`.
+- All config-loaded values are validated at startup, not at first use.
+  Fail fast, fail loud.

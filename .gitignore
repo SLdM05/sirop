@@ -1,0 +1,34 @@
+# ── Secrets & environment ────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── User data (may contain real transaction records) ─────────────────────────
+data/
+!data/.gitkeep
+output/
+.node_cache/
+
+# ── CSV files (exchanges/wallets export sensitive financial data) ─────────────
+*.csv
+!tests/fixtures/*.csv      # synthetic test fixtures are safe to commit
+
+# ── Python build artifacts ───────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+.venv/
+venv/
+
+# ── Editor directories ────────────────────────────────────────────────────────
+.vscode/
+.idea/
+
+# ── Tool caches ───────────────────────────────────────────────────────────────
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/

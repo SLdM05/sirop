@@ -1,0 +1,14 @@
+tax_year: 2025
+capital_gains_inclusion_rate: "0.50"
+superficial_loss_window_days: 30
+loss_carry_back_years: 3
+record_retention_years: 6
+
+federal:
+  schedule_3_crypto_line: 10
+  t1_taxable_gains_line: 12700
+
+quebec:
+  tp1_crypto_checkbox_line: 24
+  tp1_taxable_gains_line: 139
+  crypto_form: "TP-21.4.39-V"

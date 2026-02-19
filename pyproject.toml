@@ -1,0 +1,47 @@
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry]
+name = "sirop"
+version = "0.1.0"
+description = "Canadian/Quebec crypto tax calculator"
+packages = [{include = "sirop", from = "src"}]
+
+[tool.poetry.dependencies]
+python = "^3.12"
+pyyaml = "^6.0"
+
+[tool.poetry.group.dev.dependencies]
+ruff = "^0.8"
+mypy = "^1.13"
+pytest = "^8.0"
+types-PyYAML = "*"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W", "F", "I", "N", "UP", "B", "SIM",
+    "TCH", "RUF", "S", "PTH", "ERA", "PL",
+]
+ignore = ["S101"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["sirop"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+mypy_path = "src"
+packages = ["sirop"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers -v"

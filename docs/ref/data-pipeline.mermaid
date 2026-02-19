@@ -1,0 +1,202 @@
+%%{init: {
+  "theme": "dark",
+  "themeVariables": {
+    "primaryColor": "#1a1a2e",
+    "primaryTextColor": "#e0e0e0",
+    "primaryBorderColor": "#44475a",
+    "lineColor": "#8be9fd",
+    "secondaryColor": "#16213e",
+    "tertiaryColor": "#0f3460",
+    "fontSize": "14px"
+  }
+}}%%
+
+flowchart TD
+    classDef source   fill:#2d1b4e,stroke:#bd93f9,color:#f8f8f2,stroke-width:2px
+    classDef importer fill:#1a3a2a,stroke:#50fa7b,color:#f8f8f2,stroke-width:2px
+    classDef process  fill:#1a2744,stroke:#8be9fd,color:#f8f8f2,stroke-width:2px
+    classDef engine   fill:#3a1a1a,stroke:#ff5555,color:#f8f8f2,stroke-width:2px
+    classDef optional fill:#1a2744,stroke:#f1fa8c,color:#f8f8f2,stroke-width:2px,stroke-dasharray: 5 5
+    classDef output   fill:#2e1f0f,stroke:#ffb86c,color:#f8f8f2,stroke-width:2px
+    classDef dbtable  fill:#0d1f17,stroke:#50fa7b,color:#50fa7b,stroke-width:1px
+    classDef dbmeta   fill:#0d1117,stroke:#6272a4,color:#6272a4,stroke-width:1px
+    classDef external fill:#1a1a2e,stroke:#6272a4,color:#6272a4,stroke-width:1px,stroke-dasharray: 3 3
+    classDef batch    fill:#1e1040,stroke:#bd93f9,color:#bd93f9,stroke-width:2px
+    classDef repo     fill:#1a2030,stroke:#8be9fd,color:#8be9fd,stroke-width:1px,stroke-dasharray: 4 2
+    classDef tui      fill:#1a2744,stroke:#f1fa8c,color:#f8f8f2,stroke-width:1px,stroke-dasharray: 3 3
+
+    %% ═══════════════════════════════════════════
+    %% BATCH CONTEXT
+    %% One batch = one person's tax year (e.g. "Alice — 2025").
+    %% Multiple batches coexist in sirop.db.
+    %% ═══════════════════════════════════════════
+
+    BATCH[/"Active batch<br/><i>e.g. Alice — 2025</i>"/]:::batch
+
+    subgraph SIROPDB ["  sirop.db  (SQLite — single file, one per user)"]
+        direction TB
+
+        subgraph DBMETA ["  Metadata  "]
+            T_BATCH[("batches<br/><i>id · name · tax_year · owner · created_at</i>")]:::dbmeta
+            T_SCHEMA[("schema_version<br/><i>version · applied_at</i>")]:::dbmeta
+            T_STATUS[("stage_status<br/><i>batch_id · stage · status · completed_at · error</i><br/><i>status: pending | running | done | invalidated</i>")]:::dbmeta
+        end
+
+        subgraph DBCACHE ["  Cached External Data  "]
+            T_BOC[("boc_rates<br/><i>date · currency_pair · rate · fetched_at</i>")]:::dbtable
+        end
+
+        subgraph DBPIPE ["  Pipeline Tables (all rows carry batch_id)  "]
+            T_RAW[("raw_transactions<br/><i>models/raw.py → rows</i>")]:::dbtable
+            T_TX[("transactions<br/><i>models/transaction.py → rows</i>")]:::dbtable
+            T_VTX[("verified_transactions<br/><i>models/verified.py → rows</i>")]:::dbtable
+            T_EVT[("classified_events<br/><i>dispositions + fee micro-dispositions</i><br/><i>transfer markers excluded from ACB</i>")]:::dbtable
+            T_DISP[("dispositions<br/><i>models/disposition.py → rows</i>")]:::dbtable
+            T_ACB[("acb_state<br/><i>asset · pool_cost · units · snapshot_date</i>")]:::dbtable
+            T_DISP_ADJ[("dispositions_adjusted<br/><i>denied losses reallocated</i>")]:::dbtable
+        end
+
+        subgraph DBAUDIT ["  Audit  "]
+            T_AUDIT[("audit_log<br/><i>batch_id · stage · txid · field</i><br/><i>old_value · new_value · reason</i>")]:::dbtable
+        end
+    end
+
+    BATCH --> T_BATCH
+
+    %% ═══════════════════════════════════════════
+    %% REPOSITORY LAYER
+    %% All DB reads and writes are mediated by src/db/repositories.py.
+    %% Pure engine modules (ACB, SLD) never import from src/db/.
+    %% Repositories deserialize rows → dataclasses before handing to engines,
+    %% and serialize dataclass results → rows after engines return.
+    %% ═══════════════════════════════════════════
+
+    REPO["Repository Layer  —  src/db/repositories.py<br/><i>Deserializes rows → typed dataclasses before each stage</i><br/><i>Serializes dataclass results → rows after each stage</i><br/><i>Wraps every stage write in a single SQLite transaction</i><br/><i>Pure engine modules never import from src/db/</i>"]:::repo
+
+    SIROPDB <-->|"all reads and writes"| REPO
+
+    %% ═══════════════════════════════════════════
+    %% CASCADING INVALIDATION
+    %% Re-running stage N deletes its output table rows for the batch
+    %% and marks all downstream stages as 'invalidated' in stage_status.
+    %% ═══════════════════════════════════════════
+
+    INVAL["Re-run any stage →<br/><i>delete that stage's rows for batch_id</i><br/><i>mark all downstream stages: invalidated</i><br/><i>pipeline resumes cleanly from that point</i>"]:::repo
+    T_STATUS <-->|"cascade"| INVAL
+
+    %% ═══════════════════════════════════════════
+    %% DATA SOURCES
+    %% ═══════════════════════════════════════════
+
+    SP[/"Shakepay CSV"/]:::source
+    ND[/"NDAX CSV"/]:::source
+    SW[/"Sparrow CSV"/]:::source
+    KN[/"Koinly CSV"/]:::source
+
+    %% ═══════════════════════════════════════════
+    %% STAGE 1 — tap  (import)
+    %% ═══════════════════════════════════════════
+
+    IMP_SP["Shakepay Importer<br/><i>config-driven parser</i><br/><i>spread fee extraction</i>"]:::importer
+    IMP_ND["NDAX Importer<br/><i>config-driven parser</i>"]:::importer
+    IMP_SW["Sparrow Importer<br/><i>config-driven parser</i>"]:::importer
+    IMP_KN["Koinly Importer<br/><i>config-driven parser</i>"]:::importer
+    YAML_IMP[("Importer YAML<br/>configs")]:::external
+
+    SP --> IMP_SP
+    ND --> IMP_ND
+    SW --> IMP_SW
+    KN --> IMP_KN
+    YAML_IMP -.-> IMP_SP & IMP_ND & IMP_SW & IMP_KN
+
+    IMP_SP & IMP_ND & IMP_SW & IMP_KN -->|"via repo → atomic write"| T_RAW
+
+    %% ═══════════════════════════════════════════
+    %% STAGE 2 — normalize
+    %% ═══════════════════════════════════════════
+
+    NORM["Normalizer<br/><i>CAD conversion via BoC rates</i><br/><i>UTC timestamp standardization</i><br/><i>Transaction type classification</i>"]:::process
+    BOC[("Bank of Canada<br/>Valet API")]:::external
+
+    T_RAW -->|"via repo"| NORM
+    BOC -.->|"rates cached → T_BOC"| NORM
+    NORM -->|"via repo → atomic write"| T_TX
+
+    %% ═══════════════════════════════════════════
+    %% STAGE 3 — verify  (optional)
+    %% Node overrides written to audit_log.
+    %% ═══════════════════════════════════════════
+
+    NODE["Node Verifier<br/><i>on-chain timestamp override</i><br/><i>exact fee capture</i><br/><i>amount cross-validation</i><br/><i>year-boundary flagging</i>"]:::optional
+    BTC_NODE[("Bitcoin Node<br/>RPC or Mempool API")]:::external
+
+    T_TX -->|"via repo"| NODE
+    BTC_NODE -.-> NODE
+    NODE -->|"overrides → T_AUDIT"| T_AUDIT
+    NODE -->|"via repo → atomic write"| T_VTX
+
+    SKIP["<i>node unavailable →<br/>T_TX promoted to T_VTX as-is</i>"]:::external
+    T_TX -.-> SKIP -.-> T_VTX
+
+    %% ═══════════════════════════════════════════
+    %% STAGE 4 — transfer matching
+    %% ═══════════════════════════════════════════
+
+    MATCH["Transfer Matcher<br/><i>txid matching across sources</i><br/><i>amount ± fee tolerance</i><br/><i>timestamp proximity check</i><br/><i>emits fee micro-dispositions</i><br/><i>marks transfers as non-dispositions</i>"]:::process
+
+    T_VTX -->|"via repo"| MATCH
+    MATCH -->|"via repo → atomic write"| T_EVT
+
+    %% ═══════════════════════════════════════════
+    %% STAGE 5 — boil  (ACB engine)
+    %% PURE: receives dataclasses, returns dataclasses.
+    %% Never imports from src/db/. Repo wraps all I/O.
+    %% ═══════════════════════════════════════════
+
+    ACB["ACB Engine  —  PURE<br/><i>weighted-average cost per asset</i><br/><i>pool updates on each event</i><br/><i>gain/loss on each disposition</i><br/><i>receives list[ClassifiedEvent]</i><br/><i>returns list[Disposition] + ACBState</i>"]:::engine
+    YAML_TAX[("tax_rules.yaml")]:::external
+
+    T_EVT -->|"repo deserializes → dataclasses"| ACB
+    YAML_TAX -.-> ACB
+    ACB -->|"repo serializes → atomic write"| T_DISP & T_ACB
+
+    %% ═══════════════════════════════════════════
+    %% STAGE 6 — superficial loss detection
+    %% PURE: same contract as ACB engine.
+    %% ═══════════════════════════════════════════
+
+    SLD["Superficial Loss Detector  —  PURE<br/><i>61-day window scan</i><br/><i>deny loss, add to repurchase ACB</i><br/><i>partial denial for fewer units</i><br/><i>receives list[Disposition] + list[ClassifiedEvent]</i><br/><i>returns list[Disposition] (adjusted)</i>"]:::engine
+
+    T_DISP -->|"repo deserializes → dataclasses"| SLD
+    T_EVT -.->|"repo deserializes"| SLD
+    T_ACB -.->|"repo deserializes"| SLD
+    SLD -->|"repo serializes → atomic write"| T_DISP_ADJ
+
+    %% ═══════════════════════════════════════════
+    %% STAGE 7 — pour  (report generation)
+    %% ═══════════════════════════════════════════
+
+    YAML_RPT[("reports.yaml")]:::external
+    RPT["Report Generator<br/><i>config-driven formatter</i>"]:::output
+
+    T_DISP_ADJ -->|"via repo"| RPT
+    T_ACB -.->|"via repo"| RPT
+    YAML_RPT -.-> RPT
+
+    S3["Schedule 3<br/><i>Federal — Line 10</i><br/><i>→ T1 Line 12700</i>"]:::output
+    SG["Schedule G<br/><i>Quebec — Part A</i><br/><i>→ TP-1 Line 139</i>"]:::output
+    TP["TP-21.4.39-V<br/><i>Quebec mandatory</i><br/><i>per-asset breakdown</i><br/><i>year-end holdings</i>"]:::output
+    SUM["Capital Gains<br/>Summary<br/><i>net gains, taxable amount</i><br/><i>year-end ACB state</i>"]:::output
+
+    RPT --> S3 & SG & TP & SUM
+
+    %% ═══════════════════════════════════════════
+    %% TUI — reads DB directly, no pipeline re-run
+    %% ═══════════════════════════════════════════
+
+    TUI["TUI<br/><i>transaction browser</i><br/><i>ACB state viewer</i><br/><i>pipeline stage status</i><br/><i>batch switcher</i>"]:::tui
+
+    T_STATUS -.->|"live stage status"| TUI
+    T_EVT -.->|"browse events"| TUI
+    T_DISP_ADJ -.->|"gains / losses"| TUI
+    T_ACB -.->|"ACB state"| TUI
