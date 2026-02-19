@@ -14,7 +14,7 @@ from typing import Final
 
 # Bump this when the schema changes. The migration guard reads this value
 # and refuses to open a file whose schema_version doesn't match.
-SCHEMA_VERSION: Final[int] = 1
+SCHEMA_VERSION: Final[int] = 2
 
 # All pipeline stage names in execution order.
 PIPELINE_STAGES: Final[tuple[str, ...]] = (
@@ -67,6 +67,10 @@ CREATE TABLE IF NOT EXISTS boc_rates (
 )
 """
 
+# ── Gap 1 fix ─────────────────────────────────────────────────────────────────
+# Added: amount_currency (what currency `amount` is in — BTC, CAD, USD, etc.)
+#        fiat_currency   (what currency `cad_amount` is actually in at raw stage)
+#        spot_rate       (Shakepay: spot rate alongside buy/sell rate for spread fee)
 _RAW_TRANSACTIONS_DDL = """
 CREATE TABLE IF NOT EXISTS raw_transactions (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -75,15 +79,23 @@ CREATE TABLE IF NOT EXISTS raw_transactions (
     transaction_type    TEXT    NOT NULL,   -- raw type string from CSV
     asset               TEXT    NOT NULL,   -- e.g. "BTC", "ETH"
     amount              TEXT    NOT NULL,   -- Decimal string
+    amount_currency     TEXT    NOT NULL,   -- currency of amount (e.g. "BTC", "CAD")
     fee                 TEXT,               -- Decimal string or NULL
     fee_currency        TEXT,               -- e.g. "BTC" or NULL
     cad_amount          TEXT,               -- Decimal string or NULL
+    fiat_currency       TEXT,               -- currency of cad_amount before normalisation
     cad_rate            TEXT,               -- Decimal string or NULL
+    spot_rate           TEXT,               -- Decimal string or NULL (Shakepay spread calc)
     txid                TEXT,               -- blockchain txid or NULL
     extra_json          TEXT                -- JSON blob for source-specific fields
 )
 """
 
+# ── Gap 2 fix ─────────────────────────────────────────────────────────────────
+# Renamed: fee → fee_crypto (clearer: fee in crypto units, not CAD)
+# Added:   is_transfer     (TRUE when transfer-matcher confirms wallet-to-wallet)
+#          counterpart_id  (FK to the matching deposit/withdrawal row)
+#          notes           (free-text override or annotation)
 _TRANSACTIONS_DDL = """
 CREATE TABLE IF NOT EXISTS transactions (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -92,16 +104,25 @@ CREATE TABLE IF NOT EXISTS transactions (
     transaction_type    TEXT    NOT NULL,   -- normalised TransactionType
     asset               TEXT    NOT NULL,
     amount              TEXT    NOT NULL,   -- Decimal string
-    fee                 TEXT,               -- Decimal string or NULL
-    fee_currency        TEXT,
+    fee_crypto          TEXT,               -- Decimal string or NULL (fee in asset units)
+    fee_currency        TEXT,               -- e.g. "BTC" or NULL
     cad_amount          TEXT    NOT NULL,   -- Decimal string
-    cad_fee             TEXT,               -- Decimal string or NULL
+    cad_fee             TEXT,               -- Decimal string or NULL (fee in CAD)
     cad_rate            TEXT    NOT NULL,   -- Decimal string (BoC rate used)
     txid                TEXT,
-    source              TEXT    NOT NULL
+    source              TEXT    NOT NULL,
+    is_transfer         INTEGER NOT NULL DEFAULT 0,  -- 1 after transfer_match confirms pair
+    counterpart_id      INTEGER REFERENCES transactions(id),  -- matched withdrawal/deposit
+    notes               TEXT    NOT NULL DEFAULT ''
 )
 """
 
+# ── Gap 7 fix ─────────────────────────────────────────────────────────────────
+# Renamed: fee → fee_crypto (consistency with transactions)
+# Added:   block_height   (canonical block number from node — used for timestamp provenance)
+#          confirmations  (confirmation count at verification time)
+#          is_transfer    (carried forward from transactions)
+#          counterpart_id (carried forward from transactions)
 _VERIFIED_TRANSACTIONS_DDL = """
 CREATE TABLE IF NOT EXISTS verified_transactions (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -110,33 +131,45 @@ CREATE TABLE IF NOT EXISTS verified_transactions (
     transaction_type    TEXT    NOT NULL,
     asset               TEXT    NOT NULL,
     amount              TEXT    NOT NULL,   -- Decimal string
-    fee                 TEXT,               -- Decimal string or NULL (enriched by node)
+    fee_crypto          TEXT,               -- Decimal string or NULL (enriched by node)
     fee_currency        TEXT,
     cad_amount          TEXT    NOT NULL,   -- Decimal string
     cad_fee             TEXT,               -- Decimal string or NULL
     cad_rate            TEXT    NOT NULL,   -- Decimal string
     txid                TEXT,
     source              TEXT    NOT NULL,
-    node_verified       INTEGER NOT NULL DEFAULT 0  -- 0=false, 1=true
+    is_transfer         INTEGER NOT NULL DEFAULT 0,
+    counterpart_id      INTEGER REFERENCES verified_transactions(id),
+    node_verified       INTEGER NOT NULL DEFAULT 0,  -- 0=false, 1=true
+    block_height        INTEGER,            -- NULL unless node_verified=1
+    confirmations       INTEGER             -- NULL unless node_verified=1
 )
 """
 
+# Bonus fix: added source column for traceability back to origin exchange/wallet.
 _CLASSIFIED_EVENTS_DDL = """
 CREATE TABLE IF NOT EXISTS classified_events (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     vtx_id          INTEGER REFERENCES verified_transactions(id),
     timestamp       TEXT    NOT NULL,   -- ISO 8601 UTC
-    event_type      TEXT    NOT NULL,   -- 'buy', 'sell', 'fee_disposal', etc.
+    event_type      TEXT    NOT NULL,   -- 'buy', 'sell', 'fee_disposal', 'staking', etc.
     asset           TEXT    NOT NULL,
     amount          TEXT    NOT NULL,   -- Decimal string (units)
-    cad_proceeds    TEXT,               -- Decimal string or NULL (disposals)
-    cad_cost        TEXT,               -- Decimal string or NULL (acquisitions)
+    cad_proceeds    TEXT,               -- Decimal string or NULL (disposals only)
+    cad_cost        TEXT,               -- Decimal string or NULL (acquisitions only)
     cad_fee         TEXT,               -- Decimal string or NULL
     txid            TEXT,
-    is_taxable      INTEGER NOT NULL DEFAULT 1  -- 0=transfer, excluded from ACB
+    source          TEXT    NOT NULL,   -- origin exchange/wallet for traceability
+    is_taxable      INTEGER NOT NULL DEFAULT 1  -- 0=transfer, excluded from ACB engine
 )
 """
 
+# ── Gap 3 + 4 fix ─────────────────────────────────────────────────────────────
+# Added: selling_fees      (Schedule 3 Column 4 — outlays and expenses)
+#        disposition_type  (sell/trade/spend/fee_disposal — for report categorisation)
+#        year_acquired     (Schedule 3 Column 1 — int or "Various")
+#        acb_per_unit_before / pool_units_before / pool_cost_before
+#            (full before-state snapshot for audit trail; after-state was already present)
 _DISPOSITIONS_DDL = """
 CREATE TABLE IF NOT EXISTS dispositions (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -146,17 +179,27 @@ CREATE TABLE IF NOT EXISTS dispositions (
     units               TEXT    NOT NULL,   -- Decimal string
     proceeds            TEXT    NOT NULL,   -- Decimal string (CAD)
     acb_of_disposed     TEXT    NOT NULL,   -- Decimal string (CAD)
+    selling_fees        TEXT    NOT NULL,   -- Decimal string (CAD) — Schedule 3 col 4
     gain_loss           TEXT    NOT NULL,   -- Decimal string (CAD, negative = loss)
-    acb_per_unit_after  TEXT    NOT NULL,   -- Decimal string (CAD)
-    pool_units_after    TEXT    NOT NULL,   -- Decimal string
-    pool_cost_after     TEXT    NOT NULL    -- Decimal string (CAD)
+    disposition_type    TEXT    NOT NULL,   -- 'sell','trade','spend','fee_disposal'
+    year_acquired       TEXT    NOT NULL,   -- e.g. "2024" or "Various"
+    acb_per_unit_before TEXT    NOT NULL,   -- Decimal string (CAD) — before this disposal
+    pool_units_before   TEXT    NOT NULL,   -- Decimal string — before this disposal
+    pool_cost_before    TEXT    NOT NULL,   -- Decimal string (CAD) — before this disposal
+    acb_per_unit_after  TEXT    NOT NULL,   -- Decimal string (CAD) — after this disposal
+    pool_units_after    TEXT    NOT NULL,   -- Decimal string — after this disposal
+    pool_cost_after     TEXT    NOT NULL    -- Decimal string (CAD) — after this disposal
 )
 """
 
+# ── Gap 6 fix ─────────────────────────────────────────────────────────────────
+# Changed FK target from dispositions(id) to classified_events(id) so that
+# pool snapshots can be recorded after acquisitions (buys) as well as disposals.
+# Renamed disposition_id → event_id to match the new reference.
 _ACB_STATE_DDL = """
 CREATE TABLE IF NOT EXISTS acb_state (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    disposition_id  INTEGER REFERENCES dispositions(id),
+    event_id        INTEGER REFERENCES classified_events(id),
     asset           TEXT    NOT NULL,
     pool_cost       TEXT    NOT NULL,   -- Decimal string (CAD)
     units           TEXT    NOT NULL,   -- Decimal string
@@ -164,6 +207,12 @@ CREATE TABLE IF NOT EXISTS acb_state (
 )
 """
 
+# ── Gap 5 fix ─────────────────────────────────────────────────────────────────
+# Added: is_superficial_loss  (explicit boolean flag — don't derive from denied != 0)
+#        allowable_loss        (the portion of loss that IS allowed after denial)
+#        adjusted_gain_loss    (final reportable gain/loss — what goes on Schedule 3)
+# Carried forward from dispositions (report stage reads this table, not dispositions):
+#        selling_fees, disposition_type, year_acquired
 _DISPOSITIONS_ADJUSTED_DDL = """
 CREATE TABLE IF NOT EXISTS dispositions_adjusted (
     id                          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -173,9 +222,15 @@ CREATE TABLE IF NOT EXISTS dispositions_adjusted (
     units                       TEXT    NOT NULL,   -- Decimal string
     proceeds                    TEXT    NOT NULL,   -- Decimal string (CAD)
     acb_of_disposed             TEXT    NOT NULL,   -- Decimal string (CAD)
-    gain_loss                   TEXT    NOT NULL,   -- Decimal string (CAD)
+    selling_fees                TEXT    NOT NULL,   -- Decimal string (CAD)
+    gain_loss                   TEXT    NOT NULL,   -- Decimal string (CAD, pre-adjustment)
+    is_superficial_loss         INTEGER NOT NULL DEFAULT 0,  -- 1 if rule applies
     superficial_loss_denied     TEXT    NOT NULL DEFAULT '0',  -- Decimal string (CAD)
-    adjusted_acb_of_repurchase  TEXT                -- Decimal string or NULL
+    allowable_loss              TEXT    NOT NULL DEFAULT '0',  -- Decimal string (CAD)
+    adjusted_gain_loss          TEXT    NOT NULL,   -- Decimal string (CAD) — Schedule 3 col 5
+    adjusted_acb_of_repurchase  TEXT,               -- Decimal string or NULL
+    disposition_type            TEXT    NOT NULL,   -- carried from dispositions
+    year_acquired               TEXT    NOT NULL    -- carried from dispositions
 )
 """
 
@@ -192,6 +247,24 @@ CREATE TABLE IF NOT EXISTS audit_log (
 )
 """
 
+# ── Gap 8 fix ─────────────────────────────────────────────────────────────────
+# New table: income events (staking rewards, airdrops, mining).
+# These establish ACB (at FMV when received) and are reported separately on
+# TP-21.4.39-V Part 6 and Schedule G. They also appear in classified_events
+# as acquisitions so the ACB engine picks them up.
+_INCOME_EVENTS_DDL = """
+CREATE TABLE IF NOT EXISTS income_events (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    vtx_id          INTEGER REFERENCES verified_transactions(id),
+    timestamp       TEXT    NOT NULL,   -- ISO 8601 UTC
+    asset           TEXT    NOT NULL,   -- e.g. "BTC"
+    units           TEXT    NOT NULL,   -- Decimal string (amount received)
+    income_type     TEXT    NOT NULL,   -- 'staking', 'airdrop', 'mining', 'other'
+    fmv_cad         TEXT    NOT NULL,   -- Decimal string — taxable income AND ACB established
+    source          TEXT    NOT NULL    -- origin platform/wallet
+)
+"""
+
 _ALL_DDL: Final[tuple[str, ...]] = (
     _BATCH_META_DDL,
     _SCHEMA_VERSION_DDL,
@@ -204,6 +277,7 @@ _ALL_DDL: Final[tuple[str, ...]] = (
     _DISPOSITIONS_DDL,
     _ACB_STATE_DDL,
     _DISPOSITIONS_ADJUSTED_DDL,
+    _INCOME_EVENTS_DDL,
     _AUDIT_LOG_DDL,
 )
 
