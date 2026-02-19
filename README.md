@@ -6,7 +6,7 @@ Calculates capital gains, ACB, and superficial losses from exchange and wallet
 transaction exports. Produces Schedule 3, Schedule G, and the Quebec
 TP-21.4.39-V form.
 
-**Supported sources:** Shakepay, NDAX, Sparrow Wallet, Koinly
+Import formats for major Canadian exchanges and wallets are planned.
 
 ---
 
