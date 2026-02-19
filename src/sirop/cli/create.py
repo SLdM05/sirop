@@ -8,7 +8,7 @@ the new batch as the active batch.
 import re
 import sqlite3
 from datetime import UTC, datetime
-from importlib.metadata import version as pkg_version
+from importlib.metadata import PackageNotFoundError, version as pkg_version
 from pathlib import Path
 
 from sirop.config.settings import Settings, get_settings
@@ -32,7 +32,7 @@ def _infer_year(name: str) -> int | None:
 def _sirop_version() -> str:
     try:
         return pkg_version("sirop")
-    except Exception:  # pkg not installed in dev editable install
+    except PackageNotFoundError:
         return "0.1.0"
 
 
