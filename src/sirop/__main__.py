@@ -11,6 +11,9 @@ argument parsing and dispatch — no business logic.
 import argparse
 import sys
 
+from sirop.cli.create import handle_create
+from sirop.cli.list_batches import handle_list
+from sirop.cli.switch import handle_switch
 from sirop.utils.logging import configure_logging
 
 
@@ -55,18 +58,12 @@ def main() -> None:
     configure_logging(verbose=args.verbose, debug=args.debug)
 
     if args.command == "create":
-        from sirop.cli.create import handle_create
-
         sys.exit(handle_create(args.name, args.year))
 
     elif args.command == "list":
-        from sirop.cli.list_batches import handle_list
-
         sys.exit(handle_list())
 
     elif args.command == "switch":
-        from sirop.cli.switch import handle_switch
-
         sys.exit(handle_switch(args.name))
 
     else:
