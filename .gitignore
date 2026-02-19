@@ -8,6 +8,7 @@ data/
 !data/.gitkeep
 output/
 .node_cache/
+*.sirop
 
 # ── CSV files (exchanges/wallets export sensitive financial data) ─────────────
 *.csv

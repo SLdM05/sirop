@@ -8,9 +8,13 @@ version = "0.1.0"
 description = "Canadian/Quebec crypto tax calculator"
 packages = [{include = "sirop", from = "src"}]
 
+[tool.poetry.scripts]
+sirop = "sirop.__main__:main"
+
 [tool.poetry.dependencies]
 python = "^3.12"
 pyyaml = "^6.0"
+pydantic-settings = "^2.0"
 
 [tool.poetry.group.dev.dependencies]
 ruff = "^0.8"
@@ -45,3 +49,7 @@ packages = ["sirop"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--strict-markers -v"
+markers = [
+    "slow: marks tests that call external APIs or node",
+    "integration: marks tests requiring a live Bitcoin node",
+]

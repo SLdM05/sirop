@@ -17,7 +17,7 @@ logger = get_logger(__name__)
 
 # Around each pipeline stage:
 from sirop.utils.logging import StageContext
-with StageContext(batch_id=batch.id, stage="normalize"):
+with StageContext(batch_id="my2025tax", stage="normalize"):
     logger.info("Checking sap levels...")
 """
 
@@ -95,6 +95,9 @@ class SensitiveDataFilter(logging.Filter):
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
+        # getMessage() interpolates % args into the format string first,
+        # so the full message is available for redaction. Clearing args
+        # afterwards prevents double-interpolation by the formatter.
         record.msg = _redact(record.getMessage())
         record.args = ()
         return True
@@ -104,8 +107,8 @@ class _ContextInjectFilter(logging.Filter):
     """Injects batch_id and stage from ContextVars into every log record."""
 
     def filter(self, record: logging.LogRecord) -> bool:
-        record.batch_id = _ctx_batch_id.get()  # type: ignore[attr-defined]
-        record.stage = _ctx_stage.get()  # type: ignore[attr-defined]
+        record.batch_id = _ctx_batch_id.get()
+        record.stage = _ctx_stage.get()
         return True
 
 
@@ -217,7 +220,7 @@ class StageContext:
 
     Example
     -------
-    with StageContext(batch_id=batch.id, stage="normalize"):
+    with StageContext(batch_id="my2025tax", stage="normalize"):
         normalizer.run(...)   # all logs inside carry batch_id and stage
     """
 
