@@ -13,6 +13,7 @@ db_path = settings.data_dir / "my2025tax.sirop"
 """
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -37,7 +38,7 @@ class Settings(BaseSettings):
 
     # ── Bitcoin node ──────────────────────────────────────────────────────────
 
-    btc_node_backend: str = "mempool"  # "rpc" or "mempool"
+    btc_node_backend: Literal["rpc", "mempool"] = "mempool"
     btc_rpc_url: str = "http://127.0.0.1:8332"
     btc_rpc_user: str = ""
     btc_rpc_password: str = ""
