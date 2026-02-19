@@ -67,10 +67,9 @@ _RE_CAD_AMOUNT = re.compile(
 )
 
 
-def _redact_cad_match(m: re.Match[str]) -> str:
-    """Replacement function for _RE_CAD_AMOUNT: keeps the keyword, redacts the number."""
-    prefix = m.group(0).split(m.group(1))[0]
-    return prefix + m.group(1) + " [amount redacted]"
+def _redact_cad(m: re.Match[str]) -> str:
+    """Keep the tax keyword, replace the amount."""
+    return f"{m.group(1)} [amount redacted]"
 
 
 def _redact(message: str) -> str:
@@ -78,13 +77,14 @@ def _redact(message: str) -> str:
     message = _RE_TXID.sub("[txid redacted]", message)
     message = _RE_ADDRESS.sub("[address redacted]", message)
     message = _RE_BTC_AMOUNT.sub("[amount redacted]", message)
-    message = _RE_CAD_AMOUNT.sub(_redact_cad_match, message)
+    message = _RE_CAD_AMOUNT.sub(_redact_cad, message)
     return message
 
 
 # ──────────────────────────────────────────────────────────────
 # Filters
 # ──────────────────────────────────────────────────────────────
+
 
 class SensitiveDataFilter(logging.Filter):
     """Redacts PII from log messages when not in verbose mode.
@@ -116,14 +116,6 @@ class _ContextInjectFilter(logging.Filter):
 # Formatters
 # ──────────────────────────────────────────────────────────────
 
-_FMT_INFO = (
-    "[sirop]{stage_part} {levelname_part}{message}"
-)
-
-_FMT_DEBUG = (
-    "[sirop][{levelname}] {name_short}  {message}"
-)
-
 
 class _SiropFormatter(logging.Formatter):
     """Human-readable formatter with optional stage context prefix."""
@@ -151,6 +143,7 @@ class _SiropFormatter(logging.Formatter):
 # ──────────────────────────────────────────────────────────────
 # Public API
 # ──────────────────────────────────────────────────────────────
+
 
 def configure_logging(*, verbose: bool = False, debug: bool = False) -> None:
     """Configure sirop logging. Call exactly once at CLI entry.
@@ -216,6 +209,7 @@ def get_logger(name: str) -> logging.Logger:
 # ──────────────────────────────────────────────────────────────
 # Stage context manager
 # ──────────────────────────────────────────────────────────────
+
 
 class StageContext:
     """Context manager that injects batch_id and stage into all log records.
