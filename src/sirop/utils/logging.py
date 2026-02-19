@@ -56,14 +56,12 @@ _RE_ADDRESS = re.compile(r"\b(bc1[a-z0-9]{6,87}|[13][a-zA-Z0-9]{25,34})\b")
 
 # BTC amounts: up to 8 decimal places, optionally preceded/followed by BTC/btc
 _RE_BTC_AMOUNT = re.compile(
-    r"\b\d{1,10}\.\d{1,8}\s*(BTC|btc)\b"
-    r"|\b(BTC|btc)\s*\d{1,10}\.\d{1,8}\b"
+    r"\b\d{1,10}\.\d{1,8}\s*(BTC|btc)\b" r"|\b(BTC|btc)\s*\d{1,10}\.\d{1,8}\b"
 )
 
 # CAD amounts near tax keywords (proceeds, acb, gain, loss, fee, value, rate)
 _RE_CAD_AMOUNT = re.compile(
-    r"(?i)(proceeds|acb|gain|loss|fee|value|rate|cad|amount)[^\d$]{0,10}"
-    r"\$?\s*\d[\d,]*\.?\d*"
+    r"(?i)(proceeds|acb|gain|loss|fee|value|rate|cad|amount)[^\d$]{0,10}" r"\$?\s*\d[\d,]*\.?\d*"
 )
 
 
