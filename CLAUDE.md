@@ -76,7 +76,7 @@ Read these before making changes:
 - **Poetry** for dependency management and virtualenv (`pyproject.toml`)
 - `decimal.Decimal` for all money (never float)
 - Bank of Canada Valet API for FX rates (no key required)
-- SQLite via `sqlite3` (stdlib) for batch-scoped pipeline persistence (`sirop.db`)
+- SQLite via `sqlite3` (stdlib) for pipeline persistence (one `.sirop` file per batch)
 - Bitcoin Core RPC or Mempool REST API for node verification
 - `ruff` for linting and formatting
 - `mypy` for static type checking
@@ -101,6 +101,19 @@ name, prose. Never `Sirop`.
 
 Sub-commands and flags use plain descriptive names. The theme lives at the
 top level only.
+
+### Batch management commands
+
+These are utility commands, not pipeline verbs — no maple theme.
+
+| Command | Purpose |
+|---------|---------|
+| `create <name>` | Create a new `.sirop` batch file and set it as active |
+| `list` | List all batches in `DATA_DIR`, mark the active one |
+| `switch <name>` | Change the active batch |
+
+Batch names should embed the tax year so it can be inferred automatically
+(`my2025tax` → 2025). Pass `--year YYYY` to override inference.
 
 ### Two registers — strict separation
 
@@ -155,10 +168,10 @@ Rules for module boundaries:
 - **Engine** performs pure calculations. It receives typed dataclasses and
   returns typed results. It never reads files, calls APIs, accesses config,
   or imports from `src/db/` — all dependencies are injected.
-- **db/** is the exclusive interface to `sirop.db`. No other module reads from
-  or writes to SQLite directly. `db/` knows nothing about tax rules or business
-  logic — it only serializes and deserializes dataclasses to rows, and wraps
-  every stage write in a single SQLite transaction.
+- **db/** is the exclusive interface to `.sirop` batch files. No other module
+  reads from or writes to SQLite directly. `db/` knows nothing about tax rules
+  or business logic — it only serializes and deserializes dataclasses to rows,
+  and wraps every stage write in a single SQLite transaction.
 - **Reports** take calculated results and format them for output. They know
   about form field names and line numbers but never about how the numbers
   were computed.
@@ -277,28 +290,30 @@ Rules for privacy:
 
 ## Database and Persistence Layer
 
-All pipeline state is persisted in a single SQLite file: `sirop.db` (path
-configurable via `DATA_DIR` in `.env`). The database is the single source of
-truth between pipeline stages — no in-memory lists are passed between stage
-boundaries.
+Each **batch** is a self-contained SQLite file with a `.sirop` extension, stored
+in `DATA_DIR` (configured in `.env`, default `./data`). The active batch is
+tracked in `DATA_DIR/.active`. The file is the single source of truth between
+pipeline stages — no in-memory lists are passed between stage boundaries.
+
+A `.sirop` file is plain SQLite — rename it `.db` to open it in any SQLite
+browser.
 
 ### Batch model
 
-A **batch** is one person's one tax year (e.g. "Alice — 2025"). Multiple
-batches coexist in the same `sirop.db`. Every pipeline table row carries a
-`batch_id` foreign key. The TUI presents a batch switcher; all queries filter
-by the active `batch_id`. This is how two people's taxes stay isolated in one
-file.
+A **batch** is one person's one tax year (e.g. `my2025tax`). Each batch is an
+isolated `.sirop` file. There are no `batch_id` columns — isolation is achieved
+by having a separate database per batch. This means files are portable: you can
+hand `my2025tax.sirop` to your accountant or archive it independently.
 
-### sirop.db schema
+### .sirop file schema
 
-**Metadata**
+**Metadata** (written once at `sirop create` time)
 
 | Table | Key columns | Purpose |
 |-------|-------------|---------|
-| `batches` | id, name, tax_year, owner, created_at | One row per person/year |
+| `batch_meta` | name, tax_year, created_at, sirop_version | Single-row batch identity |
 | `schema_version` | version, applied_at | Single-row migration guard — bump on schema changes |
-| `stage_status` | batch_id, stage, status, completed_at, error | Pipeline state machine per batch |
+| `stage_status` | stage, status, completed_at, error | Pipeline state machine |
 
 `stage_status.status` values: `pending` | `running` | `done` | `invalidated`
 
@@ -308,7 +323,7 @@ file.
 |-------|-------------|---------|
 | `boc_rates` | date, currency_pair, rate, fetched_at | BoC daily rates — fetched once per date, never re-fetched |
 
-**Pipeline tables** (all rows carry `batch_id`)
+**Pipeline tables**
 
 | Table | Written by | Maps to |
 |-------|------------|---------|
@@ -324,7 +339,7 @@ file.
 
 | Table | Key columns | Purpose |
 |-------|-------------|---------|
-| `audit_log` | batch_id, stage, txid, field, old_value, new_value, reason | Every field-level override (node verification, manual corrections). CRA 6-year retention. |
+| `audit_log` | stage, txid, field, old_value, new_value, reason | Every field-level override (node verification, manual corrections). CRA 6-year retention. |
 
 ### `classified_events` — what it contains
 
@@ -343,7 +358,7 @@ in this table, it does not affect ACB or capital gains.
 
 All DB reads and writes are mediated by this module. The contract:
 
-- **Before a stage runs**: repository reads rows filtered by `batch_id`,
+- **Before a stage runs**: repository reads rows from the active `.sirop` file,
   deserializes them to typed dataclasses, and passes them to the stage
 - **After a stage runs**: repository serializes the returned dataclasses to
   rows and writes them in a **single SQLite transaction** — if the write fails,
@@ -355,7 +370,7 @@ All DB reads and writes are mediated by this module. The contract:
 
 Re-running stage N for a batch:
 
-1. Delete that stage's output rows for `batch_id`
+1. Delete that stage's output rows from the active `.sirop` file
 2. Mark all downstream stages as `invalidated` in `stage_status`
 
 The pipeline coordinator checks `stage_status` before each stage:
@@ -368,10 +383,12 @@ generation without re-tapping source files.
 
 ### TUI data access
 
-The TUI reads `sirop.db` directly for live display — it never re-runs pipeline
-stages. It queries: `stage_status` (progress view), `classified_events`
-(transaction browser), `dispositions_adjusted` (gains/losses view), `acb_state`
-(ACB state viewer), and `batches` (batch switcher).
+The TUI reads the active `.sirop` file directly for live display — it never
+re-runs pipeline stages. It queries: `stage_status` (progress view),
+`classified_events` (transaction browser), `dispositions_adjusted`
+(gains/losses view), `acb_state` (ACB state viewer), and `batch_meta`
+(batch info header). The batch switcher uses `sirop switch` to change
+`DATA_DIR/.active`, then reloads.
 
 ---
 
@@ -393,7 +410,7 @@ logger = get_logger(__name__)  # becomes sirop.<module_name>
 
 # Pipeline coordinator, around each stage:
 from crypto_tax_tool.utils.logging import StageContext
-with StageContext(batch_id=batch.id, stage="normalize"):
+with StageContext(batch_id="my2025tax", stage="normalize"):
     ...  # all logs inside carry batch_id and stage automatically
 ```
 
@@ -475,7 +492,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["crypto_tax_tool"]
+known-first-party = ["sirop"]
 
 [tool.ruff.format]
 quote-style = "double"
@@ -540,8 +557,8 @@ Rules for testing:
 ## Data Flow Convention
 
 Data flows through typed dataclasses between stages. Each stage boundary is
-persisted to `sirop.db` via the repository layer. No raw dicts, no in-memory
-lists passed across stage boundaries.
+persisted to the active `.sirop` file via the repository layer. No raw dicts,
+no in-memory lists passed across stage boundaries.
 
 ```
 CSV file(s)
@@ -562,8 +579,9 @@ CSV file(s)
 dataclasses only. It has no knowledge of files, databases, APIs, or config.
 The repository layer handles all serialization around it.
 
-Each `[repo write]` is a single atomic SQLite transaction. If it fails, the
-stage output is rolled back and `stage_status` is not updated to `done`.
+Each `[repo write]` is a single atomic SQLite transaction inside the `.sirop`
+file. If it fails, the stage output is rolled back and `stage_status` is not
+updated to `done`.
 
 ---
 

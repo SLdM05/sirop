@@ -27,26 +27,27 @@ flowchart TD
 
     %% ═══════════════════════════════════════════
     %% BATCH CONTEXT
-    %% One batch = one person's tax year (e.g. "Alice — 2025").
-    %% Multiple batches coexist in sirop.db.
+    %% One batch = one person's one tax year (e.g. "my2025tax").
+    %% Each batch is a separate .sirop file in DATA_DIR.
+    %% Active batch tracked in DATA_DIR/.active.
     %% ═══════════════════════════════════════════
 
-    BATCH[/"Active batch<br/><i>e.g. Alice — 2025</i>"/]:::batch
+    BATCH[/"Active batch<br/><i>e.g. my2025tax.sirop</i>"/]:::batch
 
-    subgraph SIROPDB ["  sirop.db  (SQLite — single file, one per user)"]
+    subgraph SIROPDB ["  my2025tax.sirop  (SQLite — one file per batch)"]
         direction TB
 
-        subgraph DBMETA ["  Metadata  "]
-            T_BATCH[("batches<br/><i>id · name · tax_year · owner · created_at</i>")]:::dbmeta
+        subgraph DBMETA ["  Metadata (written once at sirop create)  "]
+            T_BATCH[("batch_meta<br/><i>name · tax_year · created_at · sirop_version</i><br/><i>single row</i>")]:::dbmeta
             T_SCHEMA[("schema_version<br/><i>version · applied_at</i>")]:::dbmeta
-            T_STATUS[("stage_status<br/><i>batch_id · stage · status · completed_at · error</i><br/><i>status: pending | running | done | invalidated</i>")]:::dbmeta
+            T_STATUS[("stage_status<br/><i>stage · status · completed_at · error</i><br/><i>status: pending | running | done | invalidated</i>")]:::dbmeta
         end
 
         subgraph DBCACHE ["  Cached External Data  "]
             T_BOC[("boc_rates<br/><i>date · currency_pair · rate · fetched_at</i>")]:::dbtable
         end
 
-        subgraph DBPIPE ["  Pipeline Tables (all rows carry batch_id)  "]
+        subgraph DBPIPE ["  Pipeline Tables  "]
             T_RAW[("raw_transactions<br/><i>models/raw.py → rows</i>")]:::dbtable
             T_TX[("transactions<br/><i>models/transaction.py → rows</i>")]:::dbtable
             T_VTX[("verified_transactions<br/><i>models/verified.py → rows</i>")]:::dbtable
@@ -61,7 +62,7 @@ flowchart TD
         end
     end
 
-    BATCH --> T_BATCH
+    BATCH -->|"opens"| T_BATCH
 
     %% ═══════════════════════════════════════════
     %% REPOSITORY LAYER
@@ -81,7 +82,7 @@ flowchart TD
     %% and marks all downstream stages as 'invalidated' in stage_status.
     %% ═══════════════════════════════════════════
 
-    INVAL["Re-run any stage →<br/><i>delete that stage's rows for batch_id</i><br/><i>mark all downstream stages: invalidated</i><br/><i>pipeline resumes cleanly from that point</i>"]:::repo
+    INVAL["Re-run any stage →<br/><i>delete that stage's rows from .sirop file</i><br/><i>mark all downstream stages: invalidated</i><br/><i>pipeline resumes cleanly from that point</i>"]:::repo
     T_STATUS <-->|"cascade"| INVAL
 
     %% ═══════════════════════════════════════════
