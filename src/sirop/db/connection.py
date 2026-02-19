@@ -18,17 +18,39 @@ finally:
     conn.close()
 """
 
+import re
 import sqlite3
 from pathlib import Path
+from typing import Final
 
 from sirop.config.settings import Settings
+
+# Batch names must start with a letter or digit and contain only alphanumerics,
+# underscores, and hyphens. Max 64 chars. This prevents path traversal
+# (e.g. "../../../tmp/attack") and shell-special characters.
+_BATCH_NAME_RE: Final[re.Pattern[str]] = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
+
+
+def _validate_batch_name(name: str) -> None:
+    """Raise ValueError if name contains path-traversal or invalid characters."""
+    if not _BATCH_NAME_RE.fullmatch(name):
+        raise ValueError(
+            f"Invalid batch name {name!r}. "
+            "Use only letters, digits, underscores, and hyphens (1-64 chars)."
+        )
 
 
 def get_batch_path(name: str, settings: Settings) -> Path:
     """Return the filesystem path for a named batch file.
 
     Does not check whether the file exists.
+
+    Raises
+    ------
+    ValueError
+        If *name* contains path-traversal sequences or invalid characters.
     """
+    _validate_batch_name(name)
     return settings.data_dir / f"{name}.sirop"
 
 
@@ -69,7 +91,14 @@ def get_active_batch_name(settings: Settings) -> str | None:
 
 
 def set_active_batch(name: str, settings: Settings) -> None:
-    """Write the active batch name to DATA_DIR/.active."""
+    """Write the active batch name to DATA_DIR/.active.
+
+    Raises
+    ------
+    ValueError
+        If *name* contains path-traversal sequences or invalid characters.
+    """
+    _validate_batch_name(name)
     active_file = settings.data_dir / ".active"
     active_file.write_text(name, encoding="utf-8")
 

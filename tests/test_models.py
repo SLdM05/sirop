@@ -228,7 +228,7 @@ def test_disposition_is_frozen() -> None:
 
 def _make_adjusted(is_superficial: bool = False) -> AdjustedDisposition:
     denied = Decimal("1990.00") if is_superficial else Decimal("0")
-    allowable = Decimal("0") if is_superficial else Decimal("0")
+    allowable = Decimal("0") if is_superficial else Decimal("1990.00")
     adjusted = Decimal("0") if is_superficial else Decimal("1990.00")
     return AdjustedDisposition(
         id=1,
