@@ -53,6 +53,7 @@ Read these before making changes:
 - `docs/ref/tui-design-guidelines.md` — TUI layout, widget design, keyboard bindings, and phase roadmap
 - `docs/ref/data-pipeline.mermaid` — Visual diagram of all 7 pipeline stages and data models
 - `docs/ref/sirop-language-guide.md` — Tool name, CLI verbs, message vocabulary, and the two-register rule
+- `docs/ref/security-input-hardening.md` — Security rules for every pipeline boundary: SQL parameterization, batch name validation, YAML loading, node API responses, logging redaction
 
 ## Key Rules (quick reference)
 
