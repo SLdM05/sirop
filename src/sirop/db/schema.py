@@ -14,7 +14,7 @@ from typing import Final
 
 # Bump this when the schema changes. The migration guard reads this value
 # and refuses to open a file whose schema_version doesn't match.
-SCHEMA_VERSION: Final[int] = 2
+SCHEMA_VERSION: Final[int] = 3
 
 # All pipeline stage names in execution order.
 PIPELINE_STAGES: Final[tuple[str, ...]] = (
@@ -64,6 +64,15 @@ CREATE TABLE IF NOT EXISTS boc_rates (
     rate            TEXT    NOT NULL,   -- Decimal string
     fetched_at      TEXT    NOT NULL,   -- ISO 8601 UTC
     PRIMARY KEY (date, currency_pair)
+)
+"""
+
+_CUSTOM_IMPORTERS_DDL = """
+CREATE TABLE IF NOT EXISTS custom_importers (
+    name         TEXT    PRIMARY KEY,
+    source_name  TEXT    NOT NULL,
+    yaml_config  TEXT    NOT NULL,      -- full YAML stored verbatim
+    embedded_at  TEXT    NOT NULL       -- ISO 8601 UTC
 )
 """
 
@@ -270,6 +279,7 @@ _ALL_DDL: Final[tuple[str, ...]] = (
     _SCHEMA_VERSION_DDL,
     _STAGE_STATUS_DDL,
     _BOC_RATES_DDL,
+    _CUSTOM_IMPORTERS_DDL,
     _RAW_TRANSACTIONS_DDL,
     _TRANSACTIONS_DDL,
     _VERIFIED_TRANSACTIONS_DDL,
