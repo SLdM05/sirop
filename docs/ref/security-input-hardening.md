@@ -115,8 +115,9 @@ from untrusted YAML.
 
 ## 4. Importer `date_format` — Validate Before Use in `strptime`
 
-**Status:** Importer YAML loading not yet implemented. This rule applies when
-it is.
+**Status:** Implemented. `load_importer_config()` in
+`src/sirop/importers/base.py` calls `_validate_date_format()` before returning
+the config. Any disallowed token raises ``InvalidCSVFormatError`` at load time.
 
 **Rule:** The `date_format` field in importer YAML configs must be validated
 against an allowlist of strptime tokens before being passed to
@@ -226,7 +227,7 @@ Use this when reviewing any new pipeline module:
 - [ ] All SQL uses `?` placeholders — no f-strings, `.format()`, or `%` in queries
 - [ ] Batch names pass through `_validate_batch_name()` before filesystem use
 - [ ] YAML loaded with `yaml.safe_load()` and parsed through a pydantic schema
-- [ ] `date_format` validated against the strptime allowlist before use
+- [x] `date_format` validated against the strptime allowlist before use
 - [ ] Node API responses validated for shape, types, and txid match
 - [ ] Log calls pass values as arguments, not pre-formatted strings
 - [ ] Test fixtures use fake data only
