@@ -125,9 +125,9 @@ def test_btc_buy_rate_is_consistent(transactions: list[RawTransaction]) -> None:
         assert tx.rate is not None
         assert tx.fiat_value is not None
         expected_rate = tx.fiat_value / tx.amount
-        assert abs(tx.rate - expected_rate) < Decimal(
-            "0.01"
-        ), f"Rate mismatch on {tx.timestamp}: {tx.rate} vs {expected_rate}"
+        assert abs(tx.rate - expected_rate) < Decimal("0.01"), (
+            f"Rate mismatch on {tx.timestamp}: {tx.rate} vs {expected_rate}"
+        )
 
 
 def test_earliest_btc_buy(transactions: list[RawTransaction]) -> None:

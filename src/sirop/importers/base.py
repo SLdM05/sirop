@@ -133,8 +133,7 @@ class BaseImporter(ABC):
                 dt = datetime.strptime(value, self._config.date_format)
         except ValueError as exc:
             raise InvalidCSVFormatError(
-                f"Cannot parse timestamp {value!r} "
-                f"(format: {self._config.date_format!r}): {exc}"
+                f"Cannot parse timestamp {value!r} (format: {self._config.date_format!r}): {exc}"
             ) from exc
 
         if dt.tzinfo is None:
