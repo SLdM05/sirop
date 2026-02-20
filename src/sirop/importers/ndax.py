@@ -23,14 +23,21 @@ TYPE uses a "PRIMARY / SECONDARY" notation, e.g.:
 
 Rows with a secondary type of "FEE" are extracted from the group and used
 to populate ``fee_amount`` / ``fee_currency`` on the resulting transaction.
+
+Which primary TYPE values route to which parsing strategy is driven by the
+``group_handlers`` key in ``config/importers/ndax.yaml``.  No primary TYPE
+strings are hardcoded in this module.
 """
 
 import logging
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from typing import Any
 
-from sirop.importers.base import BaseImporter, InvalidCSVFormatError
+import yaml
+
+from sirop.importers.base import BaseImporter, InvalidCSVFormatError, load_importer_config
 from sirop.models.importer import ImporterConfig
 from sirop.models.raw import RawTransaction
 
@@ -39,8 +46,14 @@ logger = logging.getLogger(__name__)
 # Secondary TYPE suffix that marks a fee row.
 _FEE_SUFFIX = "fee"
 
-# Number of crypto legs that indicates a crypto-to-crypto trade.
-_CRYPTO_CRYPTO_LEG_COUNT = 2
+# Handler strategy names — internal Python concepts, not exchange-specific strings.
+# Must match the keys used in the ``group_handlers`` section of ndax.yaml.
+_HANDLER_SINGLE = "single"
+_HANDLER_TRADE = "trade"
+_HANDLER_DUST = "dust"
+
+# A non-fiat-to-non-fiat trade produces exactly two main rows (one per side).
+_NON_FIAT_TRADE_LEG_COUNT = 2
 
 
 class NDAXImporter(BaseImporter):
@@ -48,12 +61,11 @@ class NDAXImporter(BaseImporter):
 
     def __init__(self, config: ImporterConfig) -> None:
         super().__init__(config)
-        # ASSET_CLASS value that identifies fiat rows — comes from the YAML
-        # via a non-standard key.  We read it from the raw YAML through the
-        # extra data attached to the config name comment; since ImporterConfig
-        # doesn't carry arbitrary extras we store it separately.
-        # The YAML loader sets this before constructing the importer.
-        self._fiat_asset_class: str = "FIAT"  # overridden by from_yaml()
+        # ASSET_CLASS value that identifies fiat rows — overridden by from_yaml().
+        self._fiat_asset_class: str = "FIAT"
+        # Maps lowercased primary TYPE string → handler strategy name.
+        # Populated from the ``group_handlers`` section of the YAML by from_yaml().
+        self._type_to_handler: dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # Public
@@ -62,14 +74,15 @@ class NDAXImporter(BaseImporter):
     @classmethod
     def from_yaml(cls, yaml_path: Path) -> "NDAXImporter":
         """Construct an ``NDAXImporter`` from a YAML config file."""
-        import yaml
-
-        raw: dict[str, object] = yaml.safe_load(yaml_path.read_text())
-        from sirop.importers.base import load_importer_config
-
+        raw: dict[str, Any] = yaml.safe_load(yaml_path.read_text())
         config = load_importer_config(yaml_path, source_name=yaml_path.stem)
         importer = cls(config)
         importer._fiat_asset_class = str(raw.get("fiat_asset_class", "FIAT"))
+
+        for handler_name, primary_types in raw.get("group_handlers", {}).items():
+            for pt in primary_types:
+                importer._type_to_handler[str(pt)] = str(handler_name)
+
         return importer
 
     def parse(self, csv_path: Path) -> list[RawTransaction]:
@@ -119,7 +132,6 @@ class NDAXImporter(BaseImporter):
             if not raw_ts:
                 continue
             # Truncate to second: "2025-05-30T14:38:02.586Z" → "2025-05-30T14:38:02Z"
-            # Works for ISO 8601 with or without fractional seconds.
             if "." in raw_ts:
                 second_key = raw_ts[: raw_ts.index(".")] + "Z"
             else:
@@ -147,30 +159,22 @@ class NDAXImporter(BaseImporter):
         if not main_rows:
             return None
 
-        # Parse the timestamp from the first main row.
         timestamp = self._parse_timestamp(main_rows[0][cols["date"]])
-
-        # Determine the primary type of this group.
         primary, _ = self._split_type(main_rows[0][cols["type"]])
         raw_type_full = main_rows[0][cols["type"]].strip().lower()
-
-        # Extract fee info from any fee rows.
         fee_amount, fee_currency = self._extract_fee(fee_rows)
 
-        # Route to the appropriate handler.
+        # Dispatch to the handler strategy configured in ndax.yaml.
+        handler = self._type_to_handler.get(primary)
         result: RawTransaction | None
-        if primary in {"deposit", "withdraw"}:
+        if handler == _HANDLER_SINGLE:
             result = self._parse_single(
                 main_rows[0], timestamp, fee_amount, fee_currency, raw_type_full
             )
-        elif primary == "trade":
+        elif handler == _HANDLER_TRADE:
             result = self._parse_trade(main_rows, timestamp, fee_amount, fee_currency)
-        elif primary == "dust":
+        elif handler == _HANDLER_DUST:
             result = self._parse_dust(main_rows, timestamp, fee_amount, fee_currency)
-        elif primary == "staking":
-            result = self._parse_staking(
-                main_rows[0], timestamp, fee_amount, fee_currency, raw_type_full
-            )
         else:
             logger.warning(
                 "ndax: unrecognised TYPE %r in group %s — skipping",
@@ -195,43 +199,39 @@ class NDAXImporter(BaseImporter):
         fiat_class = self._fiat_asset_class
 
         fiat_rows = [r for r in rows if r[cols["asset_class"]].strip() == fiat_class]
-        crypto_rows = [r for r in rows if r[cols["asset_class"]].strip() != fiat_class]
+        non_fiat_rows = [r for r in rows if r[cols["asset_class"]].strip() != fiat_class]
 
-        if not crypto_rows:
-            logger.warning("ndax: TRADE group has no crypto rows — skipping")
+        if not non_fiat_rows:
+            logger.warning("ndax: TRADE group has no non-fiat rows — skipping")
             return None
 
-        if len(crypto_rows) == _CRYPTO_CRYPTO_LEG_COUNT and not fiat_rows:
-            # Crypto-to-crypto (e.g. SOL → BTC via DUST or direct trade).
-            return self._parse_crypto_crypto_trade(crypto_rows, timestamp, fee_amount, fee_currency)
+        if len(non_fiat_rows) == _NON_FIAT_TRADE_LEG_COUNT and not fiat_rows:
+            # Both legs are non-fiat (e.g. SOL → BTC via DUST or direct trade).
+            return self._parse_non_fiat_trade(non_fiat_rows, timestamp, fee_amount, fee_currency)
 
-        if len(crypto_rows) != 1 or not fiat_rows:
+        if len(non_fiat_rows) != 1 or not fiat_rows:
             logger.warning(
-                "ndax: unexpected TRADE row count (crypto=%d fiat=%d) — skipping",
-                len(crypto_rows),
+                "ndax: unexpected TRADE row count (non_fiat=%d fiat=%d) — skipping",
+                len(non_fiat_rows),
                 len(fiat_rows),
             )
             return None
 
-        crypto_row = crypto_rows[0]
+        non_fiat_row = non_fiat_rows[0]
         fiat_row = fiat_rows[0]
 
-        asset = crypto_row[cols["asset"]].strip()
+        asset = non_fiat_row[cols["asset"]].strip()
         fiat_currency_code = fiat_row[cols["asset"]].strip()
-        crypto_amount = self._parse_amount(crypto_row[cols["amount"]], asset)
+        non_fiat_amount = self._parse_amount(non_fiat_row[cols["amount"]], asset)
         fiat_amount = self._parse_amount(fiat_row[cols["amount"]], fiat_currency_code)
 
-        # Determine direction: positive crypto amount = buy; negative = sell.
-        # The fiat amount has the opposite sign (negative on buy, positive on sell).
-        if crypto_amount > 0:
-            # Buy: fiat_value is what was spent (we store it as a positive).
-            fiat_value = abs(fiat_amount)
-        else:
-            # Sell: fiat_value is what was received.
-            fiat_value = abs(fiat_amount)
-            crypto_amount = abs(crypto_amount)
+        # Positive non-fiat amount = buy; negative = sell.
+        # fiat_value is always stored as a positive (what was spent or received).
+        fiat_value = abs(fiat_amount)
+        if non_fiat_amount < 0:
+            non_fiat_amount = abs(non_fiat_amount)
 
-        rate = (fiat_value / crypto_amount) if crypto_amount else None
+        rate = (fiat_value / non_fiat_amount) if non_fiat_amount else None
 
         tx_type = self._lookup_type("trade")
         return RawTransaction(
@@ -239,7 +239,7 @@ class NDAXImporter(BaseImporter):
             timestamp=timestamp,
             transaction_type=tx_type,
             asset=asset,
-            amount=crypto_amount,
+            amount=non_fiat_amount,
             amount_currency=asset,
             fiat_value=fiat_value,
             fiat_currency=fiat_currency_code,
@@ -248,18 +248,18 @@ class NDAXImporter(BaseImporter):
             rate=rate,
             spot_rate=None,
             txid=None,
-            raw_type=crypto_row[cols["type"]].strip().lower(),
-            raw_row=crypto_row,
+            raw_type=non_fiat_row[cols["type"]].strip().lower(),
+            raw_row=non_fiat_row,
         )
 
-    def _parse_crypto_crypto_trade(
+    def _parse_non_fiat_trade(
         self,
         rows: list[dict[str, str]],
         timestamp: datetime,
         fee_amount: Decimal | None,
         fee_currency: str | None,
     ) -> RawTransaction | None:
-        """Handle a trade where both sides are crypto (e.g. SOL → BTC)."""
+        """Handle a trade where both sides are non-fiat assets (e.g. SOL → BTC)."""
         cols = self._config.columns
 
         # Received asset has a positive AMOUNT; sent asset has a negative AMOUNT.
@@ -267,7 +267,7 @@ class NDAXImporter(BaseImporter):
         sent = next((r for r in rows if self._parse_amount(r[cols["amount"]], "") < 0), None)
 
         if not received or not sent:
-            logger.warning("ndax: crypto-to-crypto TRADE group missing a leg — skipping")
+            logger.warning("ndax: non-fiat TRADE group missing a leg — skipping")
             return None
 
         received_asset = received[cols["asset"]].strip()
@@ -310,7 +310,7 @@ class NDAXImporter(BaseImporter):
         fee_currency: str | None,
         raw_type_full: str,
     ) -> RawTransaction | None:
-        """Handle DEPOSIT and WITHDRAW rows (single-row groups)."""
+        """Handle single-row groups: deposits, withdrawals, and staking events."""
         cols = self._config.columns
 
         asset = row[cols["asset"]].strip()
@@ -321,13 +321,12 @@ class NDAXImporter(BaseImporter):
             return None  # skip zero-amount rows
 
         is_fiat = asset_class == self._fiat_asset_class
-
         primary, _ = self._split_type(row[cols["type"]])
 
         if is_fiat:
             tx_type = self._lookup_type(
                 "fiat_deposit" if primary == "deposit" else "fiat_withdrawal"
-            ) or ("fiat_deposit" if primary == "deposit" else "fiat_withdrawal")
+            )
             return RawTransaction(
                 source=self._config.source_name,
                 timestamp=timestamp,
@@ -346,8 +345,12 @@ class NDAXImporter(BaseImporter):
                 raw_row=row,
             )
         else:
-            tx_type = self._lookup_type(primary)
-            # TX_ID may be an on-chain txid for crypto withdrawals; leave it
+            # Try the full type string first (e.g. "staking / reward" → "income"),
+            # then fall back to the primary part alone (e.g. "deposit" → "deposit").
+            tx_type = self._config.transaction_type_map.get(raw_type_full) or self._lookup_type(
+                primary
+            )
+            # TX_ID may be an on-chain txid for non-fiat withdrawals; leave it
             # as-is and let the normalizer validate it.
             txid_value = row[cols["tx_id"]].strip() or None
             return RawTransaction(
@@ -411,42 +414,6 @@ class NDAXImporter(BaseImporter):
             txid=None,
             raw_type=received[cols["type"]].strip().lower(),
             raw_row=primary_row,
-        )
-
-    def _parse_staking(
-        self,
-        row: dict[str, str],
-        timestamp: datetime,
-        fee_amount: Decimal | None,
-        fee_currency: str | None,
-        raw_type_full: str,
-    ) -> RawTransaction | None:
-        """Handle STAKING rows (REWARD, DEPOSIT, REFUND)."""
-        cols = self._config.columns
-
-        asset = row[cols["asset"]].strip()
-        amount = abs(self._parse_amount(row[cols["amount"]], asset))
-
-        if amount == Decimal("0"):
-            return None
-
-        tx_type = self._lookup_type(raw_type_full) or self._lookup_type("staking") or "income"
-        return RawTransaction(
-            source=self._config.source_name,
-            timestamp=timestamp,
-            transaction_type=tx_type,
-            asset=asset,
-            amount=amount,
-            amount_currency=asset,
-            fiat_value=None,
-            fiat_currency=None,
-            fee_amount=fee_amount,
-            fee_currency=fee_currency,
-            rate=None,
-            spot_rate=None,
-            txid=None,
-            raw_type=raw_type_full,
-            raw_row=row,
         )
 
     # ------------------------------------------------------------------

@@ -33,5 +33,17 @@ transaction_type_map:
   "staking / deposit": "transfer_out"
   "staking / refund": "transfer_in"
 fee_model: "explicit"
-# ASSET_CLASS value that identifies fiat rows.  Any other value is crypto.
+# ASSET_CLASS value that identifies fiat rows.  Any other value is non-fiat.
 fiat_asset_class: "FIAT"
+# Maps parsing strategy names (internal Python concepts) to the primary TYPE
+# values from the NDAX export that trigger each strategy.  Adding a new TYPE
+# here — rather than in Python — is sufficient to route it to the right handler.
+group_handlers:
+  single:
+    - deposit
+    - withdraw
+    - staking
+  trade:
+    - trade
+  dust:
+    - dust
