@@ -12,6 +12,8 @@ output/
 
 # ── CSV files (exchanges/wallets export sensitive financial data) ─────────────
 *.csv
+# Allow synthetic test fixtures (no real personal data)
+!tests/fixtures/*.csv
 
 
 # ── Python build artifacts ───────────────────────────────────────────────────
