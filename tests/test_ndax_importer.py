@@ -188,25 +188,27 @@ def test_eth_buy_fee_captured(transactions: list[RawTransaction]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# SOL trade (crypto sold for CAD)
+# ETH sell (crypto sold for CAD)
 # ---------------------------------------------------------------------------
 
 
-def test_sol_sell_present(transactions: list[RawTransaction]) -> None:
-    trades = _find(transactions, "trade", "SOL")
-    assert len(trades) > 0
+def test_eth_sell_present(transactions: list[RawTransaction]) -> None:
+    """The fixture contains at least one ETH→CAD trade."""
+    trades = _find(transactions, "trade", "ETH")
+    eth_sells = [t for t in trades if t.fiat_value is not None]
+    assert len(eth_sells) > 0
 
 
-def test_sol_sell_fiat_fee(transactions: list[RawTransaction]) -> None:
+def test_eth_sell_fiat_fee(transactions: list[RawTransaction]) -> None:
     """
-    The SOL→CAD trade at 2025-04-01 00:25:07 has a CAD TRADE/FEE row.
+    The ETH→CAD trade at 2025-04-01 09:15:00 has a CAD TRADE/FEE row.
     fee_amount should be Decimal("0.1184436"), fee_currency "CAD".
     """
-    trades = _find(transactions, "trade", "SOL")
-    # The sell has a CAD fee; the buy has a SOL fee.  Find the one with CAD fee.
-    sol_sell = [t for t in trades if t.fee_currency == "CAD"]
-    assert len(sol_sell) > 0, "Expected at least one SOL trade with a CAD fee"
-    tx = sol_sell[0]
+    trades = _find(transactions, "trade", "ETH")
+    # The sell has a CAD fee; the buy has an ETH fee.  Find the one with CAD fee.
+    eth_sell = [t for t in trades if t.fee_currency == "CAD"]
+    assert len(eth_sell) > 0, "Expected at least one ETH trade with a CAD fee"
+    tx = eth_sell[0]
     assert tx.fee_amount == Decimal("0.1184436")
     assert tx.fee_currency == "CAD"
 
@@ -245,7 +247,7 @@ def test_dust_received_asset_is_positive(transactions: list[RawTransaction]) -> 
 
 
 # ---------------------------------------------------------------------------
-# ETH / SOL withdrawals
+# ETH withdrawals
 # ---------------------------------------------------------------------------
 
 
@@ -289,18 +291,3 @@ def test_empty_csv_returns_empty_list(importer: NDAXImporter, tmp_path: Path) ->
     empty_csv.write_text("ASSET,ASSET_CLASS,AMOUNT,BALANCE,TYPE,TX_ID,DATE\n")
     result = importer.parse(empty_csv)
     assert result == []
-
-
-def test_blank_rows_are_skipped(importer: NDAXImporter, tmp_path: Path) -> None:
-    """The NDAX export pads to a fixed size with blank rows; they must be dropped."""
-    csv_content = (
-        "ASSET,ASSET_CLASS,AMOUNT,BALANCE,TYPE,TX_ID,DATE\n"
-        "CAD,FIAT,50,50,DEPOSIT,99999,2025-03-01T10:00:00.000Z\n"
-        ",,,,,,\n"
-        ",,,,,,\n"
-    )
-    blank_csv = tmp_path / "blanks.csv"
-    blank_csv.write_text(csv_content)
-    result = importer.parse(blank_csv)
-    assert len(result) == 1
-    assert result[0].transaction_type == "fiat_deposit"

@@ -232,6 +232,10 @@ Rules for config:
   only — zero code changes
 - Config files are validated at startup against a schema; fail fast on
   missing or invalid keys
+- `date_format` values are validated against an allowlist of permitted strptime
+  tokens before use (see `security-input-hardening.md §4`). Only tokens
+  actually needed by the four supported importers are permitted — anything else
+  raises `InvalidCSVFormatError` at load time, not at first parse attempt.
 
 ### 3. Privacy-First / Public-Repo Safe
 
@@ -589,6 +593,9 @@ updated to `done`.
 ## Conventions Summary
 
 - `Decimal` for money, always. `float` in a financial calculation is a bug.
+- `format(d, 'f')` to serialize any `Decimal` to a DB TEXT column. `str(Decimal)`
+  is banned for storage — computed values produce scientific notation (`"1.2419E+5"`,
+  `"1.0E-7"`) that is unreadable and non-canonical.
 - UTC internally. Convert to `America/Toronto` only in final report display.
 - Pathlib for all file paths. No string concatenation for paths.
 - f-strings for formatting. No `%` or `.format()`.

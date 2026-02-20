@@ -4,7 +4,7 @@ import csv
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import yaml
 
@@ -29,6 +29,62 @@ class InvalidCSVFormatError(ImporterError):
 
 
 # ---------------------------------------------------------------------------
+# strptime format allowlist  (security-input-hardening.md §4)
+# ---------------------------------------------------------------------------
+
+# Only tokens actually used by the four supported importers are permitted.
+# Any other token would either silently mis-parse dates or accept garbage input.
+_ALLOWED_STRPTIME_TOKENS: Final[frozenset[str]] = frozenset(
+    {
+        "%Y",
+        "%m",
+        "%d",  # date parts
+        "%H",
+        "%M",
+        "%S",  # time parts
+        "%f",  # microseconds
+        "%z",  # UTC offset  (+0000 / +00:00 / Z)
+        "%Z",  # timezone name
+        "-",
+        "T",
+        ":",
+        ".",
+        " ",
+        "+",  # separators / offset sign
+    }
+)
+
+
+def _validate_date_format(fmt: str) -> None:
+    """Raise ``InvalidCSVFormatError`` if *fmt* contains disallowed strptime tokens.
+
+    The sentinel value ``"iso8601"`` is always accepted (handled separately by
+    ``_parse_timestamp`` via ``datetime.fromisoformat``).
+    """
+    if fmt == "iso8601":
+        return
+    remaining = fmt
+    while remaining:
+        if remaining.startswith("%"):
+            token = remaining[:2]
+            if token not in _ALLOWED_STRPTIME_TOKENS:
+                raise InvalidCSVFormatError(
+                    f"date_format contains disallowed strptime token {token!r}. "
+                    f"Allowed tokens: {sorted(_ALLOWED_STRPTIME_TOKENS)}"
+                )
+            remaining = remaining[2:]
+        else:
+            char = remaining[0]
+            if char not in _ALLOWED_STRPTIME_TOKENS:
+                raise InvalidCSVFormatError(
+                    f"date_format contains disallowed character {char!r}. "
+                    f"Allowed separators: "
+                    f"{sorted(c for c in _ALLOWED_STRPTIME_TOKENS if not c.startswith('%'))}"
+                )
+            remaining = remaining[1:]
+
+
+# ---------------------------------------------------------------------------
 # Config loader
 # ---------------------------------------------------------------------------
 
@@ -48,11 +104,14 @@ def load_importer_config(yaml_path: Path, source_name: str | None = None) -> Imp
 
     fiat_currencies: tuple[str, ...] = tuple(str(c) for c in raw.get("fiat_currencies", []))
 
+    date_format = str(raw["date_format"])
+    _validate_date_format(date_format)  # fail fast on disallowed tokens
+
     return ImporterConfig(
         name=str(raw["name"]),
         source_name=source_name,
         date_column=str(raw["date_column"]),
-        date_format=str(raw["date_format"]),
+        date_format=date_format,
         columns={str(k): str(v) for k, v in raw["columns"].items()},
         transaction_type_map={str(k): str(v) for k, v in raw["transaction_type_map"].items()},
         fee_model=str(raw["fee_model"]),
@@ -100,8 +159,11 @@ class BaseImporter(ABC):
             reader = csv.DictReader(fh)
             rows = []
             for row in reader:
-                # Skip blank rows (all values are empty strings)
-                if all(v.strip() == "" for v in row.values()):
+                # Skip blank rows (all string values are empty).
+                # csv.DictReader places overflow columns under a None key with a
+                # list value — guard with isinstance so we never call .strip() on
+                # a list and crash on malformed/wide CSV files.
+                if all(isinstance(v, str) and not v.strip() for v in row.values()):
                     continue
                 rows.append(dict(row))
         return rows
@@ -133,8 +195,7 @@ class BaseImporter(ABC):
                 dt = datetime.strptime(value, self._config.date_format)
         except ValueError as exc:
             raise InvalidCSVFormatError(
-                f"Cannot parse timestamp {value!r} "
-                f"(format: {self._config.date_format!r}): {exc}"
+                f"Cannot parse timestamp {value!r} (format: {self._config.date_format!r}): {exc}"
             ) from exc
 
         if dt.tzinfo is None:

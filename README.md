@@ -23,6 +23,11 @@ cp .env.example .env   # fill in your values
 
 ## Documentation
 
+See [`docs/usage/`](docs/usage/) for CLI usage guides:
+
+- [Batch management — create, list, switch](docs/usage/sirop-create.md)
+- [tap — import exchange transactions](docs/usage/sirop-tap.md)
+
 See [`docs/ref/`](docs/ref/) for full reference material:
 
 - [Tax rules and ACB formulas](docs/ref/crypto-tax-reference-quebec-2025.md)
