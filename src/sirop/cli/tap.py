@@ -171,20 +171,25 @@ def _write_to_batch(batch_name: str, settings: Settings, txs: list[RawTransactio
                 "(another process?). Aborting."
             )
 
+        # format(d, 'f') forces fixed-point notation for every Decimal before
+        # it reaches the DB.  str(Decimal) is non-deterministic: division
+        # results and very small values produce scientific notation
+        # (e.g. "1.2419E+5", "1.0E-7") which is unreadable in DB Browser and
+        # breaks any downstream code that expects plain numeric strings.
         db_rows = [
             (
                 tx.source,
                 tx.timestamp.isoformat(),
                 tx.transaction_type,
                 tx.asset,
-                str(tx.amount),
+                format(tx.amount, "f"),
                 tx.amount_currency,
-                str(tx.fee_amount) if tx.fee_amount is not None else None,
+                format(tx.fee_amount, "f") if tx.fee_amount is not None else None,
                 tx.fee_currency,
-                str(tx.fiat_value) if tx.fiat_value is not None else None,
+                format(tx.fiat_value, "f") if tx.fiat_value is not None else None,
                 tx.fiat_currency,
-                str(tx.rate) if tx.rate is not None else None,
-                str(tx.spot_rate) if tx.spot_rate is not None else None,
+                format(tx.rate, "f") if tx.rate is not None else None,
+                format(tx.spot_rate, "f") if tx.spot_rate is not None else None,
                 tx.txid,
                 json.dumps(tx.raw_row),
             )
