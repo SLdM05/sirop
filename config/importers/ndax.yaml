@@ -47,3 +47,15 @@ group_handlers:
     - trade
   dust:
     - dust
+# Minimal set of CSV column names that uniquely identify this exchange's export.
+# Used by FormatDetector for auto-detection and --source validation.
+# Deliberately uses all 7 columns because NDAX headers are all-uppercase and
+# distinctive — no other supported exchange shares this exact header set.
+fingerprint_columns:
+  - "ASSET"
+  - "ASSET_CLASS"
+  - "AMOUNT"
+  - "BALANCE"
+  - "TYPE"
+  - "TX_ID"
+  - "DATE"
