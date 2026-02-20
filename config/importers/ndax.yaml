@@ -1,0 +1,37 @@
+name: "NDAX"
+# NDAX ledger export (AlphaPoint APEX platform).
+# Export via Reports → Create Report → CSV → Ledgers report type.
+#
+# The format uses a SIGNED AMOUNT column (positive = credit, negative = debit).
+# There is no explicit transaction-group column; the importer groups rows that
+# share the same timestamp (truncated to the second) as a single transaction.
+date_column: "DATE"
+# "iso8601" is a sentinel: the importer uses datetime.fromisoformat() instead
+# of strptime, which handles the trailing Z and fractional seconds natively.
+date_format: "iso8601"
+columns:
+  asset: "ASSET"
+  asset_class: "ASSET_CLASS"
+  amount: "AMOUNT"
+  balance: "BALANCE"
+  type: "TYPE"
+  tx_id: "TX_ID"
+  date: "DATE"
+# TYPE field uses "PRIMARY / SECONDARY" notation (e.g. "TRADE / FEE").
+# Keys are the normalized full type string (lowercased).  The importer looks
+# up the full type first, then falls back to the primary part only.
+# Rows whose secondary part is "FEE" are separated out as fee entries before
+# this lookup is done.
+transaction_type_map:
+  "trade": "trade"
+  "deposit": "deposit"
+  "withdraw": "withdrawal"
+  "dust": "other"
+  "dust / in": "other"
+  "dust / out": "other"
+  "staking / reward": "income"
+  "staking / deposit": "transfer_out"
+  "staking / refund": "transfer_in"
+fee_model: "explicit"
+# ASSET_CLASS value that identifies fiat rows.  Any other value is crypto.
+fiat_asset_class: "FIAT"

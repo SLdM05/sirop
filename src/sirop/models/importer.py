@@ -20,3 +20,9 @@ class ImporterConfig:
     columns: dict[str, str]  # internal key → CSV column header
     transaction_type_map: dict[str, str]  # raw CSV value → TransactionType value
     fee_model: str  # "spread" | "explicit"
+    # Ledger-style importers (e.g. NDAX AlphaPoint) group multiple rows per
+    # transaction by this column.  Row-per-transaction importers leave it None.
+    group_by_column: str | None = None
+    # Currencies that are fiat (not crypto).  Used by ledger importers to
+    # distinguish fiat deposits/withdrawals from crypto ones.
+    fiat_currencies: tuple[str, ...] = ()
