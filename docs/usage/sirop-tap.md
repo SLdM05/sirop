@@ -177,7 +177,7 @@ error: batch 'my2025tax' already has tap data.
 
 ```
 $ sirop create my2025tax
-Tapped a new batch: my2025tax (2025) → data/my2025tax.sirop
+Created batch: my2025tax (2025) → data/my2025tax.sirop
 
 $ sirop tap ~/Downloads/ndax_2025_ledger.csv
 Detected format: NDAX

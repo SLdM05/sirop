@@ -66,7 +66,7 @@ works anywhere in the name:
 
 ```
 $ sirop create my2025tax
-Tapped a new batch: my2025tax (2025) → data/my2025tax.sirop
+Created batch: my2025tax (2025) → data/my2025tax.sirop
 ```
 
 ### Error cases
@@ -79,7 +79,7 @@ $ sirop create mytaxes
 error: cannot infer tax year from 'mytaxes'. Pass --year YYYY.
 
 $ sirop create mytaxes --year 2025
-Tapped a new batch: mytaxes (2025) → data/mytaxes.sirop
+Created batch: mytaxes (2025) → data/mytaxes.sirop
 ```
 
 ---

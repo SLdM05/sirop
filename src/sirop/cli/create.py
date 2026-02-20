@@ -90,8 +90,8 @@ def handle_create(
     set_active_batch(name, settings)
 
     rel = _relative(batch_path)
-    print(f"Tapped a new batch: {name} ({resolved_year}) → {rel}")
-    logger.info(f"Tapped a new batch: {name} ({resolved_year}) → {rel}")
+    print(f"Created batch: {name} ({resolved_year}) → {rel}")
+    logger.info(f"Created batch: {name} ({resolved_year}) → {rel}")
     return 0
 
 
