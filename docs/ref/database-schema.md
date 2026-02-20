@@ -22,9 +22,9 @@ PRAGMA foreign_keys=ON;     -- enforce referential integrity
 
 ## Storage conventions
 
-| Type | SQLite affinity | Reason |
+| Type | SQLite affinity | Rule |
 |---|---|---|
-| Money (`Decimal`) | `TEXT` | Avoids float precision loss — stored as exact decimal string e.g. `"1234.56"` |
+| Money (`Decimal`) | `TEXT` | Serialize with `format(d, 'f')` — **never** `str(d)`. `str()` on computed Decimals produces scientific notation (`"1.2419E+5"`, `"1.0E-7"`) which is unreadable and non-canonical. `format(d, 'f')` always gives fixed-point: `"124190"`, `"0.00000010"`. |
 | Timestamps | `TEXT` | ISO 8601 UTC, e.g. `"2025-03-15T12:00:00+00:00"` |
 | Booleans | `INTEGER` | `0` = false, `1` = true |
 | Optional fields | nullable column | `NULL` when not applicable |
@@ -45,7 +45,7 @@ open and refuses to process a file whose version does not match the current
 `SCHEMA_VERSION` constant in `db/schema.py`. Bump `SCHEMA_VERSION` whenever
 the schema changes.
 
-Current version: **2**
+Current version: **3**
 
 ---
 
@@ -482,3 +482,4 @@ that need a batch (and weren't given one explicitly) read this file first.
 |---|---|
 | 1 | Initial schema |
 | 2 | `raw_transactions`: added `amount_currency`, `fiat_currency`, `spot_rate`. `transactions`/`verified_transactions`: renamed `fee` → `fee_crypto`, added `is_transfer`, `counterpart_id`, `notes`. `verified_transactions`: added `block_height`, `confirmations`. `classified_events`: added `source`. `dispositions`: added `selling_fees`, `disposition_type`, `year_acquired`, full before/after ACB pool state. `acb_state`: FK target changed from `dispositions` to `classified_events`, column renamed `disposition_id` → `event_id`. `dispositions_adjusted`: added `selling_fees`, `is_superficial_loss`, `allowable_loss`, `adjusted_gain_loss`, `disposition_type`, `year_acquired`. New table: `income_events`. |
+| 3 | New table: `custom_importers` — stores user-supplied importer YAML configs inside the batch file so a `.sirop` file is self-contained and portable. |

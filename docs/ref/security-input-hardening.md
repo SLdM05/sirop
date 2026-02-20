@@ -183,7 +183,41 @@ checking catches any future literal addition that isn't handled.
 
 ---
 
-## 7. Logging — Never Log Unredacted Sensitive Values by Default
+## 7. CSV Parsing — Guard Against Malformed Row Width
+
+**Status:** Implemented in `src/sirop/importers/base.py` — `_read_csv()`.
+
+**Rule:** Never call `.strip()` (or any string method) on a value from
+`csv.DictReader` without first confirming it is a `str`.
+
+`csv.DictReader` places overflow columns (more values than headers) into the
+row dict under a `None` key as a `list[str]`. Calling `.strip()` on that list
+raises `AttributeError` and crashes the import on any malformed or
+wide-format CSV file.
+
+**Banned pattern:**
+
+```python
+# WRONG — crashes with AttributeError when row has more columns than headers
+if all(v.strip() == "" for v in row.values()):
+    ...
+```
+
+**Correct pattern:**
+
+```python
+# RIGHT — isinstance guard prevents .strip() on list values
+if all(isinstance(v, str) and not v.strip() for v in row.values()):
+    ...
+```
+
+The `isinstance` check short-circuits for non-`str` values (the overflow
+list), so they are treated as non-empty and the row is never incorrectly
+skipped.
+
+---
+
+## 8. Logging — Never Log Unredacted Sensitive Values by Default
 
 The `SensitiveDataFilter` in `src/sirop/utils/logging.py` redacts txids,
 addresses, and amounts in all log output by default. New log calls must not
@@ -203,7 +237,7 @@ message string. The filter operates on `record.args`, not on pre-built strings.
 
 ---
 
-## 8. Test Fixtures — Fake Data Only
+## 9. Test Fixtures — Fake Data Only
 
 No real txids, addresses, xpubs, amounts, or exchange account identifiers may
 appear in test fixtures, test parametrize lists, or comments.
@@ -229,5 +263,6 @@ Use this when reviewing any new pipeline module:
 - [ ] YAML loaded with `yaml.safe_load()` and parsed through a pydantic schema
 - [x] `date_format` validated against the strptime allowlist before use
 - [ ] Node API responses validated for shape, types, and txid match
+- [x] CSV row values guarded with `isinstance(v, str)` before calling string methods
 - [ ] Log calls pass values as arguments, not pre-formatted strings
 - [ ] Test fixtures use fake data only
