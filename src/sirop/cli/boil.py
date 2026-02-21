@@ -17,6 +17,8 @@ Usage
 
 from __future__ import annotations
 
+import sqlite3
+from decimal import Decimal
 from pathlib import Path
 
 import yaml
@@ -127,9 +129,7 @@ def _execute_stage(
     tax_rules: TaxRules,
 ) -> None:
     """Execute a single pipeline stage wrapped in StageContext."""
-    import sqlite3 as _sqlite3
-
-    assert isinstance(conn, _sqlite3.Connection)
+    assert isinstance(conn, sqlite3.Connection)
 
     with StageContext(batch_id=batch_name, stage=stage):
         repo.set_stage_running(conn, stage)
@@ -153,9 +153,7 @@ def _execute_stage(
 
 
 def _run_normalize(conn: object) -> None:
-    import sqlite3 as _sql
-
-    assert isinstance(conn, _sql.Connection)
+    assert isinstance(conn, sqlite3.Connection)
 
     logger.info("Checking sap levels...")
     raw_txs = repo.read_raw_transactions(conn)
@@ -169,9 +167,7 @@ def _run_normalize(conn: object) -> None:
 
 
 def _run_verify(conn: object) -> None:
-    import sqlite3 as _sql
-
-    assert isinstance(conn, _sql.Connection)
+    assert isinstance(conn, sqlite3.Connection)
 
     logger.info("verify: promoting transactions to verified (pass-through — no node)")
     count = repo.promote_to_verified(conn)
@@ -179,9 +175,7 @@ def _run_verify(conn: object) -> None:
 
 
 def _run_transfer_match(conn: object) -> None:
-    import sqlite3 as _sql
-
-    assert isinstance(conn, _sql.Connection)
+    assert isinstance(conn, sqlite3.Connection)
 
     logger.info("Tracing the flow...")
     txs = repo.read_transactions(conn)
@@ -198,9 +192,7 @@ def _run_transfer_match(conn: object) -> None:
 
 
 def _run_acb(conn: object, tax_rules: TaxRules) -> None:
-    import sqlite3 as _sql
-
-    assert isinstance(conn, _sql.Connection)
+    assert isinstance(conn, sqlite3.Connection)
 
     logger.info("Boiling the sap...")
     events = repo.read_classified_events(conn)
@@ -212,9 +204,7 @@ def _run_acb(conn: object, tax_rules: TaxRules) -> None:
 
 
 def _run_superficial_loss(conn: object, tax_rules: TaxRules) -> None:
-    import sqlite3 as _sql
-
-    assert isinstance(conn, _sql.Connection)
+    assert isinstance(conn, sqlite3.Connection)
 
     logger.info("superficial_loss: scanning for 61-day window violations")
     disps = repo.read_dispositions(conn)
@@ -227,8 +217,6 @@ def _run_superficial_loss(conn: object, tax_rules: TaxRules) -> None:
 
 def _load_tax_rules() -> TaxRules:
     """Load ``config/tax_rules.yaml`` and return a ``TaxRules`` dataclass."""
-    from decimal import Decimal
-
     if not _TAX_RULES_PATH.exists():
         raise _BoilError(
             f"error: tax rules config not found at {_TAX_RULES_PATH}. "
@@ -251,9 +239,7 @@ def _should_run(conn: object, stage: str, from_stage: str | None) -> bool:
     - If ``--from`` was given, run all stages from that stage onward.
     - Otherwise, run only stages that are not ``done``.
     """
-    import sqlite3 as _sql
-
-    assert isinstance(conn, _sql.Connection)
+    assert isinstance(conn, sqlite3.Connection)
 
     status = repo.get_stage_status(conn, stage)
 
@@ -269,9 +255,7 @@ def _should_run(conn: object, stage: str, from_stage: str | None) -> bool:
 
 def _check_not_running(conn: object, stage: str, batch_name: str) -> None:
     """Raise _BoilError if *stage* is currently marked as running."""
-    import sqlite3 as _sql
-
-    assert isinstance(conn, _sql.Connection)
+    assert isinstance(conn, sqlite3.Connection)
 
     status = repo.get_stage_status(conn, stage)
     if status == "running":
@@ -296,9 +280,7 @@ def _stages_from(from_stage: str) -> tuple[str, ...]:
 
 def _print_summary(conn: object, batch_name: str) -> None:
     """Print a summary of row counts written to the batch."""
-    import sqlite3 as _sql
-
-    assert isinstance(conn, _sql.Connection)
+    assert isinstance(conn, sqlite3.Connection)
 
     def _count(table: str) -> int:
         row = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()  # noqa: S608

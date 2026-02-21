@@ -1,0 +1,11 @@
+Transaction Type,Date,Amount Debited,Debit Currency,Amount Credited,Credit Currency,Buy / Sell Rate,Direction,Spot Rate,Source / Destination,Blockchain Transaction ID
+fiat funding,2025-01-01T10:00:00+00,,,500.00,CAD,,credit,,,
+purchase/sale,2025-01-02T11:00:00+00,250.00,CAD,0.00405049,BTC,61720.90,purchase,,,
+purchase/sale,2025-01-03T12:00:00+00,0.00100000,BTC,145.00,CAD,145000.00,debit,,,
+crypto cashout,2025-01-04T13:00:00+00,0.00405049,BTC,,,,debit,61027.76,bc1qfakeaddressfortesting,aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd
+crypto purchase,2025-01-05T14:00:00+00,,,0.01000000,BTC,,credit,,,bbbbccccbbbbccccbbbbccccbbbbccccbbbbccccbbbbccccbbbbccccbbbbcccc
+shakingsats,2025-01-06T15:00:00+00,,,0.00001500,BTC,,credit,,,
+peer transfer,2025-01-07T16:00:00+00,,,0.00010000,BTC,,credit,,friend@example.com,
+other,2025-01-08T17:00:00+00,,,10.00,CAD,,credit,,referral_program,
+fiat cashout,2025-01-09T18:00:00+00,200.00,CAD,,,,debit,,,
+mystery_reward,2025-01-10T19:00:00+00,,,5.00,CAD,,credit,,,

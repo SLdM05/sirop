@@ -86,7 +86,7 @@ def run(
         if adj.is_superficial_loss:
             sld_count += 1
             logger.warning(
-                "superficial_loss: %s loss of %s on %s is superficial — " "denied %s, allowable %s",
+                "superficial_loss: %s loss of %s on %s is superficial — denied %s, allowable %s",
                 disp.asset,
                 disp.gain_loss_cad,
                 disp.timestamp.date(),
