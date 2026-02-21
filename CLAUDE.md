@@ -109,57 +109,14 @@ and cross-source transfer matching logic for Shakepay ↔ Sparrow.
 
 ## Language and Naming
 
-The tool is `sirop`. Lowercase everywhere — package name, CLI binary, module
-name, prose. Never `Sirop`.
+The tool is `sirop` (lowercase always). CLI verbs: `tap` (import), `boil` (calculate),
+`pour` (export), `grade` (status), `verify`. Batch commands (no theme): `create`, `list`, `switch`.
 
-### CLI verbs (top-level commands)
+**Strict two-register rule:** maple theme in CLI chrome (output, logs, TUI); zero personality
+in tax output (Schedule 3, Schedule G, TP-21.4.39-V, audit logs, any file leaving the tool).
+Never mix registers in the same sentence. Numbers are never flavoured.
 
-| Verb | Replaces | Purpose |
-|------|----------|---------|
-| `tap` | import | Read raw transaction files |
-| `boil` | calculate / process | Run the full pipeline |
-| `pour` | export / generate | Produce tax report outputs |
-| `grade` | summarize / status | Show gains, losses, ACB state |
-| `verify` | verify | Node verification (plain name is clear enough) |
-
-Sub-commands and flags use plain descriptive names. The theme lives at the
-top level only.
-
-### Batch management commands
-
-These are utility commands, not pipeline verbs — no maple theme.
-
-| Command | Purpose |
-|---------|---------|
-| `create <name>` | Create a new `.sirop` batch file and set it as active |
-| `list` | List all batches in `DATA_DIR`, mark the active one |
-| `switch <name>` | Change the active batch |
-
-Batch names should embed the tax year so it can be inferred automatically
-(`my2025tax` → 2025). Pass `--year YYYY` to override inference.
-
-### Two registers — strict separation
-
-**In-app chrome** (personality on): CLI output, progress messages, status
-bars, log lines, TUI headers/footers. Use the maple metaphor where it fits
-naturally. Keep it dry — one well-placed word beats forced whimsy.
-
-**Tax output** (personality off): anything in Schedule 3, Schedule G,
-TP-21.4.39-V, audit logs, or any file leaving the tool. Zero personality.
-Standard accounting vocabulary only. If the form says "Proceeds of
-disposition," the tool says "Proceeds of disposition."
-
-**Never mix registers in the same sentence.**
-
-### Key rules
-
-- Errors: clear and actionable first, flavour second. Never let the metaphor
-  obscure what went wrong.
-- Numbers are never flavoured. `$4,209.23` is `$4,209.23`.
-- When inventing new language, ask: does the sugarbush give a better word than
-  the generic one? If yes, use it. If not, use plain language.
-
-See `docs/ref/sirop-language-guide.md` for the full vocabulary and examples.
+Full vocabulary, verb definitions, and examples: `docs/ref/sirop-language-guide.md`
 
 ---
 
@@ -278,39 +235,11 @@ hand `my2025tax.sirop` to your accountant or archive it independently.
 
 ### .sirop file schema
 
-**Metadata** (written once at `sirop create` time)
+Full table definitions and column specs: `docs/ref/database-schema.md`
 
-| Table | Key columns | Purpose |
-|-------|-------------|---------|
-| `batch_meta` | name, tax_year, created_at, sirop_version | Single-row batch identity |
-| `schema_version` | version, applied_at | Single-row migration guard — bump on schema changes |
-| `stage_status` | stage, status, completed_at, error | Pipeline state machine |
-
-`stage_status.status` values: `pending` | `running` | `done` | `invalidated`
-
-**Cached external data**
-
-| Table | Key columns | Purpose |
-|-------|-------------|---------|
-| `boc_rates` | date, currency_pair, rate, fetched_at | BoC daily rates — fetched once per date, never re-fetched |
-
-**Pipeline tables**
-
-| Table | Written by | Maps to |
-|-------|------------|---------|
-| `raw_transactions` | tap (import) | `models/raw.py` |
-| `transactions` | normalize | `models/transaction.py` |
-| `verified_transactions` | verify | `models/verified.py` |
-| `classified_events` | transfer matching | See note below |
-| `dispositions` | boil (ACB engine) | `models/disposition.py` |
-| `acb_state` | boil (ACB engine) | asset, pool_cost, units, snapshot_date |
-| `dispositions_adjusted` | superficial loss detection | adjusted dispositions |
-
-**Audit**
-
-| Table | Key columns | Purpose |
-|-------|-------------|---------|
-| `audit_log` | stage, txid, field, old_value, new_value, reason | Every field-level override (node verification, manual corrections). CRA 6-year retention. |
+Key tables: `batch_meta`, `schema_version`, `stage_status` (values: `pending` | `running` | `done` | `invalidated`),
+`boc_rates`, `raw_transactions`, `transactions`, `verified_transactions`, `classified_events`,
+`dispositions`, `acb_state`, `dispositions_adjusted`, `audit_log`.
 
 ### `classified_events` — what it contains
 
@@ -454,17 +383,7 @@ Default: `SensitiveDataFilter` replaces in every log message:
 
 `--verbose`: redaction bypassed; warning banner printed once.
 
-**What each layer logs:**
-
-| Module | INFO | WARNING | DEBUG |
-|--------|------|---------|-------|
-| Importers | _(none — tap result goes via emit())_ | Missing fields, unknown tx types | Each parsed row |
-| Normalizer | `"Checking sap levels..."` (BoC fetch) | Missing rates, unusual types | Each BoC rate, each field converted |
-| Node verifier | `"Verifying on-chain..."` | `"Node unreachable — running without on-chain verification."`, discrepancies | Raw API fields, before/after overrides |
-| Transfer matcher | `"Tracing the flow..."`, row counts | Unmatched withdrawals/deposits | Window checks |
-| ACB engine (PURE) | — | — | ACB state before/after each event |
-| SLD engine (PURE) | — | — | Each 61-day window check |
-| Repository | — | Schema version mismatch | Every SQL query |
+Per-module log message guidelines: `docs/ref/logging-spec.md`
 
 ---
 
@@ -500,20 +419,7 @@ Data flows through typed dataclasses between stages. Each stage boundary is
 persisted to the active `.sirop` file via the repository layer. No raw dicts,
 no in-memory lists passed across stage boundaries.
 
-```
-CSV file(s)
-  → tap: Importer(s)          → [repo write] → raw_transactions
-  → normalize: Normalizer     → [repo write] → transactions
-      (BoC rates read from boc_rates cache or fetched and cached)
-  → verify: NodeVerifier      → [repo write + audit_log] → verified_transactions
-      (if node unavailable: transactions rows promoted to verified_transactions as-is)
-  → transfer matching:
-      TransferMatcher         → [repo write] → classified_events
-      (buys/sells kept, fee micro-dispositions created, transfers excluded)
-  → boil: ACBEngine  PURE     → [repo write] → dispositions + acb_state
-  → SuperficialLossDetector  PURE  → [repo write] → dispositions_adjusted
-  → pour: ReportGenerator     → Schedule 3 / Schedule G / TP-21.4.39-V / Summary
-```
+7-stage pipeline diagram: `docs/ref/data-pipeline.mermaid`
 
 **PURE** means the function receives typed dataclasses and returns typed
 dataclasses only. It has no knowledge of files, databases, APIs, or config.
