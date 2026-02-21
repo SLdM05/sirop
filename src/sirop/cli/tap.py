@@ -205,28 +205,35 @@ def _write_to_batch(
 
         is_append = stage_row and stage_row["status"] == "done"
 
-        # Deduplication — filter to new-only rows before the DB write.
-        # (source, raw_timestamp, asset, amount) is a natural unique key for
-        # exchange rows: the same exchange cannot produce two transactions with
-        # an identical timestamp, asset, and amount.
-        # Overlapping date-range exports are common; we skip the rows already
-        # present and insert only the net-new ones, reporting both counts.
-        skipped = 0
+        # Deduplication — single pass, covers two sources of duplicates:
+        #
+        # 1. Within-file: some exchange exports contain repeated rows (e.g. a
+        #    CSV exported across overlapping date ranges that was concatenated,
+        #    or a platform bug).  Caught by the `seen` set.
+        # 2. Cross-file: the same row already exists in raw_transactions from a
+        #    previous tap of a different (or the same) file.  Caught by
+        #    `excluded_keys`, which is populated from the DB on append taps.
+        #
+        # (source, raw_timestamp, asset, amount) is a natural unique key —
+        # no exchange produces two distinct transactions with identical values
+        # at the exact same second.
+        excluded_keys: set[tuple[str, str, str, str]] = set()
         if is_append:
-            existing_keys: set[tuple[str, str, str, str]] = {
+            excluded_keys = {
                 (row[0], row[1], row[2], row[3])
                 for row in conn.execute(
                     "SELECT source, raw_timestamp, asset, amount FROM raw_transactions"
                 ).fetchall()
             }
-            new_txs = [
-                tx
-                for tx in txs
-                if (tx.source, tx.timestamp.isoformat(), tx.asset, format(tx.amount, "f"))
-                not in existing_keys
-            ]
-            skipped = len(txs) - len(new_txs)
-            txs = new_txs
+        seen: set[tuple[str, str, str, str]] = set()
+        new_txs: list[RawTransaction] = []
+        for tx in txs:
+            key = (tx.source, tx.timestamp.isoformat(), tx.asset, format(tx.amount, "f"))
+            if key not in excluded_keys and key not in seen:
+                seen.add(key)
+                new_txs.append(tx)
+        skipped = len(txs) - len(new_txs)
+        txs = new_txs
 
         # Nothing new to insert — leave the batch state exactly as-is.
         if not txs:
