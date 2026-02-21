@@ -20,3 +20,13 @@ transaction_type_map:
   "fiat cashout": "fiat_withdrawal"
   "other": "other"
 fee_model: "spread"
+# Minimal set of CSV column names that uniquely identify this exchange's export.
+# Used by FormatDetector for auto-detection and --source validation.
+# "Buy / Sell Rate" and "Spot Rate" are Shakepay-specific; together with the
+# debited/credited pair they are unambiguous.
+fingerprint_columns:
+  - "Transaction Type"
+  - "Amount Debited"
+  - "Debit Currency"
+  - "Buy / Sell Rate"
+  - "Spot Rate"

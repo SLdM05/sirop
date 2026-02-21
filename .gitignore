@@ -12,7 +12,9 @@ output/
 
 # ── CSV files (exchanges/wallets export sensitive financial data) ─────────────
 *.csv
-!tests/fixtures/*.csv      # synthetic test fixtures are safe to commit
+# Allow synthetic test fixtures (no real personal data)
+!tests/fixtures/*.csv
+
 
 # ── Python build artifacts ───────────────────────────────────────────────────
 __pycache__/

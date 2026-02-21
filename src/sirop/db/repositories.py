@@ -1,0 +1,653 @@
+"""Repository layer — all SQLite reads and writes for sirop pipeline tables.
+
+Every pipeline module reads its inputs and writes its outputs through this
+module.  No other module touches the ``sqlite3.Connection`` directly for
+pipeline data.  Each write function wraps its inserts in a single atomic
+SQLite transaction so that a write failure rolls back completely.
+
+Conventions
+-----------
+- Monetary values stored as ``TEXT`` (fixed-point Decimal string via
+  ``format(d, 'f')``).  Read back with ``Decimal(row["col"])``.
+- Timestamps stored as ISO 8601 UTC strings. Read back with
+  ``datetime.fromisoformat()``.
+- Booleans stored as ``INTEGER`` (0 / 1).
+- ``id`` columns are assigned by SQLite after INSERT; callers receive
+  updated dataclass instances with the real IDs.
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import UTC, datetime
+from decimal import Decimal
+from typing import TYPE_CHECKING
+
+from sirop.models.disposition import ACBState, AdjustedDisposition, Disposition, IncomeEvent
+from sirop.models.enums import TransactionType
+from sirop.models.event import ClassifiedEvent
+from sirop.models.raw import RawTransaction
+from sirop.models.transaction import Transaction
+
+if TYPE_CHECKING:
+    import sqlite3
+from sirop.utils.logging import get_logger
+
+logger = get_logger(__name__)
+
+# ---------------------------------------------------------------------------
+# Stage status
+# ---------------------------------------------------------------------------
+
+
+def get_stage_status(conn: sqlite3.Connection, stage: str) -> str | None:
+    """Return the current status string for *stage*, or None if not found."""
+    row = conn.execute("SELECT status FROM stage_status WHERE stage = ?", (stage,)).fetchone()
+    return row["status"] if row else None
+
+
+def set_stage_running(conn: sqlite3.Connection, stage: str) -> None:
+    """Mark *stage* as running (non-transactional — called before the write)."""
+    conn.execute(
+        "UPDATE stage_status SET status = 'running', completed_at = NULL, error = NULL "
+        "WHERE stage = ?",
+        (stage,),
+    )
+    conn.commit()
+
+
+def set_stage_done(conn: sqlite3.Connection, stage: str) -> None:
+    """Mark *stage* as done."""
+    now = datetime.now(tz=UTC).isoformat()
+    conn.execute(
+        "UPDATE stage_status SET status = 'done', completed_at = ? WHERE stage = ?",
+        (now, stage),
+    )
+    conn.commit()
+
+
+def set_stages_invalidated(conn: sqlite3.Connection, stages: list[str]) -> None:
+    """Mark all *stages* as invalidated (downstream re-run required)."""
+    with conn:
+        for stage in stages:
+            conn.execute(
+                "UPDATE stage_status SET status = 'invalidated', completed_at = NULL "
+                "WHERE stage = ?",
+                (stage,),
+            )
+
+
+# ---------------------------------------------------------------------------
+# Stage 1 → Stage 2: raw_transactions
+# ---------------------------------------------------------------------------
+
+
+def read_raw_transactions(conn: sqlite3.Connection) -> list[RawTransaction]:
+    """Deserialize all rows from ``raw_transactions`` into ``RawTransaction`` dataclasses."""
+    rows = conn.execute(
+        """
+        SELECT source, raw_timestamp, transaction_type, asset, amount,
+               amount_currency, fee, fee_currency, cad_amount, fiat_currency,
+               cad_rate, spot_rate, txid, extra_json
+        FROM raw_transactions
+        ORDER BY raw_timestamp
+        """
+    ).fetchall()
+
+    result: list[RawTransaction] = []
+    for row in rows:
+        raw_row: dict[str, str] = json.loads(row["extra_json"]) if row["extra_json"] else {}
+        ts_str: str = row["raw_timestamp"]
+        # Handle both ISO 8601 with offset and plain UTC strings.
+        try:
+            ts = datetime.fromisoformat(ts_str)
+        except ValueError:
+            # Fallback: strip trailing 'Z' and parse as UTC.
+            ts = datetime.fromisoformat(ts_str.rstrip("Z")).replace(tzinfo=UTC)
+
+        result.append(
+            RawTransaction(
+                source=row["source"],
+                timestamp=ts,
+                transaction_type=row["transaction_type"],
+                asset=row["asset"],
+                amount=Decimal(row["amount"]),
+                amount_currency=row["amount_currency"],
+                fiat_value=Decimal(row["cad_amount"]) if row["cad_amount"] else None,
+                fiat_currency=row["fiat_currency"],
+                fee_amount=Decimal(row["fee"]) if row["fee"] else None,
+                fee_currency=row["fee_currency"],
+                rate=Decimal(row["cad_rate"]) if row["cad_rate"] else None,
+                spot_rate=Decimal(row["spot_rate"]) if row["spot_rate"] else None,
+                txid=row["txid"],
+                raw_type=row["transaction_type"],
+                raw_row=raw_row,
+            )
+        )
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Stage 2 output: transactions
+# ---------------------------------------------------------------------------
+
+
+def write_transactions(conn: sqlite3.Connection, txs: list[Transaction]) -> list[Transaction]:
+    """Write *txs* to ``transactions`` and return copies with DB-assigned IDs.
+
+    Executes as a single atomic transaction.
+    """
+    updated: list[Transaction] = []
+    with conn:
+        for tx in txs:
+            cursor = conn.execute(
+                """
+                INSERT INTO transactions
+                    (raw_id, timestamp, transaction_type, asset, amount,
+                     fee_crypto, fee_currency, cad_amount, cad_fee, cad_rate,
+                     txid, source, is_transfer, counterpart_id, notes)
+                VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    tx.timestamp.isoformat(),
+                    tx.tx_type.value,
+                    tx.asset,
+                    format(tx.amount, "f"),
+                    format(tx.fee_crypto, "f") if tx.fee_crypto else None,
+                    None,  # fee_currency — not tracked on Transaction currently
+                    format(tx.cad_value, "f"),
+                    format(tx.fee_cad, "f"),
+                    format(tx.cad_value / tx.amount, "f")
+                    if tx.amount
+                    else format(Decimal("0"), "f"),
+                    tx.txid,
+                    tx.source,
+                    1 if tx.is_transfer else 0,
+                    tx.counterpart_id,
+                    tx.notes,
+                ),
+            )
+            updated.append(
+                Transaction(
+                    id=cursor.lastrowid or 0,
+                    source=tx.source,
+                    timestamp=tx.timestamp,
+                    tx_type=tx.tx_type,
+                    asset=tx.asset,
+                    amount=tx.amount,
+                    cad_value=tx.cad_value,
+                    fee_cad=tx.fee_cad,
+                    fee_crypto=tx.fee_crypto,
+                    txid=tx.txid,
+                    is_transfer=tx.is_transfer,
+                    counterpart_id=tx.counterpart_id,
+                    notes=tx.notes,
+                )
+            )
+    return updated
+
+
+def read_transactions(conn: sqlite3.Connection) -> list[Transaction]:
+    """Deserialize all rows from ``transactions`` into ``Transaction`` dataclasses."""
+    rows = conn.execute(
+        """
+        SELECT id, source, timestamp, transaction_type, asset, amount,
+               cad_amount, cad_fee, fee_crypto, txid, is_transfer, counterpart_id, notes
+        FROM transactions
+        ORDER BY timestamp
+        """
+    ).fetchall()
+
+    result: list[Transaction] = []
+    for row in rows:
+        result.append(
+            Transaction(
+                id=row["id"],
+                source=row["source"],
+                timestamp=datetime.fromisoformat(row["timestamp"]),
+                tx_type=TransactionType(row["transaction_type"]),
+                asset=row["asset"],
+                amount=Decimal(row["amount"]),
+                cad_value=Decimal(row["cad_amount"]),
+                fee_cad=Decimal(row["cad_fee"]) if row["cad_fee"] else Decimal("0"),
+                fee_crypto=Decimal(row["fee_crypto"]) if row["fee_crypto"] else Decimal("0"),
+                txid=row["txid"],
+                is_transfer=bool(row["is_transfer"]),
+                counterpart_id=row["counterpart_id"],
+                notes=row["notes"] or "",
+            )
+        )
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Stage 3: pass-through verify (promote transactions → verified_transactions)
+# ---------------------------------------------------------------------------
+
+
+def promote_to_verified(conn: sqlite3.Connection) -> int:
+    """Copy all rows from ``transactions`` into ``verified_transactions`` as-is.
+
+    This is the pass-through verify path used when no Bitcoin node is available.
+    Row IDs are preserved (tx_id = transactions.id) so downstream stages can
+    join back to the source.
+
+    Returns the number of rows promoted.
+    """
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO verified_transactions
+                (tx_id, timestamp, transaction_type, asset, amount,
+                 fee_crypto, fee_currency, cad_amount, cad_fee, cad_rate,
+                 txid, source, is_transfer, counterpart_id,
+                 node_verified, block_height, confirmations)
+            SELECT
+                id, timestamp, transaction_type, asset, amount,
+                fee_crypto, fee_currency, cad_amount, cad_fee, cad_rate,
+                txid, source, is_transfer, counterpart_id,
+                0, NULL, NULL
+            FROM transactions
+            """
+        )
+    count = conn.execute("SELECT COUNT(*) FROM verified_transactions").fetchone()[0]
+    return int(count)
+
+
+# ---------------------------------------------------------------------------
+# Stage 4 output: classified_events, income_events
+# ---------------------------------------------------------------------------
+
+
+def write_classified_events(
+    conn: sqlite3.Connection, events: list[ClassifiedEvent]
+) -> list[ClassifiedEvent]:
+    """Write *events* to ``classified_events`` and return copies with DB IDs."""
+    updated: list[ClassifiedEvent] = []
+    with conn:
+        for evt in events:
+            cursor = conn.execute(
+                """
+                INSERT INTO classified_events
+                    (vtx_id, timestamp, event_type, asset, amount,
+                     cad_proceeds, cad_cost, cad_fee, txid, source, is_taxable)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    evt.vtx_id,
+                    evt.timestamp.isoformat(),
+                    evt.event_type,
+                    evt.asset,
+                    format(evt.amount, "f"),
+                    format(evt.cad_proceeds, "f") if evt.cad_proceeds is not None else None,
+                    format(evt.cad_cost, "f") if evt.cad_cost is not None else None,
+                    format(evt.cad_fee, "f") if evt.cad_fee is not None else None,
+                    evt.txid,
+                    evt.source,
+                    1 if evt.is_taxable else 0,
+                ),
+            )
+            updated.append(
+                ClassifiedEvent(
+                    id=cursor.lastrowid or 0,
+                    vtx_id=evt.vtx_id,
+                    timestamp=evt.timestamp,
+                    event_type=evt.event_type,
+                    asset=evt.asset,
+                    amount=evt.amount,
+                    cad_proceeds=evt.cad_proceeds,
+                    cad_cost=evt.cad_cost,
+                    cad_fee=evt.cad_fee,
+                    txid=evt.txid,
+                    source=evt.source,
+                    is_taxable=evt.is_taxable,
+                )
+            )
+    return updated
+
+
+def write_income_events(conn: sqlite3.Connection, events: list[IncomeEvent]) -> list[IncomeEvent]:
+    """Write *events* to ``income_events`` and return copies with DB IDs."""
+    updated: list[IncomeEvent] = []
+    with conn:
+        for evt in events:
+            cursor = conn.execute(
+                """
+                INSERT INTO income_events
+                    (vtx_id, timestamp, asset, units, income_type, fmv_cad, source)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    evt.vtx_id,
+                    evt.timestamp.isoformat(),
+                    evt.asset,
+                    format(evt.units, "f"),
+                    evt.income_type,
+                    format(evt.fmv_cad, "f"),
+                    evt.source,
+                ),
+            )
+            updated.append(
+                IncomeEvent(
+                    id=cursor.lastrowid or 0,
+                    vtx_id=evt.vtx_id,
+                    timestamp=evt.timestamp,
+                    asset=evt.asset,
+                    units=evt.units,
+                    income_type=evt.income_type,
+                    fmv_cad=evt.fmv_cad,
+                    source=evt.source,
+                )
+            )
+    return updated
+
+
+def read_classified_events(conn: sqlite3.Connection) -> list[ClassifiedEvent]:
+    """Deserialize taxable rows from ``classified_events`` into dataclasses.
+
+    Only ``is_taxable=1`` events are returned — these are the inputs to the
+    ACB engine.  Transfer legs are excluded.
+    """
+    rows = conn.execute(
+        """
+        SELECT id, vtx_id, timestamp, event_type, asset, amount,
+               cad_proceeds, cad_cost, cad_fee, txid, source, is_taxable
+        FROM classified_events
+        WHERE is_taxable = 1
+        ORDER BY timestamp
+        """
+    ).fetchall()
+
+    result: list[ClassifiedEvent] = []
+    for row in rows:
+        result.append(
+            ClassifiedEvent(
+                id=row["id"],
+                vtx_id=row["vtx_id"],
+                timestamp=datetime.fromisoformat(row["timestamp"]),
+                event_type=row["event_type"],
+                asset=row["asset"],
+                amount=Decimal(row["amount"]),
+                cad_proceeds=Decimal(row["cad_proceeds"]) if row["cad_proceeds"] else None,
+                cad_cost=Decimal(row["cad_cost"]) if row["cad_cost"] else None,
+                cad_fee=Decimal(row["cad_fee"]) if row["cad_fee"] else None,
+                txid=row["txid"],
+                source=row["source"],
+                is_taxable=bool(row["is_taxable"]),
+            )
+        )
+    return result
+
+
+def read_all_classified_events(conn: sqlite3.Connection) -> list[ClassifiedEvent]:
+    """Deserialize ALL rows from ``classified_events`` (including transfers).
+
+    Used by the superficial loss detector which needs the full acquisition
+    history to compute running balances.
+    """
+    rows = conn.execute(
+        """
+        SELECT id, vtx_id, timestamp, event_type, asset, amount,
+               cad_proceeds, cad_cost, cad_fee, txid, source, is_taxable
+        FROM classified_events
+        ORDER BY timestamp
+        """
+    ).fetchall()
+
+    result: list[ClassifiedEvent] = []
+    for row in rows:
+        result.append(
+            ClassifiedEvent(
+                id=row["id"],
+                vtx_id=row["vtx_id"],
+                timestamp=datetime.fromisoformat(row["timestamp"]),
+                event_type=row["event_type"],
+                asset=row["asset"],
+                amount=Decimal(row["amount"]),
+                cad_proceeds=Decimal(row["cad_proceeds"]) if row["cad_proceeds"] else None,
+                cad_cost=Decimal(row["cad_cost"]) if row["cad_cost"] else None,
+                cad_fee=Decimal(row["cad_fee"]) if row["cad_fee"] else None,
+                txid=row["txid"],
+                source=row["source"],
+                is_taxable=bool(row["is_taxable"]),
+            )
+        )
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Stage 5 output: dispositions + acb_state
+# ---------------------------------------------------------------------------
+
+
+def write_dispositions(
+    conn: sqlite3.Connection,
+    disps: list[Disposition],
+    states: list[ACBState],
+) -> list[Disposition]:
+    """Write dispositions and ACB state snapshots atomically.
+
+    ACB state snapshots are associated with the classified_event that triggered
+    them.  Since ACBState has no ``event_id`` field in the dataclass, we pair
+    states with dispositions positionally (one state per disposition, for
+    disposal events).
+
+    Returns copies of *disps* with DB-assigned IDs.
+    """
+    # Build a map: classified_event id → acb_state for disposal events.
+    # states list length must match disps list length.
+    updated: list[Disposition] = []
+
+    with conn:
+        for disp, state_after in zip(disps, states, strict=True):
+            # Write disposition row.
+            cursor = conn.execute(
+                """
+                INSERT INTO dispositions
+                    (event_id, timestamp, asset, units, proceeds, acb_of_disposed,
+                     selling_fees, gain_loss, disposition_type, year_acquired,
+                     acb_per_unit_before, pool_units_before, pool_cost_before,
+                     acb_per_unit_after, pool_units_after, pool_cost_after)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    disp.event_id,
+                    disp.timestamp.isoformat(),
+                    disp.asset,
+                    format(disp.units, "f"),
+                    format(disp.proceeds_cad, "f"),
+                    format(disp.acb_of_disposed_cad, "f"),
+                    format(disp.selling_fees_cad, "f"),
+                    format(disp.gain_loss_cad, "f"),
+                    disp.disposition_type,
+                    disp.year_acquired,
+                    format(disp.acb_state_before.acb_per_unit_cad, "f"),
+                    format(disp.acb_state_before.total_units, "f"),
+                    format(disp.acb_state_before.total_acb_cad, "f"),
+                    format(state_after.acb_per_unit_cad, "f"),
+                    format(state_after.total_units, "f"),
+                    format(state_after.total_acb_cad, "f"),
+                ),
+            )
+            disp_id = cursor.lastrowid or 0
+
+            # Write ACB state snapshot linked to this disposition's event.
+            conn.execute(
+                """
+                INSERT INTO acb_state
+                    (event_id, asset, pool_cost, units, snapshot_date)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    disp.event_id,
+                    state_after.asset,
+                    format(state_after.total_acb_cad, "f"),
+                    format(state_after.total_units, "f"),
+                    disp.timestamp.date().isoformat(),
+                ),
+            )
+
+            updated.append(
+                Disposition(
+                    id=disp_id,
+                    event_id=disp.event_id,
+                    timestamp=disp.timestamp,
+                    asset=disp.asset,
+                    units=disp.units,
+                    proceeds_cad=disp.proceeds_cad,
+                    acb_of_disposed_cad=disp.acb_of_disposed_cad,
+                    selling_fees_cad=disp.selling_fees_cad,
+                    gain_loss_cad=disp.gain_loss_cad,
+                    disposition_type=disp.disposition_type,
+                    year_acquired=disp.year_acquired,
+                    acb_state_before=disp.acb_state_before,
+                    acb_state_after=state_after,
+                )
+            )
+    return updated
+
+
+def read_dispositions(conn: sqlite3.Connection) -> list[Disposition]:
+    """Deserialize all rows from ``dispositions`` into ``Disposition`` dataclasses."""
+    rows = conn.execute(
+        """
+        SELECT id, event_id, timestamp, asset, units, proceeds, acb_of_disposed,
+               selling_fees, gain_loss, disposition_type, year_acquired,
+               acb_per_unit_before, pool_units_before, pool_cost_before,
+               acb_per_unit_after, pool_units_after, pool_cost_after
+        FROM dispositions
+        ORDER BY timestamp
+        """
+    ).fetchall()
+
+    result: list[Disposition] = []
+    for row in rows:
+        before = ACBState(
+            asset=row["asset"],
+            total_units=Decimal(row["pool_units_before"]),
+            total_acb_cad=Decimal(row["pool_cost_before"]),
+            acb_per_unit_cad=Decimal(row["acb_per_unit_before"]),
+        )
+        after = ACBState(
+            asset=row["asset"],
+            total_units=Decimal(row["pool_units_after"]),
+            total_acb_cad=Decimal(row["pool_cost_after"]),
+            acb_per_unit_cad=Decimal(row["acb_per_unit_after"]),
+        )
+        result.append(
+            Disposition(
+                id=row["id"],
+                event_id=row["event_id"],
+                timestamp=datetime.fromisoformat(row["timestamp"]),
+                asset=row["asset"],
+                units=Decimal(row["units"]),
+                proceeds_cad=Decimal(row["proceeds"]),
+                acb_of_disposed_cad=Decimal(row["acb_of_disposed"]),
+                selling_fees_cad=Decimal(row["selling_fees"]),
+                gain_loss_cad=Decimal(row["gain_loss"]),
+                disposition_type=row["disposition_type"],
+                year_acquired=row["year_acquired"],
+                acb_state_before=before,
+                acb_state_after=after,
+            )
+        )
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Stage 6 output: dispositions_adjusted
+# ---------------------------------------------------------------------------
+
+
+def write_adjusted_dispositions(
+    conn: sqlite3.Connection, adjs: list[AdjustedDisposition]
+) -> list[AdjustedDisposition]:
+    """Write adjusted dispositions and return copies with DB IDs."""
+    updated: list[AdjustedDisposition] = []
+    with conn:
+        for adj in adjs:
+            cursor = conn.execute(
+                """
+                INSERT INTO dispositions_adjusted
+                    (disposition_id, timestamp, asset, units, proceeds, acb_of_disposed,
+                     selling_fees, gain_loss, is_superficial_loss,
+                     superficial_loss_denied, allowable_loss,
+                     adjusted_gain_loss, adjusted_acb_of_repurchase,
+                     disposition_type, year_acquired)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    adj.disposition_id,
+                    adj.timestamp.isoformat(),
+                    adj.asset,
+                    format(adj.units, "f"),
+                    format(adj.proceeds_cad, "f"),
+                    format(adj.acb_of_disposed_cad, "f"),
+                    format(adj.selling_fees_cad, "f"),
+                    format(adj.gain_loss_cad, "f"),
+                    1 if adj.is_superficial_loss else 0,
+                    format(adj.superficial_loss_denied_cad, "f"),
+                    format(adj.allowable_loss_cad, "f"),
+                    format(adj.adjusted_gain_loss_cad, "f"),
+                    format(adj.adjusted_acb_of_repurchase_cad, "f")
+                    if adj.adjusted_acb_of_repurchase_cad is not None
+                    else None,
+                    adj.disposition_type,
+                    adj.year_acquired,
+                ),
+            )
+            updated.append(
+                AdjustedDisposition(
+                    id=cursor.lastrowid or 0,
+                    disposition_id=adj.disposition_id,
+                    timestamp=adj.timestamp,
+                    asset=adj.asset,
+                    units=adj.units,
+                    proceeds_cad=adj.proceeds_cad,
+                    acb_of_disposed_cad=adj.acb_of_disposed_cad,
+                    selling_fees_cad=adj.selling_fees_cad,
+                    gain_loss_cad=adj.gain_loss_cad,
+                    is_superficial_loss=adj.is_superficial_loss,
+                    superficial_loss_denied_cad=adj.superficial_loss_denied_cad,
+                    allowable_loss_cad=adj.allowable_loss_cad,
+                    adjusted_gain_loss_cad=adj.adjusted_gain_loss_cad,
+                    adjusted_acb_of_repurchase_cad=adj.adjusted_acb_of_repurchase_cad,
+                    disposition_type=adj.disposition_type,
+                    year_acquired=adj.year_acquired,
+                )
+            )
+    return updated
+
+
+# ---------------------------------------------------------------------------
+# BoC rate cache helpers (called by normalizer via utils/boc.py)
+# ---------------------------------------------------------------------------
+
+
+def read_boc_rate(
+    conn: sqlite3.Connection, currency_pair: str, rate_date: object
+) -> Decimal | None:
+    """Return a cached BoC rate or None. Used by ``utils/boc.py``."""
+    row = conn.execute(
+        "SELECT rate FROM boc_rates WHERE currency_pair = ? AND date = ?",
+        (currency_pair, str(rate_date)),
+    ).fetchone()
+    return Decimal(row["rate"]) if row else None
+
+
+def write_boc_rate(
+    conn: sqlite3.Connection,
+    currency_pair: str,
+    rate_date: object,
+    rate: Decimal,
+) -> None:
+    """Insert or replace a BoC rate in the cache. Used by ``utils/boc.py``."""
+    now = datetime.now(tz=UTC).isoformat()
+    with conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO boc_rates (date, currency_pair, rate, fetched_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (str(rate_date), currency_pair, format(rate, "f"), now),
+        )
