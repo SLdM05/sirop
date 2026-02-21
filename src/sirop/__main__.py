@@ -12,6 +12,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from sirop.cli.boil import handle_boil
 from sirop.cli.create import handle_create
 from sirop.cli.list_batches import handle_list
 from sirop.cli.switch import handle_switch
@@ -62,6 +63,23 @@ def _build_parser() -> argparse.ArgumentParser:
     switch_p = sub.add_parser("switch", help="Set the active batch")
     switch_p.add_argument("name", help="Batch name to activate")
 
+    # ── boil ──────────────────────────────────────────────────────────────────
+    boil_p = sub.add_parser(
+        "boil",
+        help="Run the tax calculation pipeline (normalize → ACB → superficial loss)",
+    )
+    boil_p.add_argument(
+        "--from",
+        dest="from_stage",
+        metavar="STAGE",
+        choices=["normalize", "verify", "transfer_match", "boil", "superficial_loss"],
+        default=None,
+        help=(
+            "Re-run from this stage onward, invalidating downstream stages. "
+            "Choices: normalize, verify, transfer_match, boil, superficial_loss"
+        ),
+    )
+
     return parser
 
 
@@ -82,6 +100,9 @@ def main() -> None:
 
     elif args.command == "switch":
         sys.exit(handle_switch(args.name))
+
+    elif args.command == "boil":
+        sys.exit(handle_boil(args.from_stage))
 
     else:
         parser.print_help()
