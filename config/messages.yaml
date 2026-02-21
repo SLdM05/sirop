@@ -1,0 +1,188 @@
+# sirop message catalog
+#
+# Each entry is keyed by a dotted message code that matches a MessageCode
+# enum value in src/sirop/models/messages.py.
+#
+# Fields:
+#   category  — controls routing and output format (see below)
+#   text      — Python format string; use {kwarg_name} for substitutions
+#   code      — short identifier shown to the user for errors and warnings only
+#
+# Categories:
+#   error    → "error [Exxx]: text"  to stderr  (code shown)
+#   warning  → "warning [Wxxx]: text" to stderr  (code shown)
+#   output   → text to stdout, no prefix         (code never shown)
+#   fluff    → text to stdout, no prefix         (code never shown)
+#
+# Rule: errors and warnings show their code so users can quote them in
+# support requests or look them up in the docs. Progress and result
+# messages are clean — no codes, no prefixes.
+
+messages:
+
+  # ── Batch / shared errors ──────────────────────────────────────────────────
+
+  batch.error.no_active:
+    category: error
+    code: E001
+    text: "No active batch. Run 'sirop create <name>' first."
+
+  # ── create ────────────────────────────────────────────────────────────────
+
+  create.error.no_year:
+    category: error
+    code: E002
+    text: "Cannot infer tax year from '{name}'. Pass --year YYYY."
+
+  create.error.batch_exists:
+    category: error
+    code: E003
+    text: "Batch '{name}' already exists at {path}."
+
+  create.error.db_init:
+    category: error
+    code: E004
+    text: "Failed to initialise batch '{name}': {detail}"
+
+  create.batch_created:
+    category: output
+    text: "Created batch: {name} ({year}) → {path}"
+
+  # ── tap ───────────────────────────────────────────────────────────────────
+
+  tap.error.file_not_found:
+    category: error
+    code: E005
+    text: "File not found: {path}"
+
+  tap.error.no_header:
+    category: error
+    code: E006
+    text: "CSV has no header row: {path}"
+
+  tap.error.no_importer:
+    category: error
+    code: E007
+    text: "Format detected as {fmt!r} but no importer is implemented for {source!r} yet."
+
+  tap.error.parse_failed:
+    category: error
+    code: E008
+    text: "Failed to parse {filename}: {detail}"
+
+  tap.error.no_format_match:
+    category: error
+    code: E009
+    text: "Cannot identify CSV format — headers don't match any known exchange."
+
+  tap.error.multiple_formats:
+    category: error
+    code: E010
+    text: "CSV headers match multiple formats: {formats}. Pass --source to pick one."
+
+  tap.error.missing_columns:
+    category: error
+    code: E011
+    text: "--source {source!r} declared but CSV is missing expected columns:"
+
+  tap.error.stage_running:
+    category: error
+    code: E012
+    text: "Batch '{name}' tap stage is currently running (another process?). Aborting."
+
+  tap.error.write_failed:
+    category: error
+    code: E013
+    text: "Failed to write to batch '{name}': {detail}"
+
+  tap.format_detected:
+    category: output
+    text: "Detected format: {fmt}"
+
+  tap.headers_found:
+    category: output
+    text: "  headers found: {headers}"
+
+  tap.hint.closest_match:
+    category: output
+    text: "hint: closest match is {fmt!r} ({ratio:.0%} of expected columns found). Pass --source {source} to override, or check you exported the correct report type."
+
+  tap.known_formats:
+    category: output
+    text: "  known formats: {formats}"
+
+  tap.missing_column:
+    category: output
+    text: "  missing: {column!r}"
+
+  tap.hint.suggested_source:
+    category: output
+    text: "hint: headers look more like {fmt!r}. Try --source {source} instead."
+
+  tap.expected_columns:
+    category: output
+    text: "  expected columns for {source!r}: {columns}"
+
+  tap.nothing_new:
+    category: output
+    text: "Nothing new to tap from {filename} [{fmt}] — all {count} row(s) already exist in '{batch}'."
+
+  tap.success:
+    category: output
+    text: "Tapped {count} transaction(s) from {filename} [{fmt}] into '{batch}'.{skip_note}"
+
+  # ── boil ──────────────────────────────────────────────────────────────────
+
+  boil.error.not_tapped:
+    category: error
+    code: E014
+    text: "Batch '{name}' has not been tapped yet. Run 'sirop tap <file>' first."
+
+  boil.error.no_raw_transactions:
+    category: error
+    code: E019
+    text: "No raw transactions found. Run 'sirop tap <file>' first."
+
+  boil.error.no_tax_rules:
+    category: error
+    code: E015
+    text: "Tax rules config not found at {path}. Is the working directory the project root?"
+
+  boil.error.stage_running:
+    category: error
+    code: E016
+    text: "Batch '{name}' stage '{stage}' is currently running (another process?). Aborting."
+
+  boil.error.unknown_stage:
+    category: error
+    code: E017
+    text: "Unknown stage {stage!r}. Valid stages: {valid}"
+
+  boil.summary.complete:
+    category: output
+    text: "\nBatch '{name}' pipeline complete."
+
+  boil.summary.holdings_header:
+    category: output
+    text: "\n  Year-end holdings (cost basis):"
+
+  # ── list ──────────────────────────────────────────────────────────────────
+
+  list.no_batches:
+    category: output
+    text: "No batches found in {data_dir}"
+
+  list.batch_item:
+    category: output
+    text: "  {name}{marker}"
+
+  # ── switch ────────────────────────────────────────────────────────────────
+
+  switch.error.batch_not_found:
+    category: error
+    code: E018
+    text: "Batch '{name}' not found at {path}."
+
+  switch.activated:
+    category: output
+    text: "Active batch: {name}"

@@ -15,7 +15,9 @@ from pathlib import Path
 from sirop.config.settings import Settings, get_settings
 from sirop.db.connection import get_batch_path, open_batch, set_active_batch
 from sirop.db.schema import PIPELINE_STAGES, SCHEMA_VERSION, create_tables
+from sirop.models.messages import MessageCode
 from sirop.utils.logging import get_logger
+from sirop.utils.messages import emit
 
 logger = get_logger(__name__)
 
@@ -63,13 +65,13 @@ def handle_create(
 
     resolved_year = year if year is not None else _infer_year(name)
     if resolved_year is None:
-        print(f"error: cannot infer tax year from '{name}'. Pass --year YYYY.")
+        emit(MessageCode.CREATE_ERROR_NO_YEAR, name=name)
         return 1
 
     batch_path = get_batch_path(name, settings)
 
     if batch_path.exists():
-        print(f"error: batch '{name}' already exists at {batch_path}")
+        emit(MessageCode.CREATE_ERROR_BATCH_EXISTS, name=name, path=batch_path)
         return 1
 
     settings.data_dir.mkdir(parents=True, exist_ok=True)
@@ -82,7 +84,7 @@ def handle_create(
         conn.close()
         # Remove the partially-created file so a retry starts clean.
         batch_path.unlink(missing_ok=True)
-        print(f"error: failed to initialise batch '{name}': {exc}")
+        emit(MessageCode.CREATE_ERROR_DB_INIT, name=name, detail=exc)
         return 1
     finally:
         conn.close()
@@ -90,8 +92,8 @@ def handle_create(
     set_active_batch(name, settings)
 
     rel = _relative(batch_path)
-    print(f"Created batch: {name} ({resolved_year}) → {rel}")
-    logger.info(f"Created batch: {name} ({resolved_year}) → {rel}")
+    emit(MessageCode.CREATE_BATCH_CREATED, name=name, year=resolved_year, path=rel)
+    logger.debug("Created batch: %s (%s) → %s", name, resolved_year, rel)
     return 0
 
 

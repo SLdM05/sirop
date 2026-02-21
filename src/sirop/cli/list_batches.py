@@ -2,6 +2,8 @@
 
 from sirop.config.settings import Settings, get_settings
 from sirop.db.connection import get_active_batch_name
+from sirop.models.messages import MessageCode
+from sirop.utils.messages import emit
 
 
 def handle_list(settings: Settings | None = None) -> int:
@@ -19,12 +21,12 @@ def handle_list(settings: Settings | None = None) -> int:
     active = get_active_batch_name(settings)
 
     if not batches:
-        print(f"No batches found in {settings.data_dir}")
+        emit(MessageCode.LIST_NO_BATCHES, data_dir=settings.data_dir)
         return 0
 
     for path in batches:
         name = path.stem
         marker = " *" if name == active else ""
-        print(f"  {name}{marker}")
+        emit(MessageCode.LIST_BATCH_ITEM, name=name, marker=marker)
 
     return 0
