@@ -6,9 +6,10 @@ name: "Shakepay"
 #
 # Full column spec: docs/ref/transaction-import-formats.md §1
 date_column: "Date"
-# Shakepay timestamps: "2022-09-10T00:36:12+00" — the offset is always "+00"
-# (UTC).  %z handles this format correctly.
-date_format: "%Y-%m-%dT%H:%M:%S%z"
+# Shakepay timestamps: "2022-09-10T00:36:12+00" — the offset uses the bare
+# "+HH" form (hours only, no minutes).  Python's strptime %z does NOT accept
+# this form; only datetime.fromisoformat() handles it correctly (Python 3.11+).
+date_format: "iso8601"
 columns:
   transaction_type: "Transaction Type"
   amount_debited: "Amount Debited"
@@ -42,6 +43,13 @@ transaction_type_map:
 # Unknown types must NOT crash the importer.  Log a warning and store the
 # record flagged for manual review (see parser implementation requirements).
 fee_model: "spread"  # fees are embedded in the buy/sell spread, not a separate column
+# CAD and USD are the only fiat currencies Shakepay currently supports.
+# Used by the importer to determine buy/sell direction for purchase/sale rows:
+#   Debit=fiat + Credit=crypto → "buy"
+#   Debit=crypto + Credit=fiat → "sell"
+fiat_currencies:
+  - CAD
+  - USD
 # Minimal set of CSV column names that uniquely identify this exchange's export.
 # "Buy / Sell Rate" and "Spot Rate" are Shakepay-specific and unambiguous.
 fingerprint_columns:

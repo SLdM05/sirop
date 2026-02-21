@@ -94,7 +94,7 @@ def test_buy_buy_sell_gain() -> None:
         _buy("BTC", "0.3", "18000", cad_fee="36", offset_days=10, event_id=2),
         _sell("BTC", "0.4", "28000", cad_fee="40", offset_days=20, event_id=3),
     ]
-    disps, states = run(events, _DEFAULT_RULES)
+    disps, _ = run(events, _DEFAULT_RULES)
 
     assert len(disps) == 1
     d = disps[0]

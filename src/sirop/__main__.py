@@ -41,8 +41,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--source",
         metavar="NAME",
         help=(
-            "Exchange format to use (e.g. ndax, shakepay). "
-            "Auto-detected from headers when omitted."
+            "Exchange format to use (e.g. ndax, shakepay). Auto-detected from headers when omitted."
         ),
     )
 

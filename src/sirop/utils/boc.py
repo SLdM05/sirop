@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import json
 import urllib.request
-from datetime import UTC, date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
@@ -135,8 +135,6 @@ def _write_cache(
     conn: sqlite3.Connection, pair_upper: str, query_date: date, rate: Decimal
 ) -> None:
     """Insert or replace a rate in the ``boc_rates`` cache."""
-    from datetime import datetime
-
     fetched_at = datetime.now(tz=UTC).isoformat()
     with conn:
         conn.execute(

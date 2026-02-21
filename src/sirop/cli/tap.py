@@ -22,7 +22,9 @@ Error behaviour
   format fits better.
 * Extra columns (present in CSV but unknown to any fingerprint) → WARNING
   only, not a hard stop.  The importer stores them in ``extra_json``.
-* Batch ``tap`` stage already ``done`` → error; re-tap not yet supported.
+* Batch ``tap`` stage already ``done`` → allowed; rows are appended and all
+  downstream stages are marked ``invalidated`` so they re-run with the
+  full combined dataset.  Useful when a batch spans multiple exchange files.
 """
 
 import csv
@@ -33,9 +35,11 @@ from pathlib import Path
 
 from sirop.config.settings import Settings, get_settings
 from sirop.db.connection import get_active_batch_name, open_batch
+from sirop.db.schema import PIPELINE_STAGES
 from sirop.importers.base import BaseImporter, ImporterError
 from sirop.importers.detector import FormatDetector
 from sirop.importers.ndax import NDAXImporter
+from sirop.importers.shakepay import ShakepayImporter
 from sirop.models.raw import RawTransaction
 from sirop.utils.logging import get_logger
 
@@ -48,6 +52,7 @@ _BUILTIN_CONFIG_DIR = Path("config/importers")
 # Adding a new importer: implement the class, add its from_yaml here.
 _IMPORTER_REGISTRY: dict[str, Callable[[Path], BaseImporter]] = {
     "ndax": NDAXImporter.from_yaml,
+    "shakepay": ShakepayImporter.from_yaml,
 }
 
 
@@ -135,41 +140,104 @@ def _run_tap(file_path: Path, source: str | None, settings: Settings) -> int:
         raise _TapError(f"error: failed to parse {file_path.name}: {exc}") from exc
 
     # ── 5. Write to DB ────────────────────────────────────────────────────────
-    _write_to_batch(batch_name, settings, txs)
+    inserted, skipped = _write_to_batch(batch_name, settings, txs)
 
     disp = detector.display_name(detected_source)
-    print(f"Tapped {len(txs)} transaction(s) from {file_path.name} [{disp}] into '{batch_name}'.")
+    if inserted == 0:
+        print(
+            f"Nothing new to tap from {file_path.name} [{disp}] — "
+            f"all {skipped} row(s) already exist in '{batch_name}'."
+        )
+        logger.info(
+            "tap: 0 new rows from %s (%s) — %d duplicate(s) skipped",
+            file_path.name,
+            detected_source,
+            skipped,
+        )
+        return 0
+
+    skip_note = f" ({skipped} duplicate(s) skipped)" if skipped else ""
+    print(
+        f"Tapped {inserted} transaction(s) from {file_path.name} [{disp}]"
+        f" into '{batch_name}'.{skip_note}"
+    )
     logger.info(
-        "tap: %d rows written from %s (%s) into batch %s",
-        len(txs),
+        "tap: %d rows written from %s (%s) into batch %s (%d duplicate(s) skipped)",
+        inserted,
         file_path.name,
         detected_source,
         batch_name,
+        skipped,
     )
     return 0
 
 
-def _write_to_batch(batch_name: str, settings: Settings, txs: list[RawTransaction]) -> None:
+def _write_to_batch(
+    batch_name: str, settings: Settings, txs: list[RawTransaction]
+) -> tuple[int, int]:
     """Write *txs* to the active batch DB in a single atomic transaction.
+
+    Duplicate rows (same source + timestamp + asset + amount already present in
+    ``raw_transactions``) are silently skipped.  This handles the common case of
+    overlapping date-range exports from the same exchange without blocking or
+    requiring the user to manually deduplicate files.
+
+    Returns
+    -------
+    tuple[int, int]
+        ``(inserted, skipped)`` — number of new rows written and number of
+        duplicate rows that were omitted.
 
     Raises
     ------
     _TapError
-        When the tap stage is already done/running, or a DB write fails.
+        When the tap stage is running (concurrent process guard), or a DB
+        write fails.
     """
     conn = open_batch(batch_name, settings)
     try:
         stage_row = conn.execute("SELECT status FROM stage_status WHERE stage = 'tap'").fetchone()
-        if stage_row and stage_row["status"] == "done":
-            raise _TapError(
-                f"error: batch '{batch_name}' already has tap data. "
-                "Re-tap is not yet supported — create a new batch or switch to one."
-            )
         if stage_row and stage_row["status"] == "running":
             raise _TapError(
                 f"error: batch '{batch_name}' tap stage is currently running "
                 "(another process?). Aborting."
             )
+
+        is_append = stage_row and stage_row["status"] == "done"
+
+        # Deduplication — single pass, covers two sources of duplicates:
+        #
+        # 1. Within-file: some exchange exports contain repeated rows (e.g. a
+        #    CSV exported across overlapping date ranges that was concatenated,
+        #    or a platform bug).  Caught by the `seen` set.
+        # 2. Cross-file: the same row already exists in raw_transactions from a
+        #    previous tap of a different (or the same) file.  Caught by
+        #    `excluded_keys`, which is populated from the DB on append taps.
+        #
+        # (source, raw_timestamp, asset, amount) is a natural unique key —
+        # no exchange produces two distinct transactions with identical values
+        # at the exact same second.
+        excluded_keys: set[tuple[str, str, str, str]] = set()
+        if is_append:
+            excluded_keys = {
+                (row[0], row[1], row[2], row[3])
+                for row in conn.execute(
+                    "SELECT source, raw_timestamp, asset, amount FROM raw_transactions"
+                ).fetchall()
+            }
+        seen: set[tuple[str, str, str, str]] = set()
+        new_txs: list[RawTransaction] = []
+        for tx in txs:
+            key = (tx.source, tx.timestamp.isoformat(), tx.asset, format(tx.amount, "f"))
+            if key not in excluded_keys and key not in seen:
+                seen.add(key)
+                new_txs.append(tx)
+        skipped = len(txs) - len(new_txs)
+        txs = new_txs
+
+        # Nothing new to insert — leave the batch state exactly as-is.
+        if not txs:
+            return 0, skipped
 
         # format(d, 'f') forces fixed-point notation for every Decimal before
         # it reaches the DB.  str(Decimal) is non-deterministic: division
@@ -198,6 +266,19 @@ def _write_to_batch(batch_name: str, settings: Settings, txs: list[RawTransactio
 
         with conn:
             conn.execute("UPDATE stage_status SET status = 'running' WHERE stage = 'tap'")
+            if is_append:
+                # Invalidate all downstream stages within the same transaction so
+                # they re-run with the full combined dataset.  Inline the SQL here
+                # rather than calling set_stages_invalidated() to keep the whole
+                # write (status update + invalidations + inserts) in one atomic block.
+                downstream = PIPELINE_STAGES[PIPELINE_STAGES.index("tap") + 1 :]
+                for _stage in downstream:
+                    conn.execute(
+                        "UPDATE stage_status"
+                        " SET status='invalidated', completed_at=NULL, error=NULL"
+                        " WHERE stage = ?",
+                        (_stage,),
+                    )
             conn.executemany(
                 """
                 INSERT INTO raw_transactions
@@ -209,6 +290,8 @@ def _write_to_batch(batch_name: str, settings: Settings, txs: list[RawTransactio
                 db_rows,
             )
             conn.execute("UPDATE stage_status SET status = 'done' WHERE stage = 'tap'")
+
+        return len(txs), skipped
 
     except sqlite3.Error as exc:
         raise _TapError(f"error: failed to write to batch '{batch_name}': {exc}") from exc
