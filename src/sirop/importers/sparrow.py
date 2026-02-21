@@ -11,8 +11,8 @@ or satoshis (integer) depending on the user's Preferences > Bitcoin Unit
 setting.  The unit is detected **per file** by scanning the ``Value``
 column across all rows before parsing any of them:
 
-    any "." in Value column  BTC mode  multiply x 100_000_000  sats
-    no  "." anywhere         sats mode  parse as integer Decimal
+    any "." in Value column  BTC mode  keep as BTC decimal (e.g. 0.00150000)
+    no  "." anywhere         sats mode  divide by 100_000_000  BTC decimal
 
 Scanning all rows (not just the first) is essential: a receive of exactly
 one BTC in BTC mode is written as ``1.00000000``, which would look like
@@ -262,14 +262,14 @@ class SparrowImporter(BaseImporter):
             logger.warning("sparrow: zero Value at row %d — skipping", row_num)
             return None
 
-        amount_sats = self._to_sats(abs(signed_value), unit)
+        amount_btc = self._to_btc(abs(signed_value), unit)
 
         # Fee: empty string -> None (not zero).  Only present on sends.
         fee_str = row.get(cols["fee"], "").strip()
-        fee_sats: Decimal | None = None
+        fee_btc: Decimal | None = None
         if fee_str:
             try:
-                fee_sats = self._to_sats(Decimal(fee_str), unit)
+                fee_btc = self._to_btc(Decimal(fee_str), unit)
             except InvalidOperation:
                 logger.warning(
                     "sparrow: cannot parse Fee %r at row %d — treating as None",
@@ -291,13 +291,13 @@ class SparrowImporter(BaseImporter):
             timestamp=timestamp,
             transaction_type=tx_type,
             asset="BTC",
-            amount=amount_sats,
+            amount=amount_btc,
             amount_currency="BTC",
             # CoinGecko rates (fiat_col) are never used for ACB — always None here.
             fiat_value=None,
             fiat_currency=None,
-            fee_amount=fee_sats,
-            fee_currency="BTC" if fee_sats is not None else None,
+            fee_amount=fee_btc,
+            fee_currency="BTC" if fee_btc is not None else None,
             rate=None,
             spot_rate=None,
             txid=txid_raw,
@@ -341,13 +341,17 @@ class SparrowImporter(BaseImporter):
                 return header
         return None
 
-    def _to_sats(self, value: Decimal, unit: str) -> Decimal:
-        """Convert *value* (positive) from *unit* to satoshis.
+    def _to_btc(self, value: Decimal, unit: str) -> Decimal:
+        """Return *value* expressed as a BTC decimal regardless of input *unit*.
 
-        BTC mode: multiply by 100_000_000 and drop any fractional remainder
-        (BTC amounts have at most 8 decimal places; the conversion is exact).
-        Sats mode: return as-is.
+        BTC mode: return as-is (already a decimal BTC amount, e.g. ``0.00150000``).
+        Sats mode: divide by 100_000_000 to convert integer satoshis to BTC.
+
+        All other importers (Shakepay, NDAX) store amounts as BTC decimals.
+        Keeping the same unit here ensures the normalizer's fee math, the
+        transfer-match stage's cross-source txid matching, and the ACB engine
+        all receive consistent values.
         """
-        if unit == "BTC":
-            return (value * _SATS_PER_BTC).to_integral_value()
+        if unit == "sats":
+            return value / _SATS_PER_BTC
         return value

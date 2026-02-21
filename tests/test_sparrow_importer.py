@@ -134,22 +134,22 @@ def test_unconfirmed_txid_absent(btc_txs: list[RawTransaction]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_btc_deposit_amount_in_sats(btc_txs: list[RawTransaction]) -> None:
-    """0.00150000 BTC x 10^8 = 150 000 satoshis."""
+def test_btc_deposit_amount(btc_txs: list[RawTransaction]) -> None:
+    """BTC-mode CSV value 0.00150000 must be stored as BTC decimal."""
     deposit = next(tx for tx in btc_txs if tx.txid == TXID_B)
-    assert deposit.amount == Decimal("150000")
+    assert deposit.amount == Decimal("0.00150000")
 
 
-def test_btc_withdrawal_amount_in_sats(btc_txs: list[RawTransaction]) -> None:
-    """0.00050000 BTC x 10^8 = 50 000 satoshis."""
+def test_btc_withdrawal_amount(btc_txs: list[RawTransaction]) -> None:
+    """BTC-mode CSV value 0.00050000 must be stored as BTC decimal."""
     withdrawal = next(tx for tx in btc_txs if tx.txid == TXID_C)
-    assert withdrawal.amount == Decimal("50000")
+    assert withdrawal.amount == Decimal("0.00050000")
 
 
-def test_btc_fee_in_sats(btc_txs: list[RawTransaction]) -> None:
-    """0.00001000 BTC x 10^8 = 1 000 satoshis."""
+def test_btc_fee(btc_txs: list[RawTransaction]) -> None:
+    """BTC-mode fee 0.00001000 must be stored as BTC decimal."""
     withdrawal = next(tx for tx in btc_txs if tx.txid == TXID_C)
-    assert withdrawal.fee_amount == Decimal("1000")
+    assert withdrawal.fee_amount == Decimal("0.00001000")
 
 
 def test_all_amounts_positive(
@@ -166,18 +166,21 @@ def test_all_amounts_positive(
 
 
 def test_sats_deposit_amount(sats_txs: list[RawTransaction]) -> None:
+    """Sats-mode CSV value 150000 must be divided by 10^8 to give BTC decimal."""
     deposit = next(tx for tx in sats_txs if tx.txid == TXID_B)
-    assert deposit.amount == Decimal("150000")
+    assert deposit.amount == Decimal("0.00150000")
 
 
 def test_sats_withdrawal_amount(sats_txs: list[RawTransaction]) -> None:
+    """Sats-mode CSV value 50000 must be divided by 10^8 to give BTC decimal."""
     withdrawal = next(tx for tx in sats_txs if tx.txid == TXID_C)
-    assert withdrawal.amount == Decimal("50000")
+    assert withdrawal.amount == Decimal("0.00050000")
 
 
 def test_sats_fee(sats_txs: list[RawTransaction]) -> None:
+    """Sats-mode fee 1000 must be divided by 10^8 to give BTC decimal."""
     withdrawal = next(tx for tx in sats_txs if tx.txid == TXID_C)
-    assert withdrawal.fee_amount == Decimal("1000")
+    assert withdrawal.fee_amount == Decimal("0.00001000")
 
 
 def test_unit_detection_produces_identical_amounts(
@@ -251,7 +254,7 @@ def test_invalid_txid_cleared(importer: SparrowImporter, tmp_path: Path) -> None
     result = importer.parse(bad_csv)
     assert len(result) == 1
     assert result[0].txid is None
-    assert result[0].amount == Decimal("150000")  # row still parsed
+    assert result[0].amount == Decimal("0.00150000")  # row still parsed
 
 
 # ---------------------------------------------------------------------------
@@ -326,4 +329,4 @@ def test_unparseable_value_skipped(importer: SparrowImporter, tmp_path: Path) ->
     )
     result = importer.parse(csv_path)
     assert len(result) == 1
-    assert result[0].amount == Decimal("50000")
+    assert result[0].amount == Decimal("0.00050000")
