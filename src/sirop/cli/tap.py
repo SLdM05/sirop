@@ -163,7 +163,7 @@ def _run_tap(file_path: Path, source: str | None, settings: Settings) -> int:
             count=skipped,
             batch=batch_name,
         )
-        logger.info(
+        logger.debug(
             "tap: 0 new rows from %s (%s) — %d duplicate(s) skipped",
             file_path.name,
             detected_source,
@@ -180,7 +180,7 @@ def _run_tap(file_path: Path, source: str | None, settings: Settings) -> int:
         batch=batch_name,
         skip_note=skip_note,
     )
-    logger.info(
+    logger.debug(
         "tap: %d rows written from %s (%s) into batch %s (%d duplicate(s) skipped)",
         inserted,
         file_path.name,

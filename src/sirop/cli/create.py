@@ -93,7 +93,7 @@ def handle_create(
 
     rel = _relative(batch_path)
     emit(MessageCode.CREATE_BATCH_CREATED, name=name, year=resolved_year, path=rel)
-    logger.info("Created batch: %s (%s) → %s", name, resolved_year, rel)
+    logger.debug("Created batch: %s (%s) → %s", name, resolved_year, rel)
     return 0
 
 
