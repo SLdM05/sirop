@@ -157,6 +157,28 @@ as *sirop* (italicised) but never capitalized as Sirop.
 
 ---
 
+## How the Two-Register Rule Is Enforced in Code
+
+The `emit()` function in `src/sirop/utils/messages.py` is the implementation
+of the two-register rule. Category determines register:
+
+| Category | Register | Example |
+|----------|----------|---------|
+| `output` | In-app chrome | `"Tapped 42 transaction(s) from export.csv [Shakepay]..."` |
+| `fluff` | In-app chrome (personality) | `"Checking sap levels..."` |
+| `error` | In-app chrome (always plain) | `"error [E009]: Cannot identify CSV format."` |
+| `warning` | In-app chrome (always plain) | `"warning [W001]: ..."` |
+
+Tax output (Schedule 3, TP-21.4.39-V, audit logs) bypasses `emit()` entirely
+and is written directly to files by the reports module using standard accounting
+vocabulary only.
+
+**Adding a new themed message:** set `category: fluff` in `config/messages.yaml`.
+**Adding a new result message:** set `category: output`. Never add personality
+to `error` or `warning` — they must be clear and actionable above all else.
+
+---
+
 ## Extending This Guide
 
 This document sets the direction. Claude Code is expected to exercise judgment

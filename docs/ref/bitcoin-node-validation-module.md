@@ -1,5 +1,11 @@
 # Bitcoin Node Verification Module
 
+> **Status: Future Implementation**
+> This module is not yet wired into the active pipeline. The `verify` stage
+> currently promotes transactions to `verified_transactions` unchanged
+> (pass-through). This document is the design spec for when node verification
+> is built. See `src/sirop/cli/boil.py → _run_verify()` for current behaviour.
+
 ## Purpose
 
 This module uses a local Bitcoin full node to verify, enrich, and audit on-chain transaction data used in crypto tax calculations. It serves as the authoritative source of truth for all BTC transactions, providing exact confirmation timestamps, precise fee amounts, and definitive transfer matching — data that exchange CSVs and wallet exports may report inaccurately or incompletely.

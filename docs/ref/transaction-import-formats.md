@@ -2,8 +2,11 @@
 
 **Document purpose:** Defines the CSV schemas for each data source sirop must parse. Claude Code must implement importers that conform exactly to these specifications. Do not infer column semantics from column names alone — read the notes for each field carefully.
 
-**Sources covered:** Shakepay, Sparrow Wallet  
-**Sources pending:** NDAX, Koinly (separate documents)
+**Sources covered:** Shakepay, Sparrow Wallet, NDAX
+**Sources pending:** Koinly (separate document)
+
+> **NDAX** is implemented (`NDAXImporter`, `config/importers/ndax.yaml`).
+> The AlphaPoint Ledgers format spec is documented at the end of this file.
 
 ---
 

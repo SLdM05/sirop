@@ -363,57 +363,108 @@ re-runs pipeline stages. It queries: `stage_status` (progress view),
 
 ---
 
-## Logging and Debug Mode
+## User Output — Two Channels
 
-All logging goes through `src/utils/logging.py`. No module imports Python's
-`logging` directly or calls `logging.basicConfig()`.
+sirop has two distinct output channels. Never mix them.
 
-### Setup
+### Channel 1 — `emit()` (user-facing results)
 
-See `src/sirop/utils/logging.py` for the full API. Key contract:
+All structured user-visible output goes through `emit()`:
+
+```python
+from sirop.utils.messages import emit
+from sirop.models.messages import MessageCode
+
+emit(MessageCode.TAP_SUCCESS, count=42, filename="export.csv", fmt="Shakepay",
+     batch="my2025tax", skip_note="")
+```
+
+Message text lives in `config/messages.yaml`, keyed by the dotted code that
+matches the `MessageCode` StrEnum value. Categories control routing:
+
+| Category | Output | Code shown? | Use for |
+|----------|--------|-------------|---------|
+| `error` | stderr | yes (`[E001]`) | Unrecoverable failures |
+| `warning` | stderr | yes (`[W001]`) | User-visible data quality issues |
+| `output` | stdout | no | Command results, confirmations, hints |
+| `fluff` | stdout | no | Maple-themed personality messages |
+
+**Rules:**
+- `emit()` is the sole source of structured user output. Never `print()` directly
+  in CLI handlers.
+- `error` and `warning` categories display their `[Exxx]`/`[Wxxx]` code so users
+  can quote them in support requests.
+- `output` and `fluff` display clean text only — no prefix, no code.
+- Tax output (Schedule 3, TP-21.4.39-V, etc.) never goes through `emit()` —
+  it is written directly to files by the reports module, personality-free.
+
+**Adding a new message:**
+1. Add an entry to `config/messages.yaml` with `category`, `text`, and (for
+   errors/warnings) a `code`.
+2. Add a matching constant to `MessageCode` in `src/sirop/models/messages.py`.
+3. Call `emit(MessageCode.YOUR_CODE, **kwargs)` at the call site.
+
+**Sentinel exceptions in CLI handlers:**
+
+`_TapError` and `_BoilError` carry a `MessageCode` + kwargs instead of a
+pre-formatted string. The handler boundary catches them and calls `emit()`:
+
+```python
+# raise site — no formatting here
+raise _TapError(MessageCode.TAP_ERROR_FILE_NOT_FOUND, path=file_path)
+
+# handler boundary — emit() does the formatting and routing
+except _TapError as exc:
+    emit(exc.msg_code, **exc.msg_kwargs)
+    return 1
+```
+
+### Channel 2 — `logger` (diagnostic traces)
+
+All diagnostic and audit output goes through `src/sirop/utils/logging.py`.
+No module imports Python's `logging` directly or calls `logging.basicConfig()`.
+
+**Setup:**
 - Call `configure_logging(verbose, debug)` **once** at CLI entry point only
 - Every other module: `from sirop.utils.logging import get_logger; logger = get_logger(__name__)`
 - Wrap each pipeline stage: `with StageContext(batch_id, stage): ...` — all logs inside carry context
 - Pure engine modules use `logging.getLogger(__name__)` directly
 
-### Log levels
+**Log levels:**
 
 | Level | Visible by default | Content |
 |-------|--------------------|---------|
-| `ERROR` | always | Stage failures, unrecoverable errors. Always clear, never themed. |
-| `WARNING` | always | Discrepancies, data quality issues, node fallback, superficial losses detected. |
-| `INFO` | always | Stage start/completion, row counts, key milestones. Maple theme OK here. |
+| `WARNING` | always | Data quality issues, node fallback, superficial losses. Never themed. |
+| `INFO` | always | Stage progress milestones with no `emit()` pair (e.g. `"Checking sap levels..."`). Maple theme OK. |
 | `DEBUG` | `--debug` only | Field transforms, SQL queries, ACB step-by-step, raw values. |
 
 `--debug` implies `--verbose`.
 
-### Privacy and redaction
+**Key rule — no double-printing:** When `emit()` already covers a milestone,
+the adjacent `logger` call must be `logger.debug()`, not `logger.info()`.
+`logger.info()` is only for pipeline progress that has *no* `emit()` pair.
 
-**Default (no flags):** `SensitiveDataFilter` is attached to the log handler
-and replaces the following in every message:
+**Privacy and redaction:**
 
+Default: `SensitiveDataFilter` replaces in every log message:
 - 64-char hex strings (txids) → `[txid redacted]`
 - Bitcoin addresses (`bc1…`, `1…`, `3…`) → `[address redacted]`
-- BTC amounts near the keyword `BTC` → `[amount redacted]`
-- CAD amounts near tax keywords (proceeds, acb, gain, loss, fee) → `[amount redacted]`
+- BTC amounts near `BTC` keyword → `[amount redacted]`
+- CAD amounts near tax keywords → `[amount redacted]`
 
-**`--verbose` mode:** Redaction filter is bypassed. A banner is printed once:
-```
-⚠  VERBOSE MODE: sensitive data (txids, amounts, addresses) is being logged.
-   Do not share this output. Run without --verbose for redacted logs.
-```
+`--verbose`: redaction bypassed; warning banner printed once.
 
-### What each layer logs
+**What each layer logs:**
 
 | Module | INFO | WARNING | DEBUG |
 |--------|------|---------|-------|
-| Importers | `"Tapping {source}..."`, row count on done | Missing fields, unknown tx types | Each parsed row (redacted by default) |
-| Normalizer | `"Checking sap levels..."` (BoC fetch/cache) | Missing rates, unusual types | Each BoC rate used, each field converted |
-| Node verifier | `"Verifying on-chain..."`, `"Block confirmed."` | `"Node unreachable — running without on-chain verification."`, each discrepancy | Raw API response fields, before/after overrides |
-| Transfer matcher | `"Tracing the flow..."`, each confirmed match | `"Loose tap — withdrawal on {date} has no matching deposit."` | Window checks |
-| ACB engine (PURE) | — (caller logs milestones) | — (caller logs, engine returns flags) | ACB state before/after each event, gain/loss steps |
-| SLD engine (PURE) | — | — | Each 61-day window check, each denied loss |
-| Repository | — | Schema version mismatch | Every SQL query (parameter count only unless `--debug --verbose`) |
+| Importers | _(none — tap result goes via emit())_ | Missing fields, unknown tx types | Each parsed row |
+| Normalizer | `"Checking sap levels..."` (BoC fetch) | Missing rates, unusual types | Each BoC rate, each field converted |
+| Node verifier | `"Verifying on-chain..."` | `"Node unreachable — running without on-chain verification."`, discrepancies | Raw API fields, before/after overrides |
+| Transfer matcher | `"Tracing the flow..."`, row counts | Unmatched withdrawals/deposits | Window checks |
+| ACB engine (PURE) | — | — | ACB state before/after each event |
+| SLD engine (PURE) | — | — | Each 61-day window check |
+| Repository | — | Schema version mismatch | Every SQL query |
 
 ---
 
