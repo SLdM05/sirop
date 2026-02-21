@@ -8,10 +8,25 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 It calculates Canadian/Quebec tax obligations from exchange and wallet
 transaction exports.
 
+## Session startup
+
+The system Python may be 3.11 (incompatible). Poetry will auto-select
+Python 3.13 and create a new virtualenv the first time it runs, but that
+virtualenv starts empty. **Always run this before anything else in a session:**
+
+```bash
+poetry install
+```
+
+This ensures the virtualenv exists, all dependencies are present, and
+`poetry run` commands work correctly. Skipping it causes spurious
+`ModuleNotFoundError: No module named 'sirop'` failures in tests and
+`Library stubs not installed` noise in mypy output.
+
 ## Commands
 
 ```bash
-# Install dependencies
+# Install dependencies (also the session-startup command — run first)
 poetry install
 
 # Run any command inside the Poetry virtualenv
