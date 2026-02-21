@@ -140,27 +140,59 @@ def _run_tap(file_path: Path, source: str | None, settings: Settings) -> int:
         raise _TapError(f"error: failed to parse {file_path.name}: {exc}") from exc
 
     # ── 5. Write to DB ────────────────────────────────────────────────────────
-    _write_to_batch(batch_name, settings, txs)
+    inserted, skipped = _write_to_batch(batch_name, settings, txs)
 
     disp = detector.display_name(detected_source)
-    print(f"Tapped {len(txs)} transaction(s) from {file_path.name} [{disp}] into '{batch_name}'.")
+    if inserted == 0:
+        print(
+            f"Nothing new to tap from {file_path.name} [{disp}] — "
+            f"all {skipped} row(s) already exist in '{batch_name}'."
+        )
+        logger.info(
+            "tap: 0 new rows from %s (%s) — %d duplicate(s) skipped",
+            file_path.name,
+            detected_source,
+            skipped,
+        )
+        return 0
+
+    skip_note = f" ({skipped} duplicate(s) skipped)" if skipped else ""
+    print(
+        f"Tapped {inserted} transaction(s) from {file_path.name} [{disp}]"
+        f" into '{batch_name}'.{skip_note}"
+    )
     logger.info(
-        "tap: %d rows written from %s (%s) into batch %s",
-        len(txs),
+        "tap: %d rows written from %s (%s) into batch %s (%d duplicate(s) skipped)",
+        inserted,
         file_path.name,
         detected_source,
         batch_name,
+        skipped,
     )
     return 0
 
 
-def _write_to_batch(batch_name: str, settings: Settings, txs: list[RawTransaction]) -> None:
+def _write_to_batch(
+    batch_name: str, settings: Settings, txs: list[RawTransaction]
+) -> tuple[int, int]:
     """Write *txs* to the active batch DB in a single atomic transaction.
+
+    Duplicate rows (same source + timestamp + asset + amount already present in
+    ``raw_transactions``) are silently skipped.  This handles the common case of
+    overlapping date-range exports from the same exchange without blocking or
+    requiring the user to manually deduplicate files.
+
+    Returns
+    -------
+    tuple[int, int]
+        ``(inserted, skipped)`` — number of new rows written and number of
+        duplicate rows that were omitted.
 
     Raises
     ------
     _TapError
-        When the tap stage is already done/running, or a DB write fails.
+        When the tap stage is running (concurrent process guard), or a DB
+        write fails.
     """
     conn = open_batch(batch_name, settings)
     try:
@@ -171,17 +203,15 @@ def _write_to_batch(batch_name: str, settings: Settings, txs: list[RawTransactio
                 "(another process?). Aborting."
             )
 
-        # Appending a second (or later) file to an existing tap stage is fine —
-        # we just invalidate all downstream stages so they re-run with the full
-        # combined dataset.
         is_append = stage_row and stage_row["status"] == "done"
 
-        # Deduplication guard — must run before the DB write.
+        # Deduplication — filter to new-only rows before the DB write.
         # (source, raw_timestamp, asset, amount) is a natural unique key for
         # exchange rows: the same exchange cannot produce two transactions with
-        # an identical timestamp, asset, and amount.  If any incoming row
-        # already exists in raw_transactions the file has almost certainly been
-        # tapped before, so we abort rather than double-count.
+        # an identical timestamp, asset, and amount.
+        # Overlapping date-range exports are common; we skip the rows already
+        # present and insert only the net-new ones, reporting both counts.
+        skipped = 0
         if is_append:
             existing_keys: set[tuple[str, str, str, str]] = {
                 (row[0], row[1], row[2], row[3])
@@ -189,18 +219,18 @@ def _write_to_batch(batch_name: str, settings: Settings, txs: list[RawTransactio
                     "SELECT source, raw_timestamp, asset, amount FROM raw_transactions"
                 ).fetchall()
             }
-            incoming_keys = {
-                (tx.source, tx.timestamp.isoformat(), tx.asset, format(tx.amount, "f"))
+            new_txs = [
+                tx
                 for tx in txs
-            }
-            overlap = existing_keys & incoming_keys
-            if overlap:
-                n = len(overlap)
-                raise _TapError(
-                    f"error: {n} row(s) from this file already exist in batch "
-                    f"'{batch_name}' — has this file been tapped before? "
-                    "Each CSV file should only be tapped once per batch."
-                )
+                if (tx.source, tx.timestamp.isoformat(), tx.asset, format(tx.amount, "f"))
+                not in existing_keys
+            ]
+            skipped = len(txs) - len(new_txs)
+            txs = new_txs
+
+        # Nothing new to insert — leave the batch state exactly as-is.
+        if not txs:
+            return 0, skipped
 
         # format(d, 'f') forces fixed-point notation for every Decimal before
         # it reaches the DB.  str(Decimal) is non-deterministic: division
@@ -253,6 +283,8 @@ def _write_to_batch(batch_name: str, settings: Settings, txs: list[RawTransactio
                 db_rows,
             )
             conn.execute("UPDATE stage_status SET status = 'done' WHERE stage = 'tap'")
+
+        return len(txs), skipped
 
     except sqlite3.Error as exc:
         raise _TapError(f"error: failed to write to batch '{batch_name}': {exc}") from exc
