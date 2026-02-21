@@ -99,4 +99,7 @@ def emit(code: MessageCode, **kwargs: object) -> None:
         case "output" | "fluff":
             print(text)
         case _:
-            print(text)
+            raise RuntimeError(
+                f"sirop bug: unknown message category {category!r} for code {key!r}. "
+                "Valid categories: error, warning, output, fluff."
+            )
