@@ -70,8 +70,22 @@ def emit(code: MessageCode, **kwargs: object) -> None:
         fields.
     """
     catalog = _load_catalog()
-    entry = catalog[str(code)]
-    text = entry["text"].format(**kwargs)
+    key = str(code)
+    try:
+        entry = catalog[key]
+    except KeyError:
+        raise RuntimeError(
+            f"sirop bug: no catalog entry for message code {key!r}. "
+            "Check that config/messages.yaml and MessageCode are in sync."
+        ) from None
+
+    try:
+        text = entry["text"].format(**kwargs)
+    except KeyError as exc:
+        raise RuntimeError(
+            f"sirop bug: message {key!r} is missing required kwarg {exc}. "
+            "Check the emit() call site."
+        ) from None
     category = entry["category"]
     ref = entry.get("code", "")
 
