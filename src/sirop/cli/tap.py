@@ -22,7 +22,9 @@ Error behaviour
   format fits better.
 * Extra columns (present in CSV but unknown to any fingerprint) → WARNING
   only, not a hard stop.  The importer stores them in ``extra_json``.
-* Batch ``tap`` stage already ``done`` → error; re-tap not yet supported.
+* Batch ``tap`` stage already ``done`` → allowed; rows are appended and all
+  downstream stages are marked ``invalidated`` so they re-run with the
+  full combined dataset.  Useful when a batch spans multiple exchange files.
 """
 
 import csv
@@ -33,6 +35,7 @@ from pathlib import Path
 
 from sirop.config.settings import Settings, get_settings
 from sirop.db.connection import get_active_batch_name, open_batch
+from sirop.db.schema import PIPELINE_STAGES
 from sirop.importers.base import BaseImporter, ImporterError
 from sirop.importers.detector import FormatDetector
 from sirop.importers.ndax import NDAXImporter
@@ -162,16 +165,16 @@ def _write_to_batch(batch_name: str, settings: Settings, txs: list[RawTransactio
     conn = open_batch(batch_name, settings)
     try:
         stage_row = conn.execute("SELECT status FROM stage_status WHERE stage = 'tap'").fetchone()
-        if stage_row and stage_row["status"] == "done":
-            raise _TapError(
-                f"error: batch '{batch_name}' already has tap data. "
-                "Re-tap is not yet supported — create a new batch or switch to one."
-            )
         if stage_row and stage_row["status"] == "running":
             raise _TapError(
                 f"error: batch '{batch_name}' tap stage is currently running "
                 "(another process?). Aborting."
             )
+
+        # Appending a second (or later) file to an existing tap stage is fine —
+        # we just invalidate all downstream stages so they re-run with the full
+        # combined dataset.
+        is_append = stage_row and stage_row["status"] == "done"
 
         # format(d, 'f') forces fixed-point notation for every Decimal before
         # it reaches the DB.  str(Decimal) is non-deterministic: division
@@ -200,6 +203,19 @@ def _write_to_batch(batch_name: str, settings: Settings, txs: list[RawTransactio
 
         with conn:
             conn.execute("UPDATE stage_status SET status = 'running' WHERE stage = 'tap'")
+            if is_append:
+                # Invalidate all downstream stages within the same transaction so
+                # they re-run with the full combined dataset.  Inline the SQL here
+                # rather than calling set_stages_invalidated() to keep the whole
+                # write (status update + invalidations + inserts) in one atomic block.
+                downstream = PIPELINE_STAGES[PIPELINE_STAGES.index("tap") + 1 :]
+                for _stage in downstream:
+                    conn.execute(
+                        "UPDATE stage_status"
+                        " SET status='invalidated', completed_at=NULL, error=NULL"
+                        " WHERE stage = ?",
+                        (_stage,),
+                    )
             conn.executemany(
                 """
                 INSERT INTO raw_transactions

@@ -45,7 +45,8 @@ class FormatCandidate:
 
     source_name: str  # yaml stem, e.g. "ndax"
     display_name: str  # human label from config, e.g. "NDAX"
-    fingerprint: frozenset[str]  # required CSV column names
+    fingerprint: frozenset[str]  # required CSV column names (subset of all_columns)
+    all_columns: frozenset[str]  # every column name declared in the YAML (for drift detection)
 
 
 @dataclass(frozen=True)
@@ -160,7 +161,7 @@ class FormatDetector:
         all_known: set[str] = set()
 
         for source_name, candidate in self._candidates.items():
-            all_known |= candidate.fingerprint
+            all_known |= candidate.all_columns
             present = candidate.fingerprint & headers
             ratio = len(present) / len(candidate.fingerprint) if candidate.fingerprint else 0.0
             if ratio == 1.0:
@@ -192,7 +193,7 @@ class FormatDetector:
 
         all_known: set[str] = set()
         for c in self._candidates.values():
-            all_known |= c.fingerprint
+            all_known |= c.all_columns
 
         missing = candidate.fingerprint - headers
         unknown = frozenset(headers - all_known)
@@ -228,9 +229,22 @@ class FormatDetector:
             fingerprint_list: list[Any] = raw.get("fingerprint_columns", [])
             if not fingerprint_list:
                 continue
+
+            # Build the full set of declared column names for drift detection.
+            # "Unknown" means unknown to the entire YAML, not just the fingerprint.
+            all_cols: set[str] = set(str(c) for c in fingerprint_list)
+            # columns: {logical_name: csv_column_name} — collect the CSV names.
+            for csv_col in raw.get("columns", {}).values():
+                all_cols.add(str(csv_col))
+            if date_col := raw.get("date_column"):
+                all_cols.add(str(date_col))
+            for col in raw.get("ignored_columns", []):
+                all_cols.add(str(col))
+
             source_name = yaml_path.stem
             self._candidates[source_name] = FormatCandidate(
                 source_name=source_name,
                 display_name=str(raw.get("name", source_name)),
                 fingerprint=frozenset(str(c) for c in fingerprint_list),
+                all_columns=frozenset(all_cols),
             )
