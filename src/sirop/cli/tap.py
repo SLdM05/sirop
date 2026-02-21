@@ -40,8 +40,10 @@ from sirop.importers.base import BaseImporter, ImporterError
 from sirop.importers.detector import FormatDetector
 from sirop.importers.ndax import NDAXImporter
 from sirop.importers.shakepay import ShakepayImporter
+from sirop.models.messages import MessageCode
 from sirop.models.raw import RawTransaction
 from sirop.utils.logging import get_logger
+from sirop.utils.messages import emit
 
 logger = get_logger(__name__)
 
@@ -57,7 +59,12 @@ _IMPORTER_REGISTRY: dict[str, Callable[[Path], BaseImporter]] = {
 
 
 class _TapError(Exception):
-    """Internal sentinel — raised to exit early with a printed error message."""
+    """Internal sentinel — raised to exit early; caught by handle_tap."""
+
+    def __init__(self, code: MessageCode, **kwargs: object) -> None:
+        self.msg_code = code
+        self.msg_kwargs = kwargs
+        super().__init__(str(code))
 
 
 def handle_tap(
@@ -87,7 +94,7 @@ def handle_tap(
     try:
         return _run_tap(file_path, source, settings)
     except _TapError as exc:
-        print(str(exc))
+        emit(exc.msg_code, **exc.msg_kwargs)
         return 1
 
 
@@ -101,15 +108,15 @@ def _run_tap(file_path: Path, source: str | None, settings: Settings) -> int:
     # ── 1. Active batch ───────────────────────────────────────────────────────
     batch_name = get_active_batch_name(settings)
     if batch_name is None:
-        raise _TapError("error: no active batch. Run `sirop create <name>` first.")
+        raise _TapError(MessageCode.BATCH_ERROR_NO_ACTIVE)
 
     if not file_path.exists():
-        raise _TapError(f"error: file not found: {file_path}")
+        raise _TapError(MessageCode.TAP_ERROR_FILE_NOT_FOUND, path=file_path)
 
     # ── 2. Read CSV headers (header row only — no data rows yet) ─────────────
     headers = _read_headers(file_path)
     if not headers:
-        raise _TapError(f"error: CSV has no header row: {file_path}")
+        raise _TapError(MessageCode.TAP_ERROR_NO_HEADER, path=file_path)
 
     # ── 3. Detect / validate format ───────────────────────────────────────────
     config_dirs = [_BUILTIN_CONFIG_DIR, settings.data_dir / "importers"]
@@ -121,15 +128,16 @@ def _run_tap(file_path: Path, source: str | None, settings: Settings) -> int:
         else _auto_detect(detector, headers)
     )
     if detected_source is None:
-        return 1  # helpers already printed the error
+        return 1  # helpers already emitted the error
 
     # ── 4. Load importer and parse ────────────────────────────────────────────
     factory = _IMPORTER_REGISTRY.get(detected_source)
     if factory is None:
         disp = detector.display_name(detected_source)
         raise _TapError(
-            f"error: format detected as {disp!r} "
-            f"but no importer is implemented for {detected_source!r} yet."
+            MessageCode.TAP_ERROR_NO_IMPORTER,
+            fmt=disp,
+            source=detected_source,
         )
 
     yaml_path = _BUILTIN_CONFIG_DIR / f"{detected_source}.yaml"
@@ -137,16 +145,23 @@ def _run_tap(file_path: Path, source: str | None, settings: Settings) -> int:
         importer = factory(yaml_path)
         txs = importer.parse(file_path)
     except ImporterError as exc:
-        raise _TapError(f"error: failed to parse {file_path.name}: {exc}") from exc
+        raise _TapError(
+            MessageCode.TAP_ERROR_PARSE_FAILED,
+            filename=file_path.name,
+            detail=exc,
+        ) from exc
 
     # ── 5. Write to DB ────────────────────────────────────────────────────────
     inserted, skipped = _write_to_batch(batch_name, settings, txs)
 
     disp = detector.display_name(detected_source)
     if inserted == 0:
-        print(
-            f"Nothing new to tap from {file_path.name} [{disp}] — "
-            f"all {skipped} row(s) already exist in '{batch_name}'."
+        emit(
+            MessageCode.TAP_NOTHING_NEW,
+            filename=file_path.name,
+            fmt=disp,
+            count=skipped,
+            batch=batch_name,
         )
         logger.info(
             "tap: 0 new rows from %s (%s) — %d duplicate(s) skipped",
@@ -157,9 +172,13 @@ def _run_tap(file_path: Path, source: str | None, settings: Settings) -> int:
         return 0
 
     skip_note = f" ({skipped} duplicate(s) skipped)" if skipped else ""
-    print(
-        f"Tapped {inserted} transaction(s) from {file_path.name} [{disp}]"
-        f" into '{batch_name}'.{skip_note}"
+    emit(
+        MessageCode.TAP_SUCCESS,
+        count=inserted,
+        filename=file_path.name,
+        fmt=disp,
+        batch=batch_name,
+        skip_note=skip_note,
     )
     logger.info(
         "tap: %d rows written from %s (%s) into batch %s (%d duplicate(s) skipped)",
@@ -198,10 +217,7 @@ def _write_to_batch(
     try:
         stage_row = conn.execute("SELECT status FROM stage_status WHERE stage = 'tap'").fetchone()
         if stage_row and stage_row["status"] == "running":
-            raise _TapError(
-                f"error: batch '{batch_name}' tap stage is currently running "
-                "(another process?). Aborting."
-            )
+            raise _TapError(MessageCode.TAP_ERROR_STAGE_RUNNING, name=batch_name)
 
         is_append = stage_row and stage_row["status"] == "done"
 
@@ -294,39 +310,38 @@ def _write_to_batch(
         return len(txs), skipped
 
     except sqlite3.Error as exc:
-        raise _TapError(f"error: failed to write to batch '{batch_name}': {exc}") from exc
+        raise _TapError(MessageCode.TAP_ERROR_WRITE_FAILED, name=batch_name, detail=exc) from exc
     finally:
         conn.close()
 
 
 def _auto_detect(detector: FormatDetector, headers: set[str]) -> str | None:
-    """Attempt auto-detection; print errors and return the source name or None."""
+    """Attempt auto-detection; emit errors and return the source name or None."""
     result = detector.detect(headers)
 
     if not result.matched:
-        print("error: cannot identify CSV format — headers don't match any known exchange.")
-        print(f"  headers found: {sorted(headers)}")
+        emit(MessageCode.TAP_ERROR_NO_FORMAT_MATCH)
+        emit(MessageCode.TAP_HEADERS_FOUND, headers=", ".join(sorted(headers)))
         if result.partial:
             best_name, best_ratio = result.partial[0]
             disp = detector.display_name(best_name)
-            print(
-                f"hint: closest match is {disp!r} "
-                f"({best_ratio:.0%} of expected columns found). "
-                f"Pass --source {best_name} to override, or check you exported "
-                f"the correct report type."
+            emit(
+                MessageCode.TAP_HINT_CLOSEST_MATCH,
+                fmt=disp,
+                ratio=best_ratio,
+                source=best_name,
             )
         else:
-            print(f"  known formats: {', '.join(detector.known_sources)}")
+            emit(MessageCode.TAP_KNOWN_FORMATS, formats=", ".join(detector.known_sources))
         return None
 
     if len(result.matched) > 1:
-        names = ", ".join(result.matched)
-        print(f"error: CSV headers match multiple formats: {names}. Pass --source to pick one.")
+        emit(MessageCode.TAP_ERROR_MULTIPLE_FORMATS, formats=", ".join(result.matched))
         return None
 
     detected = result.matched[0]
     disp = detector.display_name(detected)
-    print(f"Detected format: {disp}")
+    emit(MessageCode.TAP_FORMAT_DETECTED, fmt=disp)
 
     if result.unknown_headers:
         logger.warning(
@@ -341,23 +356,24 @@ def _auto_detect(detector: FormatDetector, headers: set[str]) -> str | None:
 
 
 def _validate_source(detector: FormatDetector, headers: set[str], source: str) -> str | None:
-    """Validate the user-declared source; print errors and return source or None."""
+    """Validate the user-declared source; emit errors and return source or None."""
     result = detector.validate(headers, source)
 
     if not result.ok:
-        print(f"error: --source {source!r} declared but CSV is missing expected columns:")
+        emit(MessageCode.TAP_ERROR_MISSING_COLUMNS, source=source)
         for col in sorted(result.missing):
-            print(f"  missing: {col!r}")
+            emit(MessageCode.TAP_MISSING_COLUMN, column=col)
         if result.suggested:
             suggested_disp = detector.display_name(result.suggested)
-            print(
-                f"hint: headers look more like {suggested_disp!r}. "
-                f"Try --source {result.suggested} instead."
+            emit(
+                MessageCode.TAP_HINT_SUGGESTED_SOURCE,
+                fmt=suggested_disp,
+                source=result.suggested,
             )
         else:
             fp = detector.fingerprint(source)
             if fp is not None:
-                print(f"  expected columns for {source!r}: {sorted(fp)}")
+                emit(MessageCode.TAP_EXPECTED_COLUMNS, source=source, columns=sorted(fp))
         return None
 
     if result.unknown_headers:

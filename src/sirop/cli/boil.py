@@ -30,9 +30,11 @@ from sirop.db.schema import PIPELINE_STAGES
 from sirop.engine import acb as acb_engine
 from sirop.engine import superficial_loss as sld_engine
 from sirop.engine.acb import TaxRules
+from sirop.models.messages import MessageCode
 from sirop.normalizer import normalizer
 from sirop.transfer_match import matcher
 from sirop.utils.logging import StageContext, get_logger
+from sirop.utils.messages import emit
 
 logger = get_logger(__name__)
 
@@ -44,7 +46,12 @@ _TAX_RULES_PATH = Path("config/tax_rules.yaml")
 
 
 class _BoilError(Exception):
-    """Sentinel — raised to exit early with a user-facing error message."""
+    """Sentinel — raised to exit early; caught by handle_boil."""
+
+    def __init__(self, code: MessageCode, **kwargs: object) -> None:
+        self.msg_code = code
+        self.msg_kwargs = kwargs
+        super().__init__(str(code))
 
 
 def handle_boil(
@@ -71,7 +78,7 @@ def handle_boil(
     try:
         return _run_boil(from_stage, settings)
     except _BoilError as exc:
-        print(str(exc))
+        emit(exc.msg_code, **exc.msg_kwargs)
         return 1
 
 
@@ -84,17 +91,14 @@ def _run_boil(from_stage: str | None, settings: Settings) -> int:
     """Core pipeline coordinator.  Raises ``_BoilError`` on any user-facing error."""
     batch_name = get_active_batch_name(settings)
     if batch_name is None:
-        raise _BoilError("error: no active batch. Run `sirop create <name>` first.")
+        raise _BoilError(MessageCode.BATCH_ERROR_NO_ACTIVE)
 
     conn = open_batch(batch_name, settings)
     try:
         # Ensure tap has been run.
         tap_status = repo.get_stage_status(conn, "tap")
         if tap_status != "done":
-            raise _BoilError(
-                f"error: batch '{batch_name}' has not been tapped yet. "
-                "Run `sirop tap <file>` first."
-            )
+            raise _BoilError(MessageCode.BOIL_ERROR_NOT_TAPPED, name=batch_name)
 
         tax_rules = _load_tax_rules()
 
@@ -158,7 +162,7 @@ def _run_normalize(conn: object) -> None:
     logger.info("Checking sap levels...")
     raw_txs = repo.read_raw_transactions(conn)
     if not raw_txs:
-        raise _BoilError("error: no raw transactions found. Run `sirop tap` first.")
+        raise _BoilError(MessageCode.BOIL_ERROR_NO_RAW_TRANSACTIONS)
 
     logger.info("normalize: processing %d raw transaction(s)", len(raw_txs))
     txs = normalizer.normalize(raw_txs, conn)
@@ -218,10 +222,7 @@ def _run_superficial_loss(conn: object, tax_rules: TaxRules) -> None:
 def _load_tax_rules() -> TaxRules:
     """Load ``config/tax_rules.yaml`` and return a ``TaxRules`` dataclass."""
     if not _TAX_RULES_PATH.exists():
-        raise _BoilError(
-            f"error: tax rules config not found at {_TAX_RULES_PATH}. "
-            "Is the working directory the project root?"
-        )
+        raise _BoilError(MessageCode.BOIL_ERROR_NO_TAX_RULES, path=_TAX_RULES_PATH)
 
     with _TAX_RULES_PATH.open(encoding="utf-8") as fh:
         raw = yaml.safe_load(fh)
@@ -259,17 +260,17 @@ def _check_not_running(conn: object, stage: str, batch_name: str) -> None:
 
     status = repo.get_stage_status(conn, stage)
     if status == "running":
-        raise _BoilError(
-            f"error: batch '{batch_name}' stage '{stage}' is currently running "
-            "(another process?). Aborting."
-        )
+        raise _BoilError(MessageCode.BOIL_ERROR_STAGE_RUNNING, name=batch_name, stage=stage)
 
 
 def _validate_from_stage(from_stage: str) -> None:
     """Raise _BoilError if *from_stage* is not a valid boil stage."""
     if from_stage not in _BOIL_STAGES:
-        valid = ", ".join(_BOIL_STAGES)
-        raise _BoilError(f"error: unknown stage {from_stage!r}. Valid stages: {valid}")
+        raise _BoilError(
+            MessageCode.BOIL_ERROR_UNKNOWN_STAGE,
+            stage=from_stage,
+            valid=", ".join(_BOIL_STAGES),
+        )
 
 
 def _stages_from(from_stage: str) -> tuple[str, ...]:
@@ -286,7 +287,7 @@ def _print_summary(conn: object, batch_name: str) -> None:
         row = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()  # noqa: S608
         return int(row[0]) if row else 0
 
-    print(f"\nBatch '{batch_name}' pipeline complete.")
+    emit(MessageCode.BOIL_SUMMARY_COMPLETE, name=batch_name)
     print(f"  transactions:          {_count('transactions'):>6}")
     print(f"  classified_events:     {_count('classified_events'):>6}")
     print(f"  income_events:         {_count('income_events'):>6}")
@@ -313,7 +314,7 @@ def _print_summary(conn: object, batch_name: str) -> None:
         """
     ).fetchall()
     if holdings:
-        print("\n  Year-end holdings (cost basis):")
+        emit(MessageCode.BOIL_SUMMARY_HOLDINGS_HEADER)
         for h in holdings:
             units_val = float(h["units"])
             cost_val = float(h["pool_cost"])
