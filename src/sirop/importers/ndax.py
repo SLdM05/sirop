@@ -225,15 +225,17 @@ class NDAXImporter(BaseImporter):
         non_fiat_amount = self._parse_amount(non_fiat_row[cols["amount"]], asset)
         fiat_amount = self._parse_amount(fiat_row[cols["amount"]], fiat_currency_code)
 
-        # Positive non-fiat amount = buy; negative = sell.
+        # Positive non-fiat amount = buy (spending CAD, receiving crypto).
+        # Negative non-fiat amount = sell (spending crypto, receiving CAD).
         # fiat_value is always stored as a positive (what was spent or received).
         fiat_value = abs(fiat_amount)
-        if non_fiat_amount < 0:
+        is_sell = non_fiat_amount < Decimal("0")
+        if is_sell:
             non_fiat_amount = abs(non_fiat_amount)
 
         rate = (fiat_value / non_fiat_amount) if non_fiat_amount else None
 
-        tx_type = self._lookup_type("trade")
+        tx_type = "sell" if is_sell else "buy"
         return RawTransaction(
             source=self._config.source_name,
             timestamp=timestamp,

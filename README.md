@@ -21,12 +21,29 @@ poetry install
 cp .env.example .env   # fill in your values
 ```
 
+## Quickstart workflow
+
+```bash
+# 1. Create a batch for your tax year
+sirop create my2025tax --year 2025
+
+# 2. Import your exchange exports
+sirop tap ~/Downloads/ndax_2025_ledger.csv
+
+# 3. Run the tax calculation pipeline
+sirop boil
+```
+
+After `boil`, the `.sirop` file contains fully computed dispositions and
+superficial-loss-adjusted gains, ready for `pour` (report generation).
+
 ## Documentation
 
 See [`docs/usage/`](docs/usage/) for CLI usage guides:
 
 - [Batch management — create, list, switch](docs/usage/sirop-create.md)
 - [tap — import exchange transactions](docs/usage/sirop-tap.md)
+- [boil — run the tax calculation pipeline](docs/usage/sirop-boil.md)
 
 See [`docs/ref/`](docs/ref/) for full reference material:
 

@@ -59,9 +59,12 @@ _RE_BTC_AMOUNT = re.compile(
     r"\b\d{1,10}\.\d{1,8}\s*(BTC|btc)\b" r"|\b(BTC|btc)\s*\d{1,10}\.\d{1,8}\b"
 )
 
-# CAD amounts near tax keywords (proceeds, acb, gain, loss, fee, value, rate)
+# CAD amounts near tax keywords (proceeds, acb, gain, loss, fee, value, rate).
+# Requires either a leading $ sign or a decimal point so plain integer counts
+# (e.g. "ACB engine on 2 event(s)") are not redacted as monetary amounts.
 _RE_CAD_AMOUNT = re.compile(
-    r"(?i)(proceeds|acb|gain|loss|fee|value|rate|cad|amount)[^\d$]{0,10}" r"\$?\s*\d[\d,]*\.?\d*"
+    r"(?i)(proceeds|acb|gain|loss|fee|value|rate|cad|amount)[^\d$]{0,10}"
+    r"(?:\$\s*\d[\d,]*\.?\d*|\d[\d,]*\.\d+)"
 )
 
 
