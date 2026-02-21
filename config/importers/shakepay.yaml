@@ -1,5 +1,13 @@
 name: "Shakepay"
+# Shakepay exports transaction history as multiple CSV files by currency type
+# (BTC/ETH activity, CAD transactions, USD transactions).  The importer must
+# accept and merge all files from a single export.  Files are identified by
+# their header row, not by filename.
+#
+# Full column spec: docs/ref/transaction-import-formats.md §1
 date_column: "Date"
+# Shakepay timestamps: "2022-09-10T00:36:12+00" — the offset is always "+00"
+# (UTC).  %z handles this format correctly.
 date_format: "%Y-%m-%dT%H:%M:%S%z"
 columns:
   transaction_type: "Transaction Type"
@@ -7,23 +15,35 @@ columns:
   debit_currency: "Debit Currency"
   amount_credited: "Amount Credited"
   credit_currency: "Credit Currency"
-  rate: "Buy / Sell Rate"
-  spot_rate: "Spot Rate"
   direction: "Direction"
   source_destination: "Source / Destination"
   txid: "Blockchain Transaction ID"
+# "Buy / Sell Rate" and "Spot Rate" are Shakepay's internal/proprietary rates —
+# NOT Bank of Canada rates.  Store in the raw record for audit trail purposes
+# but NEVER pass to the calculation engine or use for ACB.
+ignored_columns:
+  - "Buy / Sell Rate"
+  - "Spot Rate"
+# Direction for "purchase/sale" rows is determined by the debit/credit currency
+# columns in the importer code, NOT by a simple type-map lookup:
+#   Amount Debited = CAD, Amount Credited = BTC/ETH  → "buy"  (acquiring crypto)
+#   Amount Debited = BTC/ETH, Amount Credited = CAD  → "sell" (disposing crypto)
+# The importer maps the raw type to "purchase_sale" here, then resolves the
+# final "buy" or "sell" direction programmatically.  Never emit "trade".
 transaction_type_map:
-  "purchase/sale": "trade"
-  "crypto cashout": "withdrawal"
-  "crypto funding": "deposit"
-  "fiat funding": "fiat_deposit"
-  "fiat cashout": "fiat_withdrawal"
-  "other": "other"
-fee_model: "spread"
+  "purchase/sale": "purchase_sale"  # resolved to "buy" or "sell" by importer code
+  "crypto cashout": "withdrawal"    # BTC sent to external wallet
+  "crypto purchase": "deposit"      # BTC received from external wallet
+  "fiat funding": "fiat_deposit"    # CAD bank deposit — no tax event
+  "fiat cashout": "fiat_withdrawal" # CAD withdrawal — no tax event
+  "shakingsats": "income"           # BTC rewards — income event; FMV = ACB
+  "peer transfer": "other"          # Shakepay-to-Shakepay — no disposition
+  "other": "other"                  # Referral bonuses etc. — flag for review
+# Unknown types must NOT crash the importer.  Log a warning and store the
+# record flagged for manual review (see parser implementation requirements).
+fee_model: "spread"  # fees are embedded in the buy/sell spread, not a separate column
 # Minimal set of CSV column names that uniquely identify this exchange's export.
-# Used by FormatDetector for auto-detection and --source validation.
-# "Buy / Sell Rate" and "Spot Rate" are Shakepay-specific; together with the
-# debited/credited pair they are unambiguous.
+# "Buy / Sell Rate" and "Spot Rate" are Shakepay-specific and unambiguous.
 fingerprint_columns:
   - "Transaction Type"
   - "Amount Debited"

@@ -54,6 +54,7 @@ Read these before making changes:
 - `docs/ref/data-pipeline.mermaid` — Visual diagram of all 7 pipeline stages and data models
 - `docs/ref/sirop-language-guide.md` — Tool name, CLI verbs, message vocabulary, and the two-register rule
 - `docs/ref/security-input-hardening.md` — Security rules for every pipeline boundary: SQL parameterization, batch name validation, YAML loading, node API responses, logging redaction
+- `docs/ref/transaction-import-formats.md` — Authoritative CSV schemas for Shakepay and Sparrow Wallet: column definitions, unit detection rules (BTC vs sats), fee availability, unconfirmed-row handling, cross-source transfer matching, and YAML config reference. **Read this before building or modifying the Shakepay or Sparrow importers.**
 
 ## Key Rules (quick reference)
 
@@ -66,10 +67,16 @@ Read these before making changes:
 
 ## Data Sources
 
-- Shakepay CSV (no explicit fee column — fees in spread)
-- NDAX CSV (AlphaPoint Ledgers format)
-- Sparrow Wallet CSV (no fee column — use node verification)
+- Shakepay CSV — debit/credit model; fees embedded in spread; exports multiple files per
+  currency type (BTC, CAD, USD); buy/sell direction determined from Debit/Credit Currency columns
+- NDAX CSV (AlphaPoint Ledgers format) — grouped rows by TX_ID, signed AMOUNT column
+  (positive = credit/buy, negative = debit/sell), explicit FEE rows
+- Sparrow Wallet CSV — signed BTC or satoshi amounts (auto-detect unit); fee present on
+  sends, absent on receives; optional fiat column (CoinGecko rate — never use for ACB)
 - Koinly Capital Gains Report CSV (primary/validation source)
+
+See `docs/ref/transaction-import-formats.md` for full column specs, unit detection rules,
+and cross-source transfer matching logic for Shakepay ↔ Sparrow.
 
 ## Tech Stack
 
@@ -196,33 +203,10 @@ config/
 └── reports.yaml           # Output form field mappings, line numbers
 ```
 
-Example importer config (`config/importers/shakepay.yaml`):
+See `config/importers/shakepay.yaml` for a fully annotated example. See
+`config/importers/ndax.yaml` for `group_handlers` and `fiat_asset_class` patterns.
 
-```yaml
-name: "Shakepay"
-file_pattern: "*.csv"
-date_column: "Date"
-date_format: "%Y-%m-%dT%H:%M:%S%z"
-columns:
-  transaction_type: "Transaction Type"
-  amount_debited: "Amount Debited"
-  debit_currency: "Debit Currency"
-  amount_credited: "Amount Credited"
-  credit_currency: "Credit Currency"
-  rate: "Buy / Sell Rate"
-  spot_rate: "Spot Rate"
-  direction: "Direction"
-  source_destination: "Source / Destination"
-  txid: "Blockchain Transaction ID"
-transaction_type_map:
-  "purchase/sale": "trade"
-  "crypto cashout": "withdrawal"
-  "crypto funding": "deposit"
-  "fiat funding": "fiat_deposit"
-  "fiat cashout": "fiat_withdrawal"
-  "other": "other"
-fee_model: "spread"  # fees embedded in spread, not explicit column
-```
+When adding a new exchange importer, run `/new-importer` for the full checklist.
 
 Rules for config:
 
@@ -241,41 +225,8 @@ Rules for config:
 
 **This repo may be made public. No private data may ever be committed.**
 
-All secrets and user-specific values go in `.env` (gitignored):
-
-```env
-# .env — NEVER committed, listed in .gitignore
-# Node connection
-BTC_NODE_BACKEND=mempool
-BTC_RPC_URL=http://127.0.0.1:8332
-BTC_RPC_USER=myuser
-BTC_RPC_PASSWORD=mypassword
-BTC_MEMPOOL_URL=http://localhost:3006/api
-
-# Wallet identifiers (xpubs, addresses — sensitive!)
-SPARROW_XPUB=xpub6...
-WATCHED_ADDRESSES=bc1q...,bc1q...
-
-# Data paths (user-specific)
-DATA_DIR=./data
-OUTPUT_DIR=./output
-```
-
-Provide a `.env.example` with placeholder values and comments for every
-variable. This is the only env reference that gets committed:
-
-```env
-# .env.example — copy to .env and fill in your values
-BTC_NODE_BACKEND=mempool          # "rpc" or "mempool"
-BTC_RPC_URL=http://127.0.0.1:8332
-BTC_RPC_USER=
-BTC_RPC_PASSWORD=
-BTC_MEMPOOL_URL=http://localhost:3006/api
-SPARROW_XPUB=
-WATCHED_ADDRESSES=
-DATA_DIR=./data
-OUTPUT_DIR=./output
-```
+All secrets and user-specific values go in `.env` (gitignored). See `.env.example`
+in the repo root for the full variable list and comments.
 
 Rules for privacy:
 
@@ -404,24 +355,11 @@ All logging goes through `src/utils/logging.py`. No module imports Python's
 
 ### Setup
 
-```python
-# CLI entry point only:
-from crypto_tax_tool.utils.logging import configure_logging
-configure_logging(verbose=args.verbose, debug=args.debug)
-
-# Every other module:
-from crypto_tax_tool.utils.logging import get_logger
-logger = get_logger(__name__)  # becomes sirop.<module_name>
-
-# Pipeline coordinator, around each stage:
-from crypto_tax_tool.utils.logging import StageContext
-with StageContext(batch_id="my2025tax", stage="normalize"):
-    ...  # all logs inside carry batch_id and stage automatically
-```
-
-`configure_logging()` is called **once** at CLI startup. Library code (importers,
-engine, db, node) never calls it. Pure engines use `logging.getLogger(__name__)`
-directly — they are unaware of sirop's logging setup.
+See `src/sirop/utils/logging.py` for the full API. Key contract:
+- Call `configure_logging(verbose, debug)` **once** at CLI entry point only
+- Every other module: `from sirop.utils.logging import get_logger; logger = get_logger(__name__)`
+- Wrap each pipeline stage: `with StageContext(batch_id, stage): ...` — all logs inside carry context
+- Pure engine modules use `logging.getLogger(__name__)` directly
 
 ### Log levels
 
@@ -466,96 +404,27 @@ and replaces the following in every message:
 
 ## Code Quality Standards
 
-### Ruff (linting + formatting)
+### Ruff, Mypy, Pytest
 
-Ruff is the sole linter and formatter. Configuration in `pyproject.toml`:
+Full tool config lives in `pyproject.toml` — do not duplicate it here.
 
-```toml
-[tool.ruff]
-target-version = "py312"
-line-length = 100
-
-[tool.ruff.lint]
-select = [
-    "E",      # pycodestyle errors
-    "W",      # pycodestyle warnings
-    "F",      # pyflakes
-    "I",      # isort
-    "N",      # pep8-naming
-    "UP",     # pyupgrade
-    "B",      # flake8-bugbear
-    "SIM",    # flake8-simplify
-    "TCH",    # flake8-type-checking
-    "RUF",    # ruff-specific rules
-    "S",      # flake8-bandit (security)
-    "PTH",    # flake8-use-pathlib
-    "ERA",    # eradicate (commented-out code)
-    "PL",     # pylint subset
-]
-ignore = [
-    "S101",   # allow assert in tests
-]
-
-[tool.ruff.lint.isort]
-known-first-party = ["sirop"]
-
-[tool.ruff.format]
-quote-style = "double"
-```
-
-Run before every commit:
+Run `/check` before every commit (runs all four steps in order). Or manually:
 
 ```bash
-ruff check --fix .
-ruff format .
+poetry run ruff check --fix . && poetry run ruff format .
+poetry run mypy .
+poetry run pytest -m "not slow and not integration" -v
 ```
 
-### Mypy (strict type checking)
+Key typing rules:
+- Every function has complete annotations (params + return); `Decimal` for money, never `float`
+- `datetime` must be timezone-aware; use `dataclasses` or `pydantic.BaseModel` for structured data
+- No bare `Any`; prefer `Protocol` over abstract base classes
 
-All code must pass mypy in strict mode. Configuration in `pyproject.toml`:
-
-```toml
-[tool.mypy]
-python_version = "3.12"
-strict = true
-warn_return_any = true
-warn_unused_configs = true
-disallow_untyped_defs = true
-disallow_any_generics = true
-no_implicit_optional = true
-check_untyped_defs = true
-```
-
-Rules for typing:
-
-- Every function has complete type annotations (params + return)
-- Use `Decimal` in type hints for all financial values, never `float`
-- Use `datetime` (timezone-aware) for all timestamps
-- Use `dataclasses` or `pydantic.BaseModel` for all structured data
-- No `Any` types without an explanatory comment
-- Prefer `Protocol` over abstract base classes for duck typing
-
-### Pytest
-
-```toml
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-addopts = "--strict-markers -v"
-markers = [
-    "slow: marks tests that call external APIs or node",
-    "integration: marks tests requiring a live Bitcoin node",
-]
-```
-
-Rules for testing:
-
-- Every engine function (ACB calculation, superficial loss detection) must
-  have unit tests with known-answer test cases from the CRA examples
-- Importers are tested against fixture CSV files with synthetic data
-- Node verification tests use mocked API responses (no real node needed)
-- Integration tests (marked `slow`/`integration`) can call a real node
-  but are skipped in CI by default
-- Test data must use fake values only (see privacy rules above)
+Key testing rules:
+- Engine functions need known-answer unit tests; importers test against synthetic fixture CSVs
+- Fake data only in fixtures (no real txids, amounts, or addresses)
+- `slow`/`integration` markers for tests requiring external APIs or a live node
 
 ---
 
@@ -592,6 +461,7 @@ updated to `done`.
 
 ## Conventions Summary
 
+- Run `/check` before every commit; run `/commit` to execute the commit workflow.
 - `Decimal` for money, always. `float` in a financial calculation is a bug.
 - `format(d, 'f')` to serialize any `Decimal` to a DB TEXT column. `str(Decimal)`
   is banned for storage — computed values produce scientific notation (`"1.2419E+5"`,

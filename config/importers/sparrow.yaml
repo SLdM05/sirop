@@ -1,0 +1,77 @@
+name: "Sparrow Wallet"
+# Sparrow exports one CSV per wallet via File > Export Wallet > Transactions.
+# Multiple wallets produce separate files — import each file independently and
+# associate records with the correct wallet identifier.
+#
+# Full column spec: docs/ref/transaction-import-formats.md §2
+date_column: "Date (UTC)"
+# Sparrow timestamps: "2024-03-15 14:22:10" in UTC.
+# Rows with Date (UTC) == "Unconfirmed" must be stored with confirmed=False
+# and excluded from all ACB calculations.
+date_format: "%Y-%m-%d %H:%M:%S"
+unconfirmed_sentinel: "Unconfirmed"
+columns:
+  timestamp: "Date (UTC)"
+  label: "Label"
+  value: "Value"
+  balance: "Balance"
+  fee: "Fee"
+  txid: "Txid"
+# The fiat column (e.g. "Value (CAD)") is conditionally present depending on
+# whether an exchange rate source is configured in Sparrow preferences.
+# The importer must detect it by matching the pattern "Value \(.+\)" in the
+# header row, then extract the currency code (e.g. "CAD") from the header name.
+optional_columns:
+  fiat_value_pattern: "Value \\(.+\\)"
+# The fiat value column uses CoinGecko daily rates — NOT Bank of Canada rates.
+# Store in the raw record for audit trail purposes but NEVER use for ACB.
+# Pass fiat_value=None to the calculation engine regardless of whether this
+# column is present.
+ignored_columns:
+  - fiat_value_pattern
+# --- CRITICAL: Unit Detection ---
+# Sparrow writes Value, Balance, and Fee in either BTC (decimal) or satoshis
+# (integer) depending on the user's Preferences > Bitcoin Unit setting.
+# The importer MUST detect the unit from the data:
+#   1. Inspect the Value column across all rows.
+#   2. If any row contains a decimal point → unit is BTC.
+#      Parse all Value/Balance/Fee fields as Decimal and multiply by 100_000_000.
+#   3. If no decimal point anywhere → unit is satoshis. Parse as integer.
+#   4. Use Python Decimal for all BTC parsing. Never use float.
+#   5. After normalization, all internal values are stored as integer satoshis.
+amount_unit: auto_detect  # detect BTC vs satoshis from presence of decimal point
+amount_type: signed       # positive = received, negative = sent
+# --- Fee Availability ---
+# Fee is empty ("") for all received transactions (inputs are third-party UTXOs;
+# Sparrow cannot calculate the fee without access to those inputs).
+# Treat empty Fee as None — do NOT impute zero or any other value.
+# Fee is typically populated on send transactions (disposals), which is when
+# it matters for tax purposes.
+fee_nullable: true
+# --- File Footer ---
+# When a fiat currency is configured, Sparrow appends a trailing comment line:
+#   # Historical CAD values are taken from daily rates and should only be considered as approximate.
+# The CSV parser must tolerate this without error.
+# --- Transaction Type Resolution ---
+# Sparrow has no explicit transaction type column.  The importer infers type
+# from the sign of the Value column:
+#   Value > 0  → received (deposit/transfer_in)
+#   Value < 0  → sent (withdrawal/transfer_out)
+# Transfer matching (transfer_match stage) later determines whether a send/
+# receive pair is a self-transfer (using txid cross-reference with Shakepay)
+# or a taxable disposal/acquisition.
+# --- Cross-Source Transfer Matching ---
+# A Shakepay "crypto cashout" that moves BTC to a Sparrow wallet is a
+# self-transfer (not a disposition).  The pipeline identifies these via shared
+# txid:
+#   Shakepay "Blockchain Transaction ID" == Sparrow "Txid"
+# See docs/ref/transaction-import-formats.md §3 for full matching logic.
+# Minimal set of CSV column names that uniquely identify this wallet's export.
+# "Date (UTC)" with space, "Value", "Balance", "Fee", "Txid" — distinctive enough
+# to avoid collision with NDAX and Shakepay headers.
+fingerprint_columns:
+  - "Date (UTC)"
+  - "Value"
+  - "Balance"
+  - "Fee"
+  - "Txid"
