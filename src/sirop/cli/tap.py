@@ -176,6 +176,32 @@ def _write_to_batch(batch_name: str, settings: Settings, txs: list[RawTransactio
         # combined dataset.
         is_append = stage_row and stage_row["status"] == "done"
 
+        # Deduplication guard — must run before the DB write.
+        # (source, raw_timestamp, asset, amount) is a natural unique key for
+        # exchange rows: the same exchange cannot produce two transactions with
+        # an identical timestamp, asset, and amount.  If any incoming row
+        # already exists in raw_transactions the file has almost certainly been
+        # tapped before, so we abort rather than double-count.
+        if is_append:
+            existing_keys: set[tuple[str, str, str, str]] = {
+                (row[0], row[1], row[2], row[3])
+                for row in conn.execute(
+                    "SELECT source, raw_timestamp, asset, amount FROM raw_transactions"
+                ).fetchall()
+            }
+            incoming_keys = {
+                (tx.source, tx.timestamp.isoformat(), tx.asset, format(tx.amount, "f"))
+                for tx in txs
+            }
+            overlap = existing_keys & incoming_keys
+            if overlap:
+                n = len(overlap)
+                raise _TapError(
+                    f"error: {n} row(s) from this file already exist in batch "
+                    f"'{batch_name}' — has this file been tapped before? "
+                    "Each CSV file should only be tapped once per batch."
+                )
+
         # format(d, 'f') forces fixed-point notation for every Decimal before
         # it reaches the DB.  str(Decimal) is non-deterministic: division
         # results and very small values produce scientific notation
