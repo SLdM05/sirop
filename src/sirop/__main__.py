@@ -15,6 +15,7 @@ from pathlib import Path
 from sirop.cli.boil import handle_boil
 from sirop.cli.create import handle_create
 from sirop.cli.list_batches import handle_list
+from sirop.cli.stir import handle_stir
 from sirop.cli.switch import handle_switch
 from sirop.cli.tap import handle_tap
 from sirop.utils.logging import configure_logging
@@ -62,6 +63,41 @@ def _build_parser() -> argparse.ArgumentParser:
     switch_p = sub.add_parser("switch", help="Set the active batch")
     switch_p.add_argument("name", help="Batch name to activate")
 
+    # ── stir ──────────────────────────────────────────────────────────────────
+    stir_p = sub.add_parser(
+        "stir",
+        help=(
+            "Review imported transactions, inspect auto-detected transfer pairs, "
+            "and manually link or unlink pairs before boil."
+        ),
+    )
+    stir_p.add_argument(
+        "--list",
+        action="store_true",
+        dest="list_only",
+        help="Show current transfer match state and exit (no interactive prompt).",
+    )
+    stir_p.add_argument(
+        "--link",
+        nargs=2,
+        type=int,
+        metavar=("ID1", "ID2"),
+        help="Force two transactions to be treated as a transfer pair.",
+    )
+    stir_p.add_argument(
+        "--unlink",
+        nargs=2,
+        type=int,
+        metavar=("ID1", "ID2"),
+        help="Prevent two transactions from being auto-paired.",
+    )
+    stir_p.add_argument(
+        "--clear",
+        type=int,
+        metavar="ID",
+        help="Remove all stir overrides for a transaction.",
+    )
+
     # ── boil ──────────────────────────────────────────────────────────────────
     boil_p = sub.add_parser(
         "boil",
@@ -99,6 +135,22 @@ def main() -> None:
 
     elif args.command == "switch":
         sys.exit(handle_switch(args.name))
+
+    elif args.command == "stir":
+        link: tuple[int, int] | None = (
+            (args.link[0], args.link[1]) if args.link else None
+        )
+        unlink: tuple[int, int] | None = (
+            (args.unlink[0], args.unlink[1]) if args.unlink else None
+        )
+        sys.exit(
+            handle_stir(
+                list_only=args.list_only,
+                link=link,
+                unlink=unlink,
+                clear=args.clear,
+            )
+        )
 
     elif args.command == "boil":
         sys.exit(handle_boil(args.from_stage))

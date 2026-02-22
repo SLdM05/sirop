@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING
 from sirop.models.disposition import ACBState, AdjustedDisposition, Disposition, IncomeEvent
 from sirop.models.enums import TransactionType
 from sirop.models.event import ClassifiedEvent
+from sirop.models.override import TransferOverride
 from sirop.models.raw import RawTransaction
 from sirop.models.transaction import Transaction
 
@@ -651,3 +652,89 @@ def write_boc_rate(
             """,
             (str(rate_date), currency_pair, format(rate, "f"), now),
         )
+
+
+# ---------------------------------------------------------------------------
+# Transfer overrides (stir command)
+# ---------------------------------------------------------------------------
+
+
+def write_transfer_override(
+    conn: sqlite3.Connection,
+    tx_id_a: int,
+    tx_id_b: int,
+    action: str,
+    note: str = "",
+) -> TransferOverride:
+    """Insert a transfer override and return it with its DB-assigned ID.
+
+    Parameters
+    ----------
+    tx_id_a:
+        ``transactions.id`` of the first (typically outgoing) transaction.
+    tx_id_b:
+        ``transactions.id`` of the second (typically incoming) transaction.
+    action:
+        ``'link'`` to force the pair as a transfer, ``'unlink'`` to prevent pairing.
+    note:
+        Optional free-text annotation.
+    """
+    now = datetime.now(tz=UTC)
+    with conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO transfer_overrides (tx_id_a, tx_id_b, action, created_at, note)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (tx_id_a, tx_id_b, action, now.isoformat(), note),
+        )
+    return TransferOverride(
+        id=cursor.lastrowid or 0,
+        tx_id_a=tx_id_a,
+        tx_id_b=tx_id_b,
+        action=action,  # type: ignore[arg-type]
+        created_at=now,
+        note=note,
+    )
+
+
+def read_transfer_overrides(conn: sqlite3.Connection) -> list[TransferOverride]:
+    """Return all transfer overrides ordered by creation time."""
+    rows = conn.execute(
+        """
+        SELECT id, tx_id_a, tx_id_b, action, created_at, note
+        FROM transfer_overrides
+        ORDER BY created_at
+        """
+    ).fetchall()
+
+    return [
+        TransferOverride(
+            id=row["id"],
+            tx_id_a=row["tx_id_a"],
+            tx_id_b=row["tx_id_b"],
+            action=row["action"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            note=row["note"] or "",
+        )
+        for row in rows
+    ]
+
+
+def delete_transfer_override(conn: sqlite3.Connection, override_id: int) -> None:
+    """Delete a single override row by its primary key."""
+    with conn:
+        conn.execute("DELETE FROM transfer_overrides WHERE id = ?", (override_id,))
+
+
+def clear_transfer_overrides_for_tx(conn: sqlite3.Connection, tx_id: int) -> int:
+    """Remove all overrides that involve *tx_id* (as either leg).
+
+    Returns the number of rows deleted.
+    """
+    with conn:
+        cursor = conn.execute(
+            "DELETE FROM transfer_overrides WHERE tx_id_a = ? OR tx_id_b = ?",
+            (tx_id, tx_id),
+        )
+    return cursor.rowcount

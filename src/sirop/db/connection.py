@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Final
 
 from sirop.config.settings import Settings
+from sirop.db.schema import create_tables
 
 # Batch names must start with a letter or digit and contain only alphanumerics,
 # underscores, and hyphens. Max 64 chars. This prevents path traversal
@@ -78,6 +79,9 @@ def open_batch(name: str, settings: Settings) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.row_factory = sqlite3.Row
+    # Ensure all tables exist — safe for existing files (IF NOT EXISTS).
+    # This auto-migrates older .sirop files when new tables are added.
+    create_tables(conn)
     return conn
 
 

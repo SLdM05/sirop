@@ -37,6 +37,7 @@ from sirop.models.event import ClassifiedEvent
 from sirop.utils.logging import get_logger
 
 if TYPE_CHECKING:
+    from sirop.models.override import TransferOverride
     from sirop.models.transaction import Transaction
 
 logger = get_logger(__name__)
@@ -64,8 +65,9 @@ _FIAT = frozenset({TransactionType.FIAT_DEPOSIT, TransactionType.FIAT_WITHDRAWAL
 _INCOME_TYPES = frozenset({TransactionType.INCOME})
 
 
-def match_transfers(
+def match_transfers(  # noqa: PLR0912 PLR0915
     txs: list[Transaction],
+    overrides: list[TransferOverride] | None = None,
 ) -> tuple[list[ClassifiedEvent], list[IncomeEvent]]:
     """Classify *txs* into taxable events and income sub-records.
 
@@ -73,6 +75,10 @@ def match_transfers(
     ----------
     txs:
         Output of ``repositories.read_transactions()`` — sorted chronologically.
+    overrides:
+        Optional user-specified link/unlink decisions from the ``stir`` command.
+        Forced links are applied before auto-matching; forced unlinks prevent
+        specific pairs from being auto-matched.
 
     Returns
     -------
@@ -83,19 +89,86 @@ def match_transfers(
     """
     sorted_txs = sorted(txs, key=lambda t: t.timestamp)
 
+    # Build override lookup structures.
+    # forced_link_pairs: pairs that must always be treated as transfers.
+    # forced_unlink_pairs: pairs that must never be auto-matched.
+    forced_link_pairs: set[tuple[int, int]] = set()
+    forced_unlink_pairs: set[tuple[int, int]] = set()
+    if overrides:
+        for ov in overrides:
+            pair = (ov.tx_id_a, ov.tx_id_b)
+            pair_rev = (ov.tx_id_b, ov.tx_id_a)
+            if ov.action == "link":
+                forced_link_pairs.add(pair)
+                forced_link_pairs.add(pair_rev)
+            else:
+                forced_unlink_pairs.add(pair)
+                forced_unlink_pairs.add(pair_rev)
+
     # Track which transaction IDs have been paired as transfer legs.
     paired_ids: set[int] = set()
 
-    # --- Pass 1: match outgoing ↔ incoming transfers ---
+    # Build a map of tx.id → Transaction for fast override lookups.
+    tx_by_id: dict[int, Transaction] = {t.id: t for t in sorted_txs}
+
+    # --- Pass 0: apply forced links ---
     fee_disposals: list[ClassifiedEvent] = []
 
+    for ov in overrides or []:
+        if ov.action != "link":
+            continue
+        if ov.tx_id_a in paired_ids or ov.tx_id_b in paired_ids:
+            logger.warning(
+                "transfer_match: forced link (%d ↔ %d) skipped — one leg already paired",
+                ov.tx_id_a,
+                ov.tx_id_b,
+            )
+            continue
+        tx_a = tx_by_id.get(ov.tx_id_a)
+        tx_b = tx_by_id.get(ov.tx_id_b)
+        if tx_a is None or tx_b is None:
+            logger.warning(
+                "transfer_match: forced link references unknown tx id(s) (%d, %d) — skipping",
+                ov.tx_id_a,
+                ov.tx_id_b,
+            )
+            continue
+
+        paired_ids.add(ov.tx_id_a)
+        paired_ids.add(ov.tx_id_b)
+        logger.debug("transfer_match: forced link applied (%d ↔ %d)", ov.tx_id_a, ov.tx_id_b)
+
+        # Emit fee micro-disposal for the outgoing leg if it carried a network fee.
+        outgoing = tx_a if tx_a.tx_type in _OUTGOING else tx_b
+        has_fee = outgoing.fee_crypto and outgoing.fee_crypto > Decimal("0")
+        if has_fee and outgoing.cad_value > Decimal("0"):
+            cad_rate = outgoing.cad_value / outgoing.amount if outgoing.amount else Decimal("0")
+            fee_proceeds = outgoing.fee_crypto * cad_rate
+            fee_disposals.append(
+                ClassifiedEvent(
+                    id=0,
+                    vtx_id=outgoing.id,
+                    timestamp=outgoing.timestamp,
+                    event_type="fee_disposal",
+                    asset=outgoing.asset,
+                    amount=outgoing.fee_crypto,
+                    cad_proceeds=fee_proceeds,
+                    cad_cost=None,
+                    cad_fee=None,
+                    txid=outgoing.txid,
+                    source=outgoing.source,
+                    is_taxable=True,
+                )
+            )
+
+    # --- Pass 1: match outgoing ↔ incoming transfers (auto) ---
     for tx in sorted_txs:
         if tx.tx_type not in _OUTGOING:
             continue
         if tx.id in paired_ids:
             continue
 
-        match = _find_match(tx, sorted_txs, paired_ids)
+        match = _find_match(tx, sorted_txs, paired_ids, forced_unlink_pairs)
         if match is None:
             continue
 
@@ -185,16 +258,20 @@ def _find_match(
     outgoing: Transaction,
     all_txs: list[Transaction],
     already_paired: set[int],
+    forced_unlink_pairs: set[tuple[int, int]] | None = None,
 ) -> Transaction | None:
     """Search *all_txs* for a deposit that matches *outgoing*.
 
     Match criteria (in priority order):
     1. Same non-null txid.
     2. Same asset, amount within tolerance, timestamp within window.
+
+    Pairs in *forced_unlink_pairs* are never returned regardless of match signals.
     """
     window = timedelta(hours=MATCH_WINDOW_HOURS)
     window_start = outgoing.timestamp - window
     window_end = outgoing.timestamp + window
+    _unlinks = forced_unlink_pairs or set()
 
     for candidate in all_txs:
         if candidate.id == outgoing.id:
@@ -204,6 +281,15 @@ def _find_match(
         if candidate.tx_type not in _INCOMING:
             continue
         if candidate.asset != outgoing.asset:
+            continue
+
+        # Respect forced unlinks.
+        if (outgoing.id, candidate.id) in _unlinks:
+            logger.debug(
+                "transfer_match: skipping forced-unlinked pair (%d ↔ %d)",
+                outgoing.id,
+                candidate.id,
+            )
             continue
 
         # Txid match — definitive.

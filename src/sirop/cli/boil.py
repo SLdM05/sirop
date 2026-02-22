@@ -185,7 +185,16 @@ def _run_transfer_match(conn: object) -> None:
     txs = repo.read_transactions(conn)
     logger.info("transfer_match: classifying %d transaction(s)", len(txs))
 
-    events, income_evts = matcher.match_transfers(txs)
+    overrides = repo.read_transfer_overrides(conn)
+    if overrides:
+        logger.info(
+            "transfer_match: applying %d stir override(s) (%d link, %d unlink)",
+            len(overrides),
+            sum(1 for o in overrides if o.action == "link"),
+            sum(1 for o in overrides if o.action == "unlink"),
+        )
+
+    events, income_evts = matcher.match_transfers(txs, overrides=overrides)
     events = repo.write_classified_events(conn, events)
     income_evts = repo.write_income_events(conn, income_evts)
     logger.info(

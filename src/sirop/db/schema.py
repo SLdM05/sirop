@@ -14,7 +14,7 @@ from typing import Final
 
 # Bump this when the schema changes. The migration guard reads this value
 # and refuses to open a file whose schema_version doesn't match.
-SCHEMA_VERSION: Final[int] = 3
+SCHEMA_VERSION: Final[int] = 4
 
 # All pipeline stage names in execution order.
 PIPELINE_STAGES: Final[tuple[str, ...]] = (
@@ -243,6 +243,17 @@ CREATE TABLE IF NOT EXISTS dispositions_adjusted (
 )
 """
 
+_TRANSFER_OVERRIDES_DDL = """
+CREATE TABLE IF NOT EXISTS transfer_overrides (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    tx_id_a     INTEGER NOT NULL REFERENCES transactions(id),
+    tx_id_b     INTEGER NOT NULL REFERENCES transactions(id),
+    action      TEXT    NOT NULL CHECK(action IN ('link', 'unlink')),
+    created_at  TEXT    NOT NULL,   -- ISO 8601 UTC
+    note        TEXT    NOT NULL DEFAULT ''
+)
+"""
+
 _AUDIT_LOG_DDL = """
 CREATE TABLE IF NOT EXISTS audit_log (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -288,6 +299,7 @@ _ALL_DDL: Final[tuple[str, ...]] = (
     _ACB_STATE_DDL,
     _DISPOSITIONS_ADJUSTED_DDL,
     _INCOME_EVENTS_DDL,
+    _TRANSFER_OVERRIDES_DDL,
     _AUDIT_LOG_DDL,
 )
 
