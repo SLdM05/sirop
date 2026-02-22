@@ -47,9 +47,14 @@ flowchart TD
             T_BOC[("boc_rates<br/><i>date · currency_pair · rate · fetched_at</i>")]:::dbtable
         end
 
+        subgraph DBSUPPORT ["  Support Tables  "]
+            T_WALLETS[("wallets<br/><i>id · name · source · auto_created</i><br/><i>one row per tap source</i>")]:::dbtable
+            T_OVRD[("transfer_overrides<br/><i>tx_id_a · tx_id_b · action · note</i><br/><i>link | unlink | external-out | external-in</i><br/><i>written by stir · read by transfer_match</i>")]:::dbtable
+        end
+
         subgraph DBPIPE ["  Pipeline Tables  "]
-            T_RAW[("raw_transactions<br/><i>models/raw.py → rows</i>")]:::dbtable
-            T_TX[("transactions<br/><i>models/transaction.py → rows</i>")]:::dbtable
+            T_RAW[("raw_transactions<br/><i>models/raw.py → rows</i><br/><i>wallet_id → wallets</i>")]:::dbtable
+            T_TX[("transactions<br/><i>models/transaction.py → rows</i><br/><i>wallet_id → wallets</i>")]:::dbtable
             T_VTX[("verified_transactions<br/><i>node_verified · block_height · confirmations</i>")]:::dbtable
             T_EVT[("classified_events<br/><i>buys · sells · fee micro-dispositions</i><br/><i>transfers excluded · income as acquisitions</i>")]:::dbtable
             T_INCOME[("income_events<br/><i>staking · airdrop · mining</i><br/><i>models/disposition.py → IncomeEvent</i><br/><i>TP-21.4.39-V Part 6 source</i>")]:::dbtable
@@ -141,12 +146,25 @@ flowchart TD
     T_TX -.-> SKIP -.-> T_VTX
 
     %% ═══════════════════════════════════════════
+    %% STIR — interactive override editor
+    %% Optional step between tap and boil.
+    %% Reads transactions; writes transfer_overrides.
+    %% transfer_match reads overrides before auto-matching.
+    %% ═══════════════════════════════════════════
+
+    STIR["sirop stir<br/><i>interactive transfer review</i><br/><i>force-link · force-unlink</i><br/><i>mark external-out / external-in</i><br/><i>overrides persist across re-runs</i>"]:::tui
+
+    T_TX -.->|"reads transactions"| STIR
+    STIR -->|"via repo → atomic write"| T_OVRD
+
+    %% ═══════════════════════════════════════════
     %% STAGE 4 — transfer matching
     %% ═══════════════════════════════════════════
 
-    MATCH["Transfer Matcher<br/><i>txid matching across sources</i><br/><i>amount ± fee tolerance</i><br/><i>timestamp proximity check</i><br/><i>emits fee micro-dispositions</i><br/><i>marks transfers as non-dispositions</i>"]:::process
+    MATCH["Transfer Matcher<br/><i>Pass 0: apply stir overrides first</i><br/><i>Pass 1: txid matching across sources</i><br/><i>Pass 2: amount ± fee tolerance + timestamp proximity</i><br/><i>emits fee micro-dispositions for implied fees</i><br/><i>marks transfers as non-dispositions</i>"]:::process
 
     T_VTX -->|"via repo"| MATCH
+    T_OVRD -.->|"overrides applied before auto-match"| MATCH
     MATCH -->|"via repo → atomic write"| T_EVT
     MATCH -->|"via repo → atomic write"| T_INCOME
 

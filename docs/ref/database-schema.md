@@ -45,7 +45,7 @@ open and refuses to process a file whose version does not match the current
 `SCHEMA_VERSION` constant in `db/schema.py`. Bump `SCHEMA_VERSION` whenever
 the schema changes.
 
-Current version: **3**
+Current version: **5**
 
 ---
 
@@ -102,6 +102,82 @@ Pipeline stages in execution order:
 
 ---
 
+## Support tables
+
+These tables store user configuration and override data that persists across
+pipeline runs. They are not pipeline stage outputs — they are read inputs that
+influence stage behaviour.
+
+### `custom_importers`
+
+```sql
+custom_importers (
+    name         TEXT    PRIMARY KEY,     -- importer key, e.g. "my_exchange"
+    source_name  TEXT    NOT NULL,        -- display name
+    yaml_config  TEXT    NOT NULL,        -- full YAML config stored verbatim
+    embedded_at  TEXT    NOT NULL         -- ISO 8601 UTC
+)
+```
+
+Stores user-supplied importer YAML configs inside the batch file so a `.sirop`
+file is self-contained and portable. Written by `sirop tap --embed`. Consulted
+by `tap` before scanning the built-in `config/importers/` directory.
+
+### `wallets`
+
+```sql
+wallets (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    name         TEXT    NOT NULL UNIQUE,     -- display name, e.g. "shakepay" or "cold-storage"
+    source       TEXT    NOT NULL DEFAULT '', -- format key, e.g. "shakepay", "ndax", "sparrow"
+    auto_created INTEGER NOT NULL DEFAULT 1,  -- 1=auto from tap format, 0=user-named
+    created_at   TEXT    NOT NULL,            -- ISO 8601 UTC
+    note         TEXT    NOT NULL DEFAULT ''
+)
+```
+
+Each tap source is associated with a named wallet. Auto-created wallets
+(`auto_created=1`) are generated from the format key at tap time. User-named
+wallets (`auto_created=0`) can be created with the `--wallet` flag or manually.
+The distinction is surfaced in `stir` to help audit cross-source coverage.
+
+`raw_transactions.wallet_id` and `transactions.wallet_id` both reference this
+table so the originating wallet can be traced through the pipeline.
+
+### `transfer_overrides`
+
+Written by: **`stir`**; read by: **`transfer_match`**
+
+```sql
+transfer_overrides (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    tx_id_a            INTEGER NOT NULL REFERENCES transactions(id),
+    tx_id_b            INTEGER REFERENCES transactions(id),  -- NULL for external-out / external-in
+    action             TEXT    NOT NULL
+                               CHECK(action IN ('link','unlink','external-out','external-in')),
+    implied_fee_crypto TEXT    NOT NULL DEFAULT '',  -- Decimal string; '' = zero
+    external_wallet    TEXT    NOT NULL DEFAULT '',  -- wallet label for external legs
+    created_at         TEXT    NOT NULL,             -- ISO 8601 UTC
+    note               TEXT    NOT NULL DEFAULT ''
+)
+```
+
+User-specified overrides that modify transfer matching behaviour. The
+`transfer_match` stage loads all overrides from this table before running its
+automatic matching algorithm.
+
+| `action` value | Effect |
+|----------------|--------|
+| `link` | Force `tx_id_a` and `tx_id_b` to be treated as a matched transfer pair, regardless of what the auto-matcher would decide. If `implied_fee_crypto` is non-zero, the difference between the sent and received amounts is emitted as a `fee_disposal` event. |
+| `unlink` | Prevent the auto-matcher from pairing `tx_id_a` with `tx_id_b`. Both legs are treated as separate taxable events. |
+| `external-out` | Mark `tx_id_a` (a withdrawal) as going to an untracked external wallet. Non-taxable. `tx_id_b` is NULL. |
+| `external-in` | Mark `tx_id_a` (a deposit) as arriving from an untracked external wallet. Establishes ACB at FMV. `tx_id_b` is NULL. |
+
+Overrides survive `sirop boil --from transfer_match` — they are never deleted
+by re-running stages. To remove an override, use `sirop stir --clear <id>`.
+
+---
+
 ## Cached external data
 
 ### `boc_rates`
@@ -148,7 +224,8 @@ raw_transactions (
     cad_rate            TEXT,               -- Decimal string or NULL
     spot_rate           TEXT,               -- Decimal string or NULL (Shakepay spread calc)
     txid                TEXT,               -- blockchain txid or NULL
-    extra_json          TEXT                -- JSON blob for source-specific fields
+    extra_json          TEXT,               -- JSON blob for source-specific fields
+    wallet_id           INTEGER REFERENCES wallets(id)  -- source wallet (auto-created from tap)
 )
 ```
 
@@ -185,7 +262,8 @@ transactions (
     source              TEXT    NOT NULL,
     is_transfer         INTEGER NOT NULL DEFAULT 0,  -- 1 once transfer_match confirms pair
     counterpart_id      INTEGER REFERENCES transactions(id),  -- matched withdrawal/deposit leg
-    notes               TEXT    NOT NULL DEFAULT ''
+    notes               TEXT    NOT NULL DEFAULT '',
+    wallet_id           INTEGER REFERENCES wallets(id)        -- propagated from raw_transactions
 )
 ```
 
@@ -447,9 +525,14 @@ modified or deleted by the pipeline — only appended to.
 Data flows through the pipeline tables in a single chain:
 
 ```
-raw_transactions
-    └─► transactions                (raw_id)
-            └─► verified_transactions       (tx_id)
+wallets ◄───────────────────────────────────────────────────────┐
+raw_transactions (wallet_id → wallets)                          │
+    └─► transactions (wallet_id → wallets)     (raw_id)         │
+            │                                                    │
+            ├─► transfer_overrides              (tx_id_a/tx_id_b)
+            │       (read by transfer_match; written by stir)
+            │
+            └─► verified_transactions           (tx_id)
                     ├─► income_events               (vtx_id)
                     └─► classified_events           (vtx_id)
                             ├─► acb_state               (event_id)
@@ -460,6 +543,10 @@ raw_transactions
 Re-running a stage deletes that stage's rows and cascades
 `stage_status` downstream to `invalidated`, but does not delete downstream
 rows immediately — they become stale until the downstream stages re-run.
+
+`transfer_overrides` is the exception: it is never deleted by any pipeline
+re-run. Overrides are user intent — they survive `--from transfer_match` and
+must be explicitly removed with `sirop stir --clear`.
 
 ---
 
@@ -483,3 +570,5 @@ that need a batch (and weren't given one explicitly) read this file first.
 | 1 | Initial schema |
 | 2 | `raw_transactions`: added `amount_currency`, `fiat_currency`, `spot_rate`. `transactions`/`verified_transactions`: renamed `fee` → `fee_crypto`, added `is_transfer`, `counterpart_id`, `notes`. `verified_transactions`: added `block_height`, `confirmations`. `classified_events`: added `source`. `dispositions`: added `selling_fees`, `disposition_type`, `year_acquired`, full before/after ACB pool state. `acb_state`: FK target changed from `dispositions` to `classified_events`, column renamed `disposition_id` → `event_id`. `dispositions_adjusted`: added `selling_fees`, `is_superficial_loss`, `allowable_loss`, `adjusted_gain_loss`, `disposition_type`, `year_acquired`. New table: `income_events`. |
 | 3 | New table: `custom_importers` — stores user-supplied importer YAML configs inside the batch file so a `.sirop` file is self-contained and portable. |
+| 4 | New table: `transfer_overrides` (initial version — `link` and `unlink` actions only, `tx_id_b` NOT NULL). Written by `sirop stir`; consumed by the `transfer_match` stage. |
+| 5 | New table: `wallets`. `wallet_id` FK added to `raw_transactions` and `transactions` — traces each transaction to its originating wallet. `transfer_overrides` recreated with nullable `tx_id_b` (supports external-leg overrides), new columns `implied_fee_crypto` and `external_wallet`, and `external-out` / `external-in` added to `action` CHECK constraint. |

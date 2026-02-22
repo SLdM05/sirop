@@ -50,6 +50,14 @@ class MessageCode(StrEnum):
     BOIL_SUMMARY_COMPLETE = "boil.summary.complete"
     BOIL_SUMMARY_HOLDINGS_HEADER = "boil.summary.holdings_header"
 
+    # ── stir ──────────────────────────────────────────────────────────────────
+    STIR_ERROR_NOT_NORMALIZED = "stir.error.not_normalized"
+    STIR_ERROR_TX_NOT_FOUND = "stir.error.tx_not_found"
+    STIR_LINK_APPLIED = "stir.link_applied"
+    STIR_UNLINK_APPLIED = "stir.unlink_applied"
+    STIR_CLEAR_APPLIED = "stir.clear_applied"
+    STIR_EXIT = "stir.exit"
+
     # ── list ──────────────────────────────────────────────────────────────────
     LIST_NO_BATCHES = "list.no_batches"
     LIST_BATCH_ITEM = "list.batch_item"

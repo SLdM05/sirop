@@ -166,6 +166,34 @@ messages:
     category: output
     text: "\n  Year-end holdings (cost basis):"
 
+  # ── stir ──────────────────────────────────────────────────────────────────
+
+  stir.error.not_normalized:
+    category: error
+    code: E020
+    text: "Batch '{name}' has not been normalized yet. Run 'sirop boil' first (or at least up to normalize)."
+
+  stir.error.tx_not_found:
+    category: error
+    code: E021
+    text: "Transaction id {tx_id} not found in the active batch."
+
+  stir.link_applied:
+    category: output
+    text: "Linked tx:{id_a} ↔ tx:{id_b} as a transfer pair (override id:{ov_id}). Run 'sirop boil --from transfer_match' to apply."
+
+  stir.unlink_applied:
+    category: output
+    text: "Unlinked tx:{id_a} ↔ tx:{id_b} — will be treated as separate taxable events (override id:{ov_id}). Run 'sirop boil --from transfer_match' to apply."
+
+  stir.clear_applied:
+    category: output
+    text: "Cleared {count} override(s) for tx:{tx_id}. Run 'sirop boil --from transfer_match' to apply."
+
+  stir.exit:
+    category: output
+    text: "Overrides saved. Run 'sirop boil --from transfer_match' to apply them."
+
   # ── list ──────────────────────────────────────────────────────────────────
 
   list.no_batches:

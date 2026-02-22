@@ -39,3 +39,5 @@ Prepare and execute a git commit for the current working state of the sirop proj
 - Never commit `.env`, `data/`, `output/`, or any `*.csv` that might contain real transaction data.
 - If a pre-commit hook fails, fix the issue and create a **new** commit — do not amend.
 - Do not push unless the user explicitly asks.
+- The pre-commit hook (`ruff check` + `ruff format --check`) fires automatically on every commit.
+  Run `/check` for the full suite (mypy + pytest) before staging.
