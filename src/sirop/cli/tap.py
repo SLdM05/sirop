@@ -40,6 +40,7 @@ from sirop.importers.base import BaseImporter, ImporterError
 from sirop.importers.detector import FormatDetector
 from sirop.importers.ndax import NDAXImporter
 from sirop.importers.shakepay import ShakepayImporter
+from sirop.importers.sparrow import SparrowImporter
 from sirop.models.messages import MessageCode
 from sirop.models.raw import RawTransaction
 from sirop.utils.logging import get_logger
@@ -55,6 +56,7 @@ _BUILTIN_CONFIG_DIR = Path("config/importers")
 _IMPORTER_REGISTRY: dict[str, Callable[[Path], BaseImporter]] = {
     "ndax": NDAXImporter.from_yaml,
     "shakepay": ShakepayImporter.from_yaml,
+    "sparrow": SparrowImporter.from_yaml,
 }
 
 
