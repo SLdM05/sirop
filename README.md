@@ -1,8 +1,27 @@
 # sirop
 
-Canadian crypto tax calculator. Computes capital gains, ACB, and
+Canadian bitcoin tax calculator. Computes capital gains, ACB, and
 superficial losses from exchange and wallet exports. Produces Schedule 3, Schedule G,
 and the Quebec TP-21.4.39-V form.
+
+---
+
+## Why sirop exists
+
+Most tax tools require you to hand over your wallet addresses or xpubs
+so they can pull your transaction history from the blockchain. That means a
+third-party service sees your full financial picture — every address you've
+ever used, your balances, your counterparties.
+
+sirop takes the opposite approach: **your keys never leave your machine.**
+
+You `tap` CSV files from your exchanges and wallets yourself, feed them to
+sirop locally, and the tool `boils` all the math on your computer. No account
+required, no data uploaded, no API keys, no address scanning. When you're done,
+`pour` produces the tax forms you need to file — nothing more leaves your hands.
+
+Privacy is not a feature that gets toggled on. It is the default, and nothing
+in sirop's design trades it away for convenience.
 
 ---
 
@@ -46,15 +65,21 @@ cp .env.example .env   # set DATA_DIR and optional node config
 sirop create my2025tax --year 2025
 
 # 2. Import your exchange and wallet exports
+#    Pass a directory to tap all CSVs at once (with confirmation prompt):
+sirop tap ~/Downloads/exports/
+#    Or import files individually:
 sirop tap ~/Downloads/ndax_2025_ledger.csv
 sirop tap ~/Downloads/shakepay_2025_btc.csv
 sirop tap ~/Downloads/sparrow_2025.csv
 
-# 3. Review transfer pairs (wallet-to-wallet moves)
+# 3. Run the tax calculation pipeline
+sirop boil
+
+# 4. Sometimes you will need to adjust your transfer pairs (wallet-to-wallet moves)
 sirop stir
 
-# 4. Run the tax calculation pipeline
-sirop boil
+# 5. Output your tax forms (PLANNED)
+sirop pour
 ```
 
 After `boil`, the `.sirop` batch file contains fully computed dispositions and

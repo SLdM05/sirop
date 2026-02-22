@@ -7,7 +7,7 @@ data of any kind: no BTC amounts, no CAD values, no Bitcoin addresses, no txids,
 files from any exchange or wallet. Test fixtures use obviously fake data only
 (e.g., `txid: "aaa...111"`, address: `bc1qfakeaddressfortesting`).
 
-This is a Quebec crypto tax tool. Familiarity with the ACB method and Canada's capital gains
+This is a Canada/Quebec crypto tax tool. Familiarity with the ACB method and Canada's capital gains
 rules is helpful for engine and report work. See
 [docs/ref/crypto-tax-reference-quebec-2025.md](docs/ref/crypto-tax-reference-quebec-2025.md)
 for the authoritative reference.

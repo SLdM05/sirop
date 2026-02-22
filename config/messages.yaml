@@ -131,6 +131,30 @@ messages:
     category: output
     text: "Tapped {count} transaction(s) from {filename} [{fmt}] into '{batch}'.{skip_note}"
 
+  tap.folder.no_files:
+    category: output
+    text: "No CSV files found in {path}."
+
+  tap.folder.header:
+    category: output
+    text: "Found {count} CSV file(s) in {path}:"
+
+  tap.folder.file_detected:
+    category: output
+    text: "  {filename}  →  {fmt}"
+
+  tap.folder.file_unknown:
+    category: output
+    text: "  {filename}  →  unknown (will be skipped)"
+
+  tap.folder.all_unknown:
+    category: output
+    text: "No files could be identified — nothing to tap."
+
+  tap.folder.aborted:
+    category: output
+    text: "Tap cancelled."
+
   # ── boil ──────────────────────────────────────────────────────────────────
 
   boil.error.not_tapped:

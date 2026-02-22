@@ -14,15 +14,74 @@ This is always the first pipeline stage. Every downstream stage (`normalize`,
 ## Syntax
 
 ```
-sirop tap <file> [--source NAME]
+sirop tap <file>   [--source NAME] [--wallet NAME]
+sirop tap <folder> [--source NAME] [--wallet NAME]
 ```
 
 ### Arguments
 
 | Argument | Required | Description |
 |----------|----------|-------------|
-| `file` | yes | Path to the exchange or wallet CSV export. |
+| `file` or `folder` | yes | Path to a single CSV export, or a directory containing one or more CSV exports. |
 | `--source NAME` | no | Importer name (e.g. `ndax`, `shakepay`). Auto-detected from CSV headers when omitted. |
+| `--wallet NAME` | no | Wallet label to assign these transactions to. Defaults to the detected source name. Use this to distinguish two accounts at the same exchange (e.g. `shakepay-savings` vs `shakepay-trading`). |
+
+---
+
+## Single-file import
+
+Pass a path to one CSV file. sirop reads the header row, detects the format,
+and writes the parsed transactions into the active batch.
+
+```
+$ sirop tap ~/Downloads/ndax_2025_ledger.csv
+Detected format: NDAX
+Tapped 47 transaction(s) from ndax_2025_ledger.csv [NDAX] into 'my2025tax'.
+```
+
+Re-tapping the same batch is explicitly supported. Each additional `tap` call
+appends new rows and deduplicates against what is already in the batch, then
+marks all downstream stages as `invalidated` so they re-run with the full
+combined dataset. Duplicate rows (same source + timestamp + asset + amount) are
+silently skipped:
+
+```
+$ sirop tap ~/Downloads/ndax_2025_ledger.csv   # second run, nothing new
+Nothing new to tap from ndax_2025_ledger.csv [NDAX] — all 47 row(s) already exist in 'my2025tax'.
+```
+
+---
+
+## Folder import
+
+Pass a directory path instead of a file. sirop scans for `*.csv` files,
+detects the format of each one, shows you the full listing, and asks for
+confirmation before tapping.
+
+```
+$ sirop tap ~/Downloads/exports/
+Found 3 CSV file(s) in exports/:
+  ndax_2025_ledger.csv  →  NDAX
+  shakepay_2025_btc.csv  →  Shakepay
+  random_notes.csv  →  unknown (will be skipped)
+
+Tap 2 file(s)? [y/N] y
+Tapped 47 transaction(s) from ndax_2025_ledger.csv [NDAX] into 'my2025tax'.
+Tapped 23 transaction(s) from shakepay_2025_btc.csv [Shakepay] into 'my2025tax'.
+```
+
+**Behaviour details:**
+
+- Files are scanned and listed in alphabetical order.
+- Unrecognised files (no fingerprint match, or multiple matches) appear as
+  `unknown (will be skipped)` and are excluded from the tap.
+- If **all** files are unrecognised, the command exits with an error and nothing
+  is tapped.
+- Answering `n` (or pressing Enter, or EOF) cancels without tapping anything.
+- `--source NAME` applies the declared format to every file in the folder.
+  Files whose headers do not satisfy that format's fingerprint are shown as
+  unknown and skipped.
+- `--wallet NAME` is applied to all tapped files.
 
 ---
 
@@ -166,17 +225,16 @@ tap  →  done
 normalize, verify, transfer_match, boil, superficial_loss, pour  →  pending
 ```
 
-Re-tapping the same batch is not yet supported. If `tap` is already `done`,
-the command fails cleanly:
-
-```
-error: batch 'my2025tax' already has tap data.
-       Re-tap is not yet supported — create a new batch or switch to one.
-```
+Re-tapping an already-`done` batch appends new rows and sets all downstream
+stages to `invalidated` so the next `boil` re-runs the full pipeline with the
+combined data. Duplicate rows are silently skipped, so re-tapping the same
+file twice is safe.
 
 ---
 
-## Example session
+## Example sessions
+
+**Tap files one at a time:**
 
 ```
 $ sirop create my2025tax
@@ -195,6 +253,36 @@ Detected format: Sparrow Wallet
 Tapped 8 transaction(s) from sparrow_wallet.csv [Sparrow Wallet] into 'my2025tax'.
 ```
 
+**Tap a whole folder at once:**
+
+```
+$ sirop create my2025tax
+Created batch: my2025tax (2025) → data/my2025tax.sirop
+
+$ sirop tap ~/Downloads/exports/
+Found 3 CSV file(s) in exports/:
+  ndax_2025_ledger.csv   →  NDAX
+  shakepay_2025.csv      →  Shakepay
+  sparrow_wallet.csv     →  Sparrow Wallet
+
+Tap 3 file(s)? [y/N] y
+Tapped 47 transaction(s) from ndax_2025_ledger.csv [NDAX] into 'my2025tax'.
+Tapped 23 transaction(s) from shakepay_2025.csv [Shakepay] into 'my2025tax'.
+Tapped 8 transaction(s) from sparrow_wallet.csv [Sparrow Wallet] into 'my2025tax'.
+```
+
+**Two wallets at the same exchange — use `--wallet` to distinguish them:**
+
+```
+$ sirop tap ~/Downloads/shakepay_savings.csv --wallet shakepay-savings
+Detected format: Shakepay
+Tapped 12 transaction(s) from shakepay_savings.csv [Shakepay] into 'my2025tax'.
+
+$ sirop tap ~/Downloads/shakepay_trading.csv --wallet shakepay-trading
+Detected format: Shakepay
+Tapped 31 transaction(s) from shakepay_trading.csv [Shakepay] into 'my2025tax'.
+```
+
 ---
 
 ## Error cases
@@ -203,10 +291,11 @@ Tapped 8 transaction(s) from sparrow_wallet.csv [Sparrow Wallet] into 'my2025tax
 |-----------|---------|
 | File not found | `error: file not found: exports/missing.csv` |
 | No active batch | `error: no active batch. Run 'sirop create <name>' first.` |
-| Tap already done | `error: batch 'X' already has tap data. Re-tap is not yet supported …` |
 | Format unknown | `error: cannot identify CSV format — headers don't match any known exchange.` |
 | Declared source has missing columns | `error: --source 'ndax' declared but CSV is missing expected columns: …` |
 | CSV parse error (bad value) | `error: failed to parse <file>: Cannot parse AMOUNT '???' …` |
+| Folder with no CSV files | *(output)* `No CSV files found in <path>.` |
+| Folder where all files are unrecognised | *(output)* `No files could be identified — nothing to tap.` |
 
 ---
 
