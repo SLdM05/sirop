@@ -29,6 +29,7 @@ from sirop.models.event import ClassifiedEvent
 from sirop.models.override import TransferOverride
 from sirop.models.raw import RawTransaction
 from sirop.models.transaction import Transaction
+from sirop.models.wallet import Wallet
 
 if TYPE_CHECKING:
     import sqlite3
@@ -89,7 +90,7 @@ def read_raw_transactions(conn: sqlite3.Connection) -> list[RawTransaction]:
         """
         SELECT source, raw_timestamp, transaction_type, asset, amount,
                amount_currency, fee, fee_currency, cad_amount, fiat_currency,
-               cad_rate, spot_rate, txid, extra_json
+               cad_rate, spot_rate, txid, extra_json, wallet_id
         FROM raw_transactions
         ORDER BY raw_timestamp
         """
@@ -123,6 +124,7 @@ def read_raw_transactions(conn: sqlite3.Connection) -> list[RawTransaction]:
                 txid=row["txid"],
                 raw_type=row["transaction_type"],
                 raw_row=raw_row,
+                wallet_id=row["wallet_id"],
             )
         )
     return result
@@ -146,8 +148,8 @@ def write_transactions(conn: sqlite3.Connection, txs: list[Transaction]) -> list
                 INSERT INTO transactions
                     (raw_id, timestamp, transaction_type, asset, amount,
                      fee_crypto, fee_currency, cad_amount, cad_fee, cad_rate,
-                     txid, source, is_transfer, counterpart_id, notes)
-                VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     txid, source, is_transfer, counterpart_id, notes, wallet_id)
+                VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     tx.timestamp.isoformat(),
@@ -166,6 +168,7 @@ def write_transactions(conn: sqlite3.Connection, txs: list[Transaction]) -> list
                     1 if tx.is_transfer else 0,
                     tx.counterpart_id,
                     tx.notes,
+                    tx.wallet_id,
                 ),
             )
             updated.append(
@@ -183,6 +186,7 @@ def write_transactions(conn: sqlite3.Connection, txs: list[Transaction]) -> list
                     is_transfer=tx.is_transfer,
                     counterpart_id=tx.counterpart_id,
                     notes=tx.notes,
+                    wallet_id=tx.wallet_id,
                 )
             )
     return updated
@@ -193,7 +197,8 @@ def read_transactions(conn: sqlite3.Connection) -> list[Transaction]:
     rows = conn.execute(
         """
         SELECT id, source, timestamp, transaction_type, asset, amount,
-               cad_amount, cad_fee, fee_crypto, txid, is_transfer, counterpart_id, notes
+               cad_amount, cad_fee, fee_crypto, txid, is_transfer, counterpart_id, notes,
+               wallet_id
         FROM transactions
         ORDER BY timestamp
         """
@@ -216,6 +221,7 @@ def read_transactions(conn: sqlite3.Connection) -> list[Transaction]:
                 is_transfer=bool(row["is_transfer"]),
                 counterpart_id=row["counterpart_id"],
                 notes=row["notes"] or "",
+                wallet_id=row["wallet_id"],
             )
         )
     return result
@@ -655,15 +661,75 @@ def write_boc_rate(
 
 
 # ---------------------------------------------------------------------------
+# Wallets (assigned at tap time)
+# ---------------------------------------------------------------------------
+
+
+def find_or_create_wallet(
+    conn: sqlite3.Connection,
+    name: str,
+    source: str,
+    auto_created: bool,
+) -> Wallet:
+    """Return the wallet with *name*, creating it if it does not exist.
+
+    If the wallet already exists its ``source`` and ``auto_created`` fields
+    are left unchanged — a later ``tap --wallet NAME`` for the same wallet
+    name is treated as tapping into the same wallet.
+    """
+    now = datetime.now(tz=UTC)
+    with conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO wallets (name, source, auto_created, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (name, source, 1 if auto_created else 0, now.isoformat()),
+        )
+    row = conn.execute(
+        "SELECT id, name, source, auto_created, created_at, note FROM wallets WHERE name = ?",
+        (name,),
+    ).fetchone()
+    return Wallet(
+        id=row["id"],
+        name=row["name"],
+        source=row["source"],
+        auto_created=bool(row["auto_created"]),
+        created_at=datetime.fromisoformat(row["created_at"]),
+        note=row["note"] or "",
+    )
+
+
+def read_wallets(conn: sqlite3.Connection) -> list[Wallet]:
+    """Return all wallets ordered by name."""
+    rows = conn.execute(
+        "SELECT id, name, source, auto_created, created_at, note FROM wallets ORDER BY name"
+    ).fetchall()
+    return [
+        Wallet(
+            id=row["id"],
+            name=row["name"],
+            source=row["source"],
+            auto_created=bool(row["auto_created"]),
+            created_at=datetime.fromisoformat(row["created_at"]),
+            note=row["note"] or "",
+        )
+        for row in rows
+    ]
+
+
+# ---------------------------------------------------------------------------
 # Transfer overrides (stir command)
 # ---------------------------------------------------------------------------
 
 
-def write_transfer_override(
+def write_transfer_override(  # noqa: PLR0913
     conn: sqlite3.Connection,
     tx_id_a: int,
-    tx_id_b: int,
+    tx_id_b: int | None,
     action: str,
+    implied_fee_crypto: Decimal = Decimal("0"),
+    external_wallet: str = "",
     note: str = "",
 ) -> TransferOverride:
     """Insert a transfer override and return it with its DB-assigned ID.
@@ -671,28 +737,39 @@ def write_transfer_override(
     Parameters
     ----------
     tx_id_a:
-        ``transactions.id`` of the first (typically outgoing) transaction.
+        ``transactions.id`` of the primary transaction.
     tx_id_b:
-        ``transactions.id`` of the second (typically incoming) transaction.
+        ``transactions.id`` of the counterpart transaction.  ``None`` for
+        ``'external-out'`` and ``'external-in'`` actions.
     action:
-        ``'link'`` to force the pair as a transfer, ``'unlink'`` to prevent pairing.
+        ``'link'``, ``'unlink'``, ``'external-out'``, or ``'external-in'``.
+    implied_fee_crypto:
+        For ``'link'``: exact difference between sent and received amounts.
+        The boil stage converts this into a fee micro-disposition.
+    external_wallet:
+        For ``'external-out'``/``'external-in'``: name of the external wallet.
     note:
         Optional free-text annotation.
     """
     now = datetime.now(tz=UTC)
+    fee_str = format(implied_fee_crypto, "f") if implied_fee_crypto else ""
     with conn:
         cursor = conn.execute(
             """
-            INSERT INTO transfer_overrides (tx_id_a, tx_id_b, action, created_at, note)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO transfer_overrides
+                (tx_id_a, tx_id_b, action, implied_fee_crypto, external_wallet,
+                 created_at, note)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (tx_id_a, tx_id_b, action, now.isoformat(), note),
+            (tx_id_a, tx_id_b, action, fee_str, external_wallet, now.isoformat(), note),
         )
     return TransferOverride(
         id=cursor.lastrowid or 0,
         tx_id_a=tx_id_a,
         tx_id_b=tx_id_b,
         action=action,  # type: ignore[arg-type]
+        implied_fee_crypto=implied_fee_crypto,
+        external_wallet=external_wallet,
         created_at=now,
         note=note,
     )
@@ -702,7 +779,8 @@ def read_transfer_overrides(conn: sqlite3.Connection) -> list[TransferOverride]:
     """Return all transfer overrides ordered by creation time."""
     rows = conn.execute(
         """
-        SELECT id, tx_id_a, tx_id_b, action, created_at, note
+        SELECT id, tx_id_a, tx_id_b, action, implied_fee_crypto,
+               external_wallet, created_at, note
         FROM transfer_overrides
         ORDER BY created_at
         """
@@ -714,6 +792,10 @@ def read_transfer_overrides(conn: sqlite3.Connection) -> list[TransferOverride]:
             tx_id_a=row["tx_id_a"],
             tx_id_b=row["tx_id_b"],
             action=row["action"],
+            implied_fee_crypto=Decimal(row["implied_fee_crypto"])
+            if row["implied_fee_crypto"]
+            else Decimal("0"),
+            external_wallet=row["external_wallet"] or "",
             created_at=datetime.fromisoformat(row["created_at"]),
             note=row["note"] or "",
         )

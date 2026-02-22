@@ -14,7 +14,7 @@ from typing import Final
 
 # Bump this when the schema changes. The migration guard reads this value
 # and refuses to open a file whose schema_version doesn't match.
-SCHEMA_VERSION: Final[int] = 4
+SCHEMA_VERSION: Final[int] = 5
 
 # All pipeline stage names in execution order.
 PIPELINE_STAGES: Final[tuple[str, ...]] = (
@@ -76,10 +76,26 @@ CREATE TABLE IF NOT EXISTS custom_importers (
 )
 """
 
+# ── v5: wallets ───────────────────────────────────────────────────────────────
+# Each tap source is associated with a named wallet.  Wallets auto-created from
+# a tap carry auto_created=1; user-named wallets (--wallet flag or manual) carry
+# auto_created=0.  The distinction is shown in `stir` to help users audit coverage.
+_WALLETS_DDL = """
+CREATE TABLE IF NOT EXISTS wallets (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    name         TEXT    NOT NULL UNIQUE,        -- display name, e.g. "shakepay" or "cold-storage"
+    source       TEXT    NOT NULL DEFAULT '',    -- format key, e.g. "shakepay", "ndax", "sparrow"
+    auto_created INTEGER NOT NULL DEFAULT 1,     -- 1=auto from tap format, 0=user-named
+    created_at   TEXT    NOT NULL,               -- ISO 8601 UTC
+    note         TEXT    NOT NULL DEFAULT ''
+)
+"""
+
 # ── Gap 1 fix ─────────────────────────────────────────────────────────────────
 # Added: amount_currency (what currency `amount` is in — BTC, CAD, USD, etc.)
 #        fiat_currency   (what currency `cad_amount` is actually in at raw stage)
 #        spot_rate       (Shakepay: spot rate alongside buy/sell rate for spread fee)
+# v5: wallet_id — FK to wallets, assigned at tap time
 _RAW_TRANSACTIONS_DDL = """
 CREATE TABLE IF NOT EXISTS raw_transactions (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -96,7 +112,8 @@ CREATE TABLE IF NOT EXISTS raw_transactions (
     cad_rate            TEXT,               -- Decimal string or NULL
     spot_rate           TEXT,               -- Decimal string or NULL (Shakepay spread calc)
     txid                TEXT,               -- blockchain txid or NULL
-    extra_json          TEXT                -- JSON blob for source-specific fields
+    extra_json          TEXT,               -- JSON blob for source-specific fields
+    wallet_id           INTEGER REFERENCES wallets(id)  -- v5: source wallet
 )
 """
 
@@ -105,6 +122,7 @@ CREATE TABLE IF NOT EXISTS raw_transactions (
 # Added:   is_transfer     (TRUE when transfer-matcher confirms wallet-to-wallet)
 #          counterpart_id  (FK to the matching deposit/withdrawal row)
 #          notes           (free-text override or annotation)
+# v5:      wallet_id       (FK to wallets, propagated from raw_transactions)
 _TRANSACTIONS_DDL = """
 CREATE TABLE IF NOT EXISTS transactions (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -122,7 +140,8 @@ CREATE TABLE IF NOT EXISTS transactions (
     source              TEXT    NOT NULL,
     is_transfer         INTEGER NOT NULL DEFAULT 0,  -- 1 after transfer_match confirms pair
     counterpart_id      INTEGER REFERENCES transactions(id),  -- matched withdrawal/deposit
-    notes               TEXT    NOT NULL DEFAULT ''
+    notes               TEXT    NOT NULL DEFAULT '',
+    wallet_id           INTEGER REFERENCES wallets(id)  -- v5: source wallet
 )
 """
 
@@ -245,12 +264,15 @@ CREATE TABLE IF NOT EXISTS dispositions_adjusted (
 
 _TRANSFER_OVERRIDES_DDL = """
 CREATE TABLE IF NOT EXISTS transfer_overrides (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    tx_id_a     INTEGER NOT NULL REFERENCES transactions(id),
-    tx_id_b     INTEGER NOT NULL REFERENCES transactions(id),
-    action      TEXT    NOT NULL CHECK(action IN ('link', 'unlink')),
-    created_at  TEXT    NOT NULL,   -- ISO 8601 UTC
-    note        TEXT    NOT NULL DEFAULT ''
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    tx_id_a            INTEGER NOT NULL REFERENCES transactions(id),
+    tx_id_b            INTEGER REFERENCES transactions(id),  -- NULL for external-out / external-in
+    action             TEXT    NOT NULL
+                               CHECK(action IN ('link','unlink','external-out','external-in')),
+    implied_fee_crypto TEXT    NOT NULL DEFAULT '',  -- Decimal string; '' = zero
+    external_wallet    TEXT    NOT NULL DEFAULT '',  -- wallet name for external legs
+    created_at         TEXT    NOT NULL,             -- ISO 8601 UTC
+    note               TEXT    NOT NULL DEFAULT ''
 )
 """
 
@@ -291,6 +313,7 @@ _ALL_DDL: Final[tuple[str, ...]] = (
     _STAGE_STATUS_DDL,
     _BOC_RATES_DDL,
     _CUSTOM_IMPORTERS_DDL,
+    _WALLETS_DDL,
     _RAW_TRANSACTIONS_DDL,
     _TRANSACTIONS_DDL,
     _VERIFIED_TRANSACTIONS_DDL,
@@ -315,3 +338,63 @@ def create_tables(conn: sqlite3.Connection) -> None:
     with conn:
         for ddl in _ALL_DDL:
             conn.execute(ddl)
+
+
+def migrate_to_v5(conn: sqlite3.Connection) -> None:
+    """Apply v5 schema migrations to an existing batch file.
+
+    Idempotent — safe to call on fresh databases and already-migrated ones.
+    Handles three changes that SQLite cannot express via CREATE TABLE IF NOT
+    EXISTS alone:
+
+    1. ``wallets.id`` column added to ``raw_transactions``.
+    2. ``wallet_id`` column added to ``transactions``.
+    3. ``transfer_overrides`` recreated with nullable ``tx_id_b``,
+       ``implied_fee_crypto``, ``external_wallet``, and the expanded
+       ``action`` CHECK constraint.
+    """
+    with conn:
+        # -- raw_transactions: add wallet_id --------------------------------
+        raw_cols = {r[1] for r in conn.execute("PRAGMA table_info(raw_transactions)")}
+        if "wallet_id" not in raw_cols:
+            conn.execute(
+                "ALTER TABLE raw_transactions ADD COLUMN wallet_id INTEGER REFERENCES wallets(id)"
+            )
+
+        # -- transactions: add wallet_id ------------------------------------
+        tx_cols = {r[1] for r in conn.execute("PRAGMA table_info(transactions)")}
+        if "wallet_id" not in tx_cols:
+            conn.execute(
+                "ALTER TABLE transactions ADD COLUMN wallet_id INTEGER REFERENCES wallets(id)"
+            )
+
+        # -- transfer_overrides: recreate with new structure ----------------
+        # Check for the new column; if absent the table pre-dates v5.
+        ov_cols = {r[1] for r in conn.execute("PRAGMA table_info(transfer_overrides)")}
+        if "implied_fee_crypto" not in ov_cols:
+            conn.execute(
+                """
+                CREATE TABLE transfer_overrides_v5 (
+                    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tx_id_a            INTEGER NOT NULL REFERENCES transactions(id),
+                    tx_id_b            INTEGER REFERENCES transactions(id),
+                    action             TEXT    NOT NULL
+                                               CHECK(action IN
+                                                ('link','unlink','external-out','external-in')),
+                    implied_fee_crypto TEXT    NOT NULL DEFAULT '',
+                    external_wallet    TEXT    NOT NULL DEFAULT '',
+                    created_at         TEXT    NOT NULL,
+                    note               TEXT    NOT NULL DEFAULT ''
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO transfer_overrides_v5
+                    (id, tx_id_a, tx_id_b, action, created_at, note)
+                SELECT id, tx_id_a, tx_id_b, action, created_at, note
+                FROM transfer_overrides
+                """
+            )
+            conn.execute("DROP TABLE transfer_overrides")
+            conn.execute("ALTER TABLE transfer_overrides_v5 RENAME TO transfer_overrides")

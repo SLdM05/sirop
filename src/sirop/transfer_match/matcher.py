@@ -92,18 +92,24 @@ def match_transfers(  # noqa: PLR0912 PLR0915
     # Build override lookup structures.
     # forced_link_pairs: pairs that must always be treated as transfers.
     # forced_unlink_pairs: pairs that must never be auto-matched.
+    # external_ids: single transactions marked as going to/from an external wallet.
     forced_link_pairs: set[tuple[int, int]] = set()
     forced_unlink_pairs: set[tuple[int, int]] = set()
+    external_ids: set[int] = set()
     if overrides:
         for ov in overrides:
-            pair = (ov.tx_id_a, ov.tx_id_b)
-            pair_rev = (ov.tx_id_b, ov.tx_id_a)
-            if ov.action == "link":
+            if ov.action == "link" and ov.tx_id_b is not None:
+                pair = (ov.tx_id_a, ov.tx_id_b)
+                pair_rev = (ov.tx_id_b, ov.tx_id_a)
                 forced_link_pairs.add(pair)
                 forced_link_pairs.add(pair_rev)
-            else:
+            elif ov.action == "unlink" and ov.tx_id_b is not None:
+                pair = (ov.tx_id_a, ov.tx_id_b)
+                pair_rev = (ov.tx_id_b, ov.tx_id_a)
                 forced_unlink_pairs.add(pair)
                 forced_unlink_pairs.add(pair_rev)
+            elif ov.action in ("external-out", "external-in"):
+                external_ids.add(ov.tx_id_a)
 
     # Track which transaction IDs have been paired as transfer legs.
     paired_ids: set[int] = set()
@@ -111,11 +117,41 @@ def match_transfers(  # noqa: PLR0912 PLR0915
     # Build a map of tx.id → Transaction for fast override lookups.
     tx_by_id: dict[int, Transaction] = {t.id: t for t in sorted_txs}
 
-    # --- Pass 0: apply forced links ---
+    # --- Pass 0a: apply external-out / external-in overrides ---
+    # These are single-transaction overrides with no counterpart.
+    # Mark the tx as a non-taxable transfer out/into the tracked universe.
     fee_disposals: list[ClassifiedEvent] = []
 
     for ov in overrides or []:
+        if ov.action not in ("external-out", "external-in"):
+            continue
+        tx = tx_by_id.get(ov.tx_id_a)
+        if tx is None:
+            logger.warning(
+                "transfer_match: external override references unknown tx id %d — skipping",
+                ov.tx_id_a,
+            )
+            continue
+        if tx.id in paired_ids:
+            logger.warning(
+                "transfer_match: external override for tx %d skipped — already paired",
+                tx.id,
+            )
+            continue
+        paired_ids.add(tx.id)
+        wallet_label = ov.external_wallet or "external"
+        logger.debug(
+            "transfer_match: %s applied for tx %d → wallet '%s'",
+            ov.action,
+            tx.id,
+            wallet_label,
+        )
+
+    # --- Pass 0b: apply forced links ---
+    for ov in overrides or []:
         if ov.action != "link":
+            continue
+        if ov.tx_id_b is None:
             continue
         if ov.tx_id_a in paired_ids or ov.tx_id_b in paired_ids:
             logger.warning(
@@ -138,12 +174,15 @@ def match_transfers(  # noqa: PLR0912 PLR0915
         paired_ids.add(ov.tx_id_b)
         logger.debug("transfer_match: forced link applied (%d ↔ %d)", ov.tx_id_a, ov.tx_id_b)
 
-        # Emit fee micro-disposal for the outgoing leg if it carried a network fee.
+        # Determine the outgoing leg.
         outgoing = tx_a if tx_a.tx_type in _OUTGOING else tx_b
-        has_fee = outgoing.fee_crypto and outgoing.fee_crypto > Decimal("0")
-        if has_fee and outgoing.cad_value > Decimal("0"):
+
+        # Prefer the user-recorded implied fee over the exchange-reported fee.
+        # implied_fee_crypto is the exact difference between sent and received.
+        if ov.implied_fee_crypto > Decimal("0"):
+            implied_fee = ov.implied_fee_crypto
             cad_rate = outgoing.cad_value / outgoing.amount if outgoing.amount else Decimal("0")
-            fee_proceeds = outgoing.fee_crypto * cad_rate
+            fee_proceeds = implied_fee * cad_rate
             fee_disposals.append(
                 ClassifiedEvent(
                     id=0,
@@ -151,7 +190,7 @@ def match_transfers(  # noqa: PLR0912 PLR0915
                     timestamp=outgoing.timestamp,
                     event_type="fee_disposal",
                     asset=outgoing.asset,
-                    amount=outgoing.fee_crypto,
+                    amount=implied_fee,
                     cad_proceeds=fee_proceeds,
                     cad_cost=None,
                     cad_fee=None,
@@ -160,6 +199,28 @@ def match_transfers(  # noqa: PLR0912 PLR0915
                     is_taxable=True,
                 )
             )
+        else:
+            # Fall back to the exchange-reported fee on the outgoing leg.
+            has_fee = outgoing.fee_crypto and outgoing.fee_crypto > Decimal("0")
+            if has_fee and outgoing.cad_value > Decimal("0"):
+                cad_rate = outgoing.cad_value / outgoing.amount if outgoing.amount else Decimal("0")
+                fee_proceeds = outgoing.fee_crypto * cad_rate
+                fee_disposals.append(
+                    ClassifiedEvent(
+                        id=0,
+                        vtx_id=outgoing.id,
+                        timestamp=outgoing.timestamp,
+                        event_type="fee_disposal",
+                        asset=outgoing.asset,
+                        amount=outgoing.fee_crypto,
+                        cad_proceeds=fee_proceeds,
+                        cad_cost=None,
+                        cad_fee=None,
+                        txid=outgoing.txid,
+                        source=outgoing.source,
+                        is_taxable=True,
+                    )
+                )
 
     # --- Pass 1: match outgoing ↔ incoming transfers (auto) ---
     for tx in sorted_txs:
@@ -203,14 +264,16 @@ def match_transfers(  # noqa: PLR0912 PLR0915
 
     for tx in sorted_txs:
         if tx.id in paired_ids:
-            # Confirmed transfer leg — emit a non-taxable marker so the DB has
-            # a record, but it won't reach the ACB engine.
+            # Confirmed transfer leg (matched pair or external override) — emit a
+            # non-taxable marker so the DB has a record, but it won't reach the ACB
+            # engine.
+            event_type = "external" if tx.id in external_ids else "transfer"
             events.append(
                 ClassifiedEvent(
                     id=0,
                     vtx_id=tx.id,
                     timestamp=tx.timestamp,
-                    event_type="transfer",
+                    event_type=event_type,
                     asset=tx.asset,
                     amount=tx.amount,
                     cad_proceeds=None,

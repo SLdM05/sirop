@@ -45,6 +45,15 @@ def _build_parser() -> argparse.ArgumentParser:
             "Exchange format to use (e.g. ndax, shakepay). Auto-detected from headers when omitted."
         ),
     )
+    tap_p.add_argument(
+        "--wallet",
+        metavar="NAME",
+        help=(
+            "Wallet name to assign these transactions to (e.g. 'ledger-cold', 'shakepay-savings'). "
+            "Defaults to the detected source format name. Use this to distinguish two accounts "
+            "at the same exchange, or to label a hardware wallet before tapping its CSV."
+        ),
+    )
 
     # ── create ────────────────────────────────────────────────────────────────
     create_p = sub.add_parser("create", help="Tap a new batch (tax year file)")
@@ -125,7 +134,7 @@ def main() -> None:
     configure_logging(verbose=args.verbose, debug=args.debug)
 
     if args.command == "tap":
-        sys.exit(handle_tap(args.file, args.source))
+        sys.exit(handle_tap(args.file, args.source, getattr(args, "wallet", None)))
 
     elif args.command == "create":
         sys.exit(handle_create(args.name, args.year))
@@ -137,12 +146,8 @@ def main() -> None:
         sys.exit(handle_switch(args.name))
 
     elif args.command == "stir":
-        link: tuple[int, int] | None = (
-            (args.link[0], args.link[1]) if args.link else None
-        )
-        unlink: tuple[int, int] | None = (
-            (args.unlink[0], args.unlink[1]) if args.unlink else None
-        )
+        link: tuple[int, int] | None = (args.link[0], args.link[1]) if args.link else None
+        unlink: tuple[int, int] | None = (args.unlink[0], args.unlink[1]) if args.unlink else None
         sys.exit(
             handle_stir(
                 list_only=args.list_only,

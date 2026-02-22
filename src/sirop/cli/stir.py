@@ -12,11 +12,31 @@ alongside auto-matches.
 
 The user can then:
 
-- **link** two transactions — force them to be treated as a wallet-to-wallet
-  transfer (non-taxable). This survives ``boil --from transfer_match`` re-runs.
-- **unlink** two transactions — prevent two auto-matched transactions from
-  being paired. Both legs will be treated as taxable events (sell/buy).
-- **clear** all overrides for a transaction — restore auto-matching behaviour.
+- **transfer <id>** — guided wizard: pick the counterpart transaction or mark
+  the movement as going to/from an external wallet.  Validates that no asset
+  units are created from nothing.
+- **external <id>** — quick shortcut to mark a withdrawal or deposit as
+  going to / coming from an untracked external wallet without a wizard.
+- **link <id1> <id2>** — force-link two transactions as a transfer pair.
+  Validates amounts: received must not exceed sent.  The exact difference is
+  stored as ``implied_fee_crypto`` and becomes a fee micro-disposition at
+  ``boil`` time.
+- **unlink <id1> <id2>** — prevent two auto-matched transactions from being
+  paired. Both legs will be treated as taxable events (sell/buy).
+- **clear <id>** — remove all overrides for a transaction.
+
+Asset-agnostic
+--------------
+All validation is performed on the ``asset`` field of each transaction.  The
+wizard works for BTC, ETH, or any other crypto asset — sirop does not hard-code
+any asset name.
+
+Invariant
+---------
+When two transactions are linked, ``received ≤ sent`` must hold (for the same
+asset).  The difference is the on-chain network fee.  The tool never accepts a
+link where the receiving side shows more units than were sent — that would create
+units from nothing.
 
 Modes
 -----
@@ -54,6 +74,7 @@ if TYPE_CHECKING:
 
     from sirop.models.override import TransferOverride
     from sirop.models.transaction import Transaction
+    from sirop.models.wallet import Wallet
 
 logger = get_logger(__name__)
 
@@ -145,17 +166,71 @@ def _run_stir(
 
         # Display mode — shared by --list and interactive.
         txs = repo.read_transactions(conn)
+        wallets = repo.read_wallets(conn)
         overrides = repo.read_transfer_overrides(conn)
         state = _build_state(txs, overrides)
-        _print_state(batch_name, txs, state, overrides)
+        _print_state(batch_name, txs, state, overrides, wallets)
 
         if list_only:
             return 0
 
-        return _interactive_loop(conn, txs, overrides, state, batch_name)
+        return _interactive_loop(conn, txs, wallets, overrides, state, batch_name)
 
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Amount validation helpers
+# ---------------------------------------------------------------------------
+
+
+def _compute_implied_fee(
+    tx_a: Transaction,
+    tx_b: Transaction,
+) -> tuple[Decimal, str]:
+    """Return (implied_fee, error_message) for a forced link.
+
+    The implied fee is ``sent_amount - received_amount`` for the asset.
+    An error message (non-empty string) is returned when the link is impossible.
+
+    Rules (asset-agnostic):
+    - Both transactions must involve the same asset.
+    - If one is outgoing and the other incoming: fee = sent - received.
+      - received > sent → impossible (creates units from nothing).
+      - received ≤ sent → fee is the network cost; may be zero.
+    - If both are the same direction (unusual forced link): fee = 0, no check.
+    """
+    if tx_a.asset != tx_b.asset:
+        return Decimal("0"), (
+            f"Asset mismatch: id:{tx_a.id} is {tx_a.asset} but id:{tx_b.id} is {tx_b.asset}. "
+            "Cannot link transactions of different assets."
+        )
+
+    a_out = tx_a.tx_type in _OUTGOING
+    b_in = tx_b.tx_type in _INCOMING
+    a_in = tx_a.tx_type in _INCOMING
+    b_out = tx_b.tx_type in _OUTGOING
+
+    if a_out and b_in:
+        sent, received = tx_a.amount, tx_b.amount
+    elif a_in and b_out:
+        sent, received = tx_b.amount, tx_a.amount
+    else:
+        # Same direction (e.g. two buys) — allow the link, no fee logic.
+        return Decimal("0"), ""
+
+    if received > sent:
+        excess = received - sent
+        return Decimal("0"), (
+            f"Received {received:.8f} {tx_a.asset} (id:{tx_b.id if a_out else tx_a.id}) "
+            f"exceeds sent {sent:.8f} {tx_a.asset} (id:{tx_a.id if a_out else tx_b.id}) "
+            f"by {excess:.8f} {tx_a.asset}.\n"
+            f"  This would create {excess:.8f} {tx_a.asset} from nothing — impossible.\n"
+            f"  Check that you have selected the correct transactions."
+        )
+
+    return sent - received, ""
 
 
 # ---------------------------------------------------------------------------
@@ -164,11 +239,26 @@ def _run_stir(
 
 
 def _apply_link(conn: sqlite3.Connection, id_a: int, id_b: int) -> int:
-    """Force-link two transactions. Removes any conflicting unlink override."""
+    """Force-link two transactions.  Validates amounts, computes implied fee."""
     _assert_tx_exists(conn, id_a)
     _assert_tx_exists(conn, id_b)
+
+    tx_a = _load_tx(conn, id_a)
+    tx_b = _load_tx(conn, id_b)
+    implied_fee, err = _compute_implied_fee(tx_a, tx_b)
+    if err:
+        print(f"  Error: {err}")
+        return 1
+
     _remove_conflicting_override(conn, id_a, id_b, "unlink")
-    override = repo.write_transfer_override(conn, id_a, id_b, "link")
+    override = repo.write_transfer_override(
+        conn, id_a, id_b, "link", implied_fee_crypto=implied_fee
+    )
+    if implied_fee > Decimal("0"):
+        print(
+            f"  Implied fee: {implied_fee:.8f} {tx_a.asset} "
+            f"(will become a fee micro-disposal at boil time)"
+        )
     emit(MessageCode.STIR_LINK_APPLIED, id_a=id_a, id_b=id_b, ov_id=override.id)
     return 0
 
@@ -196,6 +286,15 @@ def _assert_tx_exists(conn: sqlite3.Connection, tx_id: int) -> None:
     row = conn.execute("SELECT id FROM transactions WHERE id = ?", (tx_id,)).fetchone()
     if row is None:
         raise _StirError(MessageCode.STIR_ERROR_TX_NOT_FOUND, tx_id=tx_id)
+
+
+def _load_tx(conn: sqlite3.Connection, tx_id: int) -> Transaction:
+    """Load a single Transaction by id (must exist)."""
+    txs = repo.read_transactions(conn)
+    for tx in txs:
+        if tx.id == tx_id:
+            return tx
+    raise _StirError(MessageCode.STIR_ERROR_TX_NOT_FOUND, tx_id=tx_id)
 
 
 def _remove_conflicting_override(
@@ -229,9 +328,11 @@ class _MatchState:
         # auto_pairs: list of (outgoing_tx, incoming_tx, reason_str)
         self.auto_pairs: list[tuple[Transaction, Transaction, str]] = []
         # forced_link_pairs: list of (tx_a, tx_b) from overrides
-        self.forced_link_pairs: list[tuple[Transaction, Transaction]] = []
+        self.forced_link_pairs: list[tuple[Transaction, Transaction, Decimal]] = []
         # forced_unlink_pairs: pairs blocked by 'unlink' overrides
         self.forced_unlink_pairs: list[tuple[Transaction, Transaction]] = []
+        # external_markers: txs marked as external-out or external-in
+        self.external_markers: list[tuple[Transaction, str, str]] = []  # (tx, action, wallet)
         # unmatched_out: outgoing txs that had no match
         self.unmatched_out: list[Transaction] = []
         # unmatched_in: incoming txs that had no match
@@ -242,20 +343,25 @@ class _MatchState:
 
 def _build_override_sets(
     overrides: list[TransferOverride],
-) -> tuple[set[tuple[int, int]], set[tuple[int, int]]]:
-    """Return (forced_link_ids, forced_unlink_ids) as symmetric pair sets."""
+) -> tuple[set[tuple[int, int]], set[tuple[int, int]], set[int]]:
+    """Return (forced_link_ids, forced_unlink_ids, external_ids) as sets."""
     forced_link_ids: set[tuple[int, int]] = set()
     forced_unlink_ids: set[tuple[int, int]] = set()
+    external_ids: set[int] = set()
     for ov in overrides:
-        pair = (ov.tx_id_a, ov.tx_id_b)
-        pair_rev = (ov.tx_id_b, ov.tx_id_a)
-        if ov.action == "link":
+        if ov.action == "link" and ov.tx_id_b is not None:
+            pair = (ov.tx_id_a, ov.tx_id_b)
+            pair_rev = (ov.tx_id_b, ov.tx_id_a)
             forced_link_ids.add(pair)
             forced_link_ids.add(pair_rev)
-        else:
+        elif ov.action == "unlink" and ov.tx_id_b is not None:
+            pair = (ov.tx_id_a, ov.tx_id_b)
+            pair_rev = (ov.tx_id_b, ov.tx_id_a)
             forced_unlink_ids.add(pair)
             forced_unlink_ids.add(pair_rev)
-    return forced_link_ids, forced_unlink_ids
+        elif ov.action in ("external-out", "external-in"):
+            external_ids.add(ov.tx_id_a)
+    return forced_link_ids, forced_unlink_ids, external_ids
 
 
 def _apply_forced_links(
@@ -266,7 +372,7 @@ def _apply_forced_links(
 ) -> None:
     """Populate *state.forced_link_pairs* from ``action='link'`` overrides."""
     for ov in overrides:
-        if ov.action != "link":
+        if ov.action != "link" or ov.tx_id_b is None:
             continue
         tx_a = tx_by_id.get(ov.tx_id_a)
         tx_b = tx_by_id.get(ov.tx_id_b)
@@ -276,10 +382,10 @@ def _apply_forced_links(
             continue
         paired_ids.add(tx_a.id)
         paired_ids.add(tx_b.id)
-        state.forced_link_pairs.append((tx_a, tx_b))
+        state.forced_link_pairs.append((tx_a, tx_b, ov.implied_fee_crypto))
 
 
-def _build_state(  # noqa: PLR0912
+def _build_state(  # noqa: PLR0912 PLR0915
     txs: list[Transaction],
     overrides: list[TransferOverride],
 ) -> _MatchState:
@@ -290,9 +396,21 @@ def _build_state(  # noqa: PLR0912
     tx_by_id: dict[int, Transaction] = {t.id: t for t in txs}
     sorted_txs = sorted(txs, key=lambda t: t.timestamp)
 
-    forced_link_ids, forced_unlink_ids = _build_override_sets(overrides)
+    forced_link_ids, forced_unlink_ids, external_ids = _build_override_sets(overrides)
     paired_ids: set[int] = set()
 
+    # Pass 0a: apply external markers.
+    ov_by_tx: dict[int, TransferOverride] = {ov.tx_id_a: ov for ov in overrides}
+    for ov in overrides:
+        if ov.action not in ("external-out", "external-in"):
+            continue
+        tx = tx_by_id.get(ov.tx_id_a)
+        if tx is None or tx.id in paired_ids:
+            continue
+        paired_ids.add(tx.id)
+        state.external_markers.append((tx, ov.action, ov.external_wallet))
+
+    # Pass 0b: apply forced links.
     _apply_forced_links(overrides, tx_by_id, paired_ids, state)
 
     # Pass 1: auto-matching (respecting forced unlinks).
@@ -346,7 +464,7 @@ def _build_state(  # noqa: PLR0912
         else:
             state.other.append(tx)
 
-    _ = forced_link_ids  # used in _build_override_sets; satisfy static analysis
+    _ = (forced_link_ids, external_ids, ov_by_tx)  # used above; satisfy static analysis
     return state
 
 
@@ -371,20 +489,36 @@ def _would_match(tx: Transaction, candidate: Transaction, window: object) -> boo
 _HR = "─" * _COL_WIDTH
 
 
-def _fmt_tx(tx: Transaction) -> str:
+def _wallet_label(tx: Transaction, wallets: list[Wallet]) -> str:
+    """Return a short wallet label for display."""
+    if tx.wallet_id is not None:
+        for w in wallets:
+            if w.id == tx.wallet_id:
+                tag = "" if w.auto_created else "*"
+                return f"{w.name}{tag}"
+    return tx.source
+
+
+def _fmt_tx(tx: Transaction, wallets: list[Wallet] | None = None) -> str:
     """One-line summary of a transaction."""
     date_str = tx.timestamp.strftime("%Y-%m-%d")
     amount_str = f"{tx.amount:>14.8f} {tx.asset}"
     cad_str = f"CAD {tx.cad_value:>10,.2f}"
+    wallet_str = _wallet_label(tx, wallets or [])
     return (
-        f"id:{tx.id:<5}  {date_str}  {tx.source:<12}  "
+        f"id:{tx.id:<5}  {date_str}  {wallet_str:<14}  "
         f"{tx.tx_type.value:<14}  {amount_str}  {cad_str}"
     )
 
 
-def _print_pair(tx_a: Transaction, tx_b: Transaction, connector: str = "↔") -> None:
-    print(f"  {_fmt_tx(tx_a)}")
-    print(f"    {connector}  {_fmt_tx(tx_b)}")
+def _print_pair(
+    tx_a: Transaction,
+    tx_b: Transaction,
+    wallets: list[Wallet],
+    connector: str = "↔",
+) -> None:
+    print(f"  {_fmt_tx(tx_a, wallets)}")
+    print(f"    {connector}  {_fmt_tx(tx_b, wallets)}")
     print()
 
 
@@ -393,7 +527,9 @@ def _print_state(  # noqa: PLR0912 PLR0915
     txs: list[Transaction],
     state: _MatchState,
     overrides: list[TransferOverride],
+    wallets: list[Wallet] | None = None,
 ) -> None:
+    _wallets = wallets or []
     print(f"\nStirring batch: {batch_name}  ({len(txs)} transactions loaded)")
     print()
 
@@ -402,7 +538,7 @@ def _print_state(  # noqa: PLR0912 PLR0915
     print(_HR)
     if state.auto_pairs:
         for out_tx, in_tx, reason in state.auto_pairs:
-            _print_pair(out_tx, in_tx)
+            _print_pair(out_tx, in_tx, _wallets)
             print(f"       Reason: {reason}")
             print()
     else:
@@ -413,18 +549,31 @@ def _print_state(  # noqa: PLR0912 PLR0915
     print(f"Forced links — stir overrides ({len(state.forced_link_pairs)}):")
     print(_HR)
     if state.forced_link_pairs:
-        for tx_a, tx_b in state.forced_link_pairs:
-            _print_pair(tx_a, tx_b)
+        for tx_a, tx_b, implied_fee in state.forced_link_pairs:
+            _print_pair(tx_a, tx_b, _wallets)
+            if implied_fee > Decimal("0"):
+                print(f"       Implied fee: {implied_fee:.8f} {tx_a.asset}")
+                print()
     else:
         print("  (none)")
     print()
+
+    # External markers.
+    if state.external_markers:
+        print(f"External transfers ({len(state.external_markers)}):")
+        print(_HR)
+        for tx, action, ext_wallet in state.external_markers:
+            direction = "→ external" if action == "external-out" else "← external"
+            wallet_label = f"  [{ext_wallet}]" if ext_wallet else ""
+            print(f"  {_fmt_tx(tx, _wallets)}  {direction}{wallet_label}")
+        print()
 
     # Forced unlinks (would-have-matched but blocked).
     if state.forced_unlink_pairs:
         print(f"Forced unlinks — blocked auto-matches ({len(state.forced_unlink_pairs)}):")
         print(_HR)
         for tx_a, tx_b in state.forced_unlink_pairs:
-            _print_pair(tx_a, tx_b, connector="✗")
+            _print_pair(tx_a, tx_b, _wallets, connector="✗")
         print()
 
     # Unmatched outgoing → sells.
@@ -432,7 +581,7 @@ def _print_state(  # noqa: PLR0912 PLR0915
     print(_HR)
     if state.unmatched_out:
         for tx in state.unmatched_out:
-            print(f"  {_fmt_tx(tx)}")
+            print(f"  {_fmt_tx(tx, _wallets)}")
     else:
         print("  (none)")
     print()
@@ -442,7 +591,7 @@ def _print_state(  # noqa: PLR0912 PLR0915
     print(_HR)
     if state.unmatched_in:
         for tx in state.unmatched_in:
-            print(f"  {_fmt_tx(tx)}")
+            print(f"  {_fmt_tx(tx, _wallets)}")
     else:
         print("  (none)")
     print()
@@ -452,7 +601,7 @@ def _print_state(  # noqa: PLR0912 PLR0915
     print(_HR)
     if state.other:
         for tx in state.other:
-            print(f"  {_fmt_tx(tx)}")
+            print(f"  {_fmt_tx(tx, _wallets)}")
     else:
         print("  (none)")
     print()
@@ -463,9 +612,14 @@ def _print_state(  # noqa: PLR0912 PLR0915
         for ov in overrides:
             ts = ov.created_at.strftime("%Y-%m-%d %H:%M")
             note_part = f"  note: {ov.note}" if ov.note else ""
+            b_part = f" ↔ {ov.tx_id_b}" if ov.tx_id_b is not None else ""
+            fee_part = (
+                f"  fee:{ov.implied_fee_crypto:.8f}" if ov.implied_fee_crypto > Decimal("0") else ""
+            )
+            ext_part = f"  → {ov.external_wallet}" if ov.external_wallet else ""
             print(
                 f"  override id:{ov.id}  action:{ov.action}  "
-                f"tx:{ov.tx_id_a} ↔ {ov.tx_id_b}  {ts}{note_part}"
+                f"tx:{ov.tx_id_a}{b_part}  {ts}{fee_part}{ext_part}{note_part}"
             )
         print()
 
@@ -473,7 +627,9 @@ def _print_state(  # noqa: PLR0912 PLR0915
 def _print_help() -> None:
     print()
     print("Commands:")
-    print("  link <id1> <id2>    Force two transactions to be a transfer pair (non-taxable).")
+    print("  transfer <id>       Guided wizard: link or mark a withdrawal/deposit as transfer.")
+    print("  external <id>       Quick mark: flag a tx as going to/from an untracked wallet.")
+    print("  link <id1> <id2>    Force two transactions to be a transfer pair (validates amounts).")
     print("  unlink <id1> <id2>  Prevent two transactions from being auto-paired.")
     print("  clear <id>          Remove all stir overrides for a transaction.")
     print("  list                Refresh the display.")
@@ -481,6 +637,7 @@ def _print_help() -> None:
     print("  quit                Exit stir (overrides are already saved).")
     print()
     print("Transaction ids are shown as  id:NNN  in the listing above.")
+    print("* after a wallet name = user-named wallet (vs auto-created from tap format).")
     print()
 
 
@@ -489,12 +646,13 @@ def _print_help() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _cmd_link(
+def _cmd_link(  # noqa: PLR0911 PLR0913
     conn: sqlite3.Connection,
     parts: list[str],
     tx_ids: set[int],
     batch_name: str,
     txs: list[Transaction],
+    wallets: list[Wallet],
 ) -> tuple[list[TransferOverride], _MatchState] | None:
     """Handle the ``link`` sub-command. Returns updated (overrides, state) or None on error."""
     if len(parts) != _TWO_ARG_PARTS:
@@ -511,21 +669,40 @@ def _cmd_link(
     if id_a == id_b:
         print("Cannot link a transaction to itself.")
         return None
+
+    tx_by_id = {t.id: t for t in txs}
+    tx_a, tx_b = tx_by_id[id_a], tx_by_id[id_b]
+    implied_fee, err = _compute_implied_fee(tx_a, tx_b)
+    if err:
+        print(f"  Cannot link: {err}")
+        return None
+
+    if implied_fee > Decimal("0"):
+        print(
+            f"  Difference: {implied_fee:.8f} {tx_a.asset} — "
+            f"will be recorded as a network fee (fee micro-disposal at boil time)."
+        )
+        confirm = input("  Proceed? [y/N] ").strip().lower()
+        if confirm not in ("y", "yes"):
+            print("  Cancelled.")
+            return None
+
     _remove_conflicting_override(conn, id_a, id_b, "unlink")
-    ov = repo.write_transfer_override(conn, id_a, id_b, "link")
+    ov = repo.write_transfer_override(conn, id_a, id_b, "link", implied_fee_crypto=implied_fee)
     emit(MessageCode.STIR_LINK_APPLIED, id_a=id_a, id_b=id_b, ov_id=ov.id)
     overrides = repo.read_transfer_overrides(conn)
     state = _build_state(txs, overrides)
-    _print_state(batch_name, txs, state, overrides)
+    _print_state(batch_name, txs, state, overrides, wallets)
     return overrides, state
 
 
-def _cmd_unlink(
+def _cmd_unlink(  # noqa: PLR0913
     conn: sqlite3.Connection,
     parts: list[str],
     tx_ids: set[int],
     batch_name: str,
     txs: list[Transaction],
+    wallets: list[Wallet],
 ) -> tuple[list[TransferOverride], _MatchState] | None:
     """Handle the ``unlink`` sub-command. Returns updated (overrides, state) or None on error."""
     if len(parts) != _TWO_ARG_PARTS:
@@ -547,16 +724,17 @@ def _cmd_unlink(
     emit(MessageCode.STIR_UNLINK_APPLIED, id_a=id_a, id_b=id_b, ov_id=ov.id)
     overrides = repo.read_transfer_overrides(conn)
     state = _build_state(txs, overrides)
-    _print_state(batch_name, txs, state, overrides)
+    _print_state(batch_name, txs, state, overrides, wallets)
     return overrides, state
 
 
-def _cmd_clear(
+def _cmd_clear(  # noqa: PLR0913
     conn: sqlite3.Connection,
     parts: list[str],
     tx_ids: set[int],
     batch_name: str,
     txs: list[Transaction],
+    wallets: list[Wallet],
 ) -> tuple[list[TransferOverride], _MatchState] | None:
     """Handle the ``clear`` sub-command. Returns updated (overrides, state) or None on error."""
     if len(parts) != _ONE_ARG_PARTS:
@@ -574,13 +752,270 @@ def _cmd_clear(
     emit(MessageCode.STIR_CLEAR_APPLIED, tx_id=tx_id, count=count)
     overrides = repo.read_transfer_overrides(conn)
     state = _build_state(txs, overrides)
-    _print_state(batch_name, txs, state, overrides)
+    _print_state(batch_name, txs, state, overrides, wallets)
     return overrides, state
 
 
-def _interactive_loop(
+def _cmd_external(  # noqa: PLR0913
+    conn: sqlite3.Connection,
+    parts: list[str],
+    tx_ids: set[int],
+    batch_name: str,
+    txs: list[Transaction],
+    wallets: list[Wallet],
+) -> tuple[list[TransferOverride], _MatchState] | None:
+    """Handle the ``external <id>`` sub-command.
+
+    Marks a withdrawal as ``external-out`` or a deposit as ``external-in``.
+    Prompts for a wallet name to label the external destination/source.
+    """
+    if len(parts) < _ONE_ARG_PARTS:
+        print("Usage: external <id>  [optional wallet name]")
+        return None
+    try:
+        tx_id = int(parts[1])
+    except ValueError:
+        print("Transaction id must be an integer.")
+        return None
+    if tx_id not in tx_ids:
+        print(f"Transaction id {tx_id} not found.")
+        return None
+
+    tx_by_id = {t.id: t for t in txs}
+    tx = tx_by_id[tx_id]
+
+    if tx.tx_type in _OUTGOING:
+        action = "external-out"
+        direction_msg = "sent to"
+    elif tx.tx_type in _INCOMING:
+        action = "external-in"
+        direction_msg = "received from"
+    else:
+        print(
+            f"  Transaction {tx_id} is type '{tx.tx_type.value}' — "
+            "only withdrawals and deposits can be marked as external transfers."
+        )
+        return None
+
+    # Wallet name: from command args or prompt.
+    if len(parts) >= _TWO_ARG_PARTS:
+        ext_wallet = " ".join(parts[2:])
+    else:
+        ext_wallet = input(f"  Wallet name ({direction_msg} which external wallet)? ").strip()
+
+    # Clear any conflicting override for this tx.
+    repo.clear_transfer_overrides_for_tx(conn, tx_id)
+    repo.write_transfer_override(conn, tx_id, None, action, external_wallet=ext_wallet)
+    verb = "out to" if action == "external-out" else "in from"
+    wallet_label = f" '{ext_wallet}'" if ext_wallet else ""
+    print(f"  Marked id:{tx_id} as external transfer {verb}{wallet_label}.")
+    print("  Run 'boil --from transfer_match' to apply.")
+    overrides = repo.read_transfer_overrides(conn)
+    state = _build_state(txs, overrides)
+    _print_state(batch_name, txs, state, overrides, wallets)
+    return overrides, state
+
+
+def _cmd_transfer(  # noqa: PLR0911 PLR0912 PLR0915 PLR0913
+    conn: sqlite3.Connection,
+    parts: list[str],
+    tx_ids: set[int],
+    batch_name: str,
+    txs: list[Transaction],
+    wallets: list[Wallet],
+) -> tuple[list[TransferOverride], _MatchState] | None:
+    """Guided transfer wizard.
+
+    Walks the user through pairing a withdrawal or deposit with its counterpart,
+    validating that no asset units are created from nothing, and recording the
+    exact implied fee when sent > received.
+    """
+    if len(parts) != _ONE_ARG_PARTS:
+        print("Usage: transfer <id>")
+        return None
+    try:
+        tx_id = int(parts[1])
+    except ValueError:
+        print("Transaction id must be an integer.")
+        return None
+    if tx_id not in tx_ids:
+        print(f"Transaction id {tx_id} not found.")
+        return None
+
+    tx_by_id = {t.id: t for t in txs}
+    tx = tx_by_id[tx_id]
+
+    if tx.tx_type not in _OUTGOING and tx.tx_type not in _INCOMING:
+        print(
+            f"  Transaction {tx_id} is type '{tx.tx_type.value}' — "
+            "only withdrawals and deposits can be classified as transfers."
+        )
+        return None
+
+    is_out = tx.tx_type in _OUTGOING
+    arrow = "sent to" if is_out else "received from"
+
+    print()
+    print(f"  Transfer wizard — transaction {tx_id}:")
+    print(f"  {_fmt_tx(tx, wallets)}")
+    print()
+
+    # Step 1: pick a wallet.
+    print(f"  Where was this {tx.asset} {arrow}?")
+    print()
+    options: list[tuple[str, str]] = []  # (label, wallet_name_or_special)
+    for w in wallets:
+        tag = "" if w.auto_created else "*"
+        options.append((f"{w.name}{tag}", w.name))
+    options.append(("[enter a different wallet name]", "__new__"))
+    options.append(("[external / untracked wallet]", "__external__"))
+
+    for i, (label, _) in enumerate(options, 1):
+        print(f"    [{i}] {label}")
+    print()
+
+    choice_raw = input("  Choice (number or wallet name): ").strip()
+    wallet_name: str | None = None
+    is_external = False
+
+    try:
+        choice_idx = int(choice_raw) - 1
+        if 0 <= choice_idx < len(options):
+            _, special = options[choice_idx]
+            if special == "__external__":
+                is_external = True
+            elif special == "__new__":
+                wallet_name = input("  Wallet name: ").strip() or None
+            else:
+                wallet_name = special
+    except ValueError:
+        # User typed a wallet name directly.
+        wallet_name = choice_raw if choice_raw else None
+
+    # Step 2: external path.
+    if is_external:
+        ext_label = input("  Label for this external wallet (optional): ").strip()
+        action = "external-out" if is_out else "external-in"
+        repo.clear_transfer_overrides_for_tx(conn, tx_id)
+        repo.write_transfer_override(conn, tx_id, None, action, external_wallet=ext_label)
+        verb = "out to" if action == "external-out" else "in from"
+        ext_display = f" '{ext_label}'" if ext_label else ""
+        print(f"  Marked id:{tx_id} as external transfer {verb}{ext_display}.")
+        print("  Run 'boil --from transfer_match' to apply.")
+        overrides = repo.read_transfer_overrides(conn)
+        state = _build_state(txs, overrides)
+        _print_state(batch_name, txs, state, overrides, wallets)
+        return overrides, state
+
+    if not wallet_name:
+        print("  No wallet selected — cancelled.")
+        return None
+
+    # Step 3: find candidate transactions from the chosen wallet.
+    # Group by wallet name (matching on wallet.name or tx.source as fallback).
+    wallet_obj = next((w for w in wallets if w.name == wallet_name), None)
+    candidates: list[Transaction] = []
+    for t in txs:
+        if t.id == tx_id:
+            continue
+        # Match by wallet_id if available, otherwise by source == wallet_name.
+        by_id = wallet_obj is not None and t.wallet_id == wallet_obj.id
+        by_source = wallet_obj is None and t.source == wallet_name
+        if by_id or by_source:
+            candidates.append(t)
+
+    # Filter to opposite direction and same asset.
+    expected_direction = _INCOMING if is_out else _OUTGOING
+    candidates = [c for c in candidates if c.tx_type in expected_direction and c.asset == tx.asset]
+
+    if not candidates:
+        noun = "deposits" if is_out else "withdrawals"
+        print(f"  No {tx.asset} {noun} found in '{wallet_name}'.")
+        print(f"  If the wallet isn't tapped yet, run 'sirop tap <file> --wallet {wallet_name}'.")
+        return None
+
+    print()
+    print(f"  {tx.asset} {'deposits' if is_out else 'withdrawals'} from '{wallet_name}':")
+    for i, c in enumerate(candidates, 1):
+        print(f"    [{i}] {_fmt_tx(c, wallets)}")
+    print()
+
+    sel_raw = input("  Select the counterpart transaction (number or 'none'): ").strip().lower()
+    if sel_raw in ("none", "n", ""):
+        print("  Cancelled.")
+        return None
+
+    try:
+        sel_idx = int(sel_raw) - 1
+        if not (0 <= sel_idx < len(candidates)):
+            print("  Invalid selection.")
+            return None
+        counterpart = candidates[sel_idx]
+    except ValueError:
+        print("  Invalid selection.")
+        return None
+
+    # Step 4: validate amounts.
+    implied_fee, err = _compute_implied_fee(tx, counterpart)
+    if err:
+        print()
+        print(f"  Cannot link: {err}")
+        return None
+
+    # Step 5: confirm and handle fee difference.
+    print()
+    sent_tx = tx if is_out else counterpart
+    recv_tx = counterpart if is_out else tx
+    print(f"  Sent:     {sent_tx.amount:.8f} {tx.asset}  (id:{sent_tx.id})")
+    print(f"  Received: {recv_tx.amount:.8f} {tx.asset}  (id:{recv_tx.id})")
+
+    if implied_fee > Decimal("0"):
+        print(f"  Difference: {implied_fee:.8f} {tx.asset}")
+        print()
+        print("  How should this difference be classified?")
+        print("    [F] Network fee   (fee micro-disposal at boil time — most common)")
+        print("    [C] Cancel        (go back, do not save)")
+        print()
+        fee_choice = input("  Choice [F/C]: ").strip().upper()
+        if fee_choice != "F":
+            print("  Cancelled.")
+            return None
+    else:
+        confirm = (
+            input("  Clean transfer — no fee difference. Confirm link? [y/N] ").strip().lower()
+        )
+        if confirm not in ("y", "yes"):
+            print("  Cancelled.")
+            return None
+
+    # Write the override.
+    _remove_conflicting_override(conn, tx.id, counterpart.id, "unlink")
+    ov = repo.write_transfer_override(
+        conn,
+        tx.id,
+        counterpart.id,
+        "link",
+        implied_fee_crypto=implied_fee,
+    )
+    if implied_fee > Decimal("0"):
+        print(
+            f"  Linked id:{tx.id} ↔ id:{counterpart.id}  "
+            f"(implied fee: {implied_fee:.8f} {tx.asset})"
+        )
+    else:
+        print(f"  Linked id:{tx.id} ↔ id:{counterpart.id}  (clean transfer, no fee)")
+    print("  Run 'boil --from transfer_match' to apply.")
+    emit(MessageCode.STIR_LINK_APPLIED, id_a=tx.id, id_b=counterpart.id, ov_id=ov.id)
+    overrides = repo.read_transfer_overrides(conn)
+    state = _build_state(txs, overrides)
+    _print_state(batch_name, txs, state, overrides, wallets)
+    return overrides, state
+
+
+def _interactive_loop(  # noqa: PLR0912 PLR0913
     conn: sqlite3.Connection,
     txs: list[Transaction],
+    wallets: list[Wallet],
     overrides: list[TransferOverride],
     state: _MatchState,
     batch_name: str,
@@ -613,25 +1048,38 @@ def _interactive_loop(
             continue
 
         if cmd in {"list", "l", "ls"}:
+            wallets = repo.read_wallets(conn)
             overrides = repo.read_transfer_overrides(conn)
             state = _build_state(txs, overrides)
-            _print_state(batch_name, txs, state, overrides)
+            _print_state(batch_name, txs, state, overrides, wallets)
+            continue
+
+        if cmd == "transfer":
+            result = _cmd_transfer(conn, parts, tx_ids, batch_name, txs, wallets)
+            if result is not None:
+                overrides, state = result
+            continue
+
+        if cmd == "external":
+            result = _cmd_external(conn, parts, tx_ids, batch_name, txs, wallets)
+            if result is not None:
+                overrides, state = result
             continue
 
         if cmd == "link":
-            result = _cmd_link(conn, parts, tx_ids, batch_name, txs)
+            result = _cmd_link(conn, parts, tx_ids, batch_name, txs, wallets)
             if result is not None:
                 overrides, state = result
             continue
 
         if cmd == "unlink":
-            result = _cmd_unlink(conn, parts, tx_ids, batch_name, txs)
+            result = _cmd_unlink(conn, parts, tx_ids, batch_name, txs, wallets)
             if result is not None:
                 overrides, state = result
             continue
 
         if cmd == "clear":
-            result = _cmd_clear(conn, parts, tx_ids, batch_name, txs)
+            result = _cmd_clear(conn, parts, tx_ids, batch_name, txs, wallets)
             if result is not None:
                 overrides, state = result
             continue
