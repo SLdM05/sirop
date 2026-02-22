@@ -1,3 +1,4 @@
 Transaction Type,Date,Amount Debited,Debit Currency,Amount Credited,Credit Currency,Buy / Sell Rate,Direction,Spot Rate,Source / Destination,Blockchain Transaction ID
 crypto purchase,2024-04-15T12:00:00+00,,,0.10000000,BTC,,credit,,,2222222222222222222222222222222222222222222222222222222222222222
 purchase/sale,2024-04-16T14:00:00+00,0.10000000,BTC,7500.00,CAD,75000.00,debit,75000.00,,
+purchase/sale,2024-04-18T10:00:00+00,5250.00,CAD,0.10000000,BTC,52500.00,purchase,52500.00,,
