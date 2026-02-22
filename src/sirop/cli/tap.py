@@ -99,6 +99,8 @@ def handle_tap(
     """
     if settings is None:
         settings = get_settings()
+    if file_path.is_dir():
+        return _handle_tap_folder(file_path, source, wallet, settings)
     try:
         return _run_tap(file_path, source, wallet, settings)
     except _TapError as exc:
@@ -109,6 +111,82 @@ def handle_tap(
 # ---------------------------------------------------------------------------
 # Internal implementation
 # ---------------------------------------------------------------------------
+
+
+def _detect_csv_format(
+    csv_path: Path, source: str | None, detector: FormatDetector
+) -> tuple[str | None, str | None]:
+    """Return ``(source_name, display_name)`` for *csv_path*, or ``(None, None)``."""
+    headers = _read_headers(csv_path)
+    if not headers:
+        return None, None
+    if source is not None:
+        result = detector.validate(headers, source)
+        if result.ok:
+            return source, detector.display_name(source)
+        return None, None
+    result_d = detector.detect(headers)
+    if len(result_d.matched) == 1:
+        detected = result_d.matched[0]
+        return detected, detector.display_name(detected)
+    return None, None
+
+
+def _handle_tap_folder(
+    folder_path: Path,
+    source: str | None,
+    wallet: str | None,
+    settings: Settings,
+) -> int:
+    """Discover CSVs in *folder_path*, show detected formats, confirm, then tap each.
+
+    Skips any CSV whose format cannot be identified (or whose headers do not
+    satisfy the user-declared ``--source`` fingerprint).  Files that are
+    tappable are shown in the listing and tapped after the user confirms.
+    """
+    config_dirs = [_BUILTIN_CONFIG_DIR, settings.data_dir / "importers"]
+    detector = FormatDetector(config_dirs)
+
+    csv_files = sorted(folder_path.glob("*.csv"))
+    if not csv_files:
+        emit(MessageCode.TAP_FOLDER_NO_FILES, path=folder_path)
+        return 0
+
+    # ── Detect (or validate) format for each CSV ─────────────────────────────
+    detections = [(p, *_detect_csv_format(p, source, detector)) for p in csv_files]
+
+    # ── Listing ───────────────────────────────────────────────────────────────
+    emit(MessageCode.TAP_FOLDER_HEADER, count=len(csv_files), path=folder_path)
+    for csv_path, detected, disp in detections:
+        if detected is not None and disp is not None:
+            emit(MessageCode.TAP_FOLDER_FILE_DETECTED, filename=csv_path.name, fmt=disp)
+        else:
+            emit(MessageCode.TAP_FOLDER_FILE_UNKNOWN, filename=csv_path.name)
+
+    tappable = [(p, s) for p, s, _ in detections if s is not None]
+    if not tappable:
+        emit(MessageCode.TAP_FOLDER_ALL_UNKNOWN)
+        return 1
+
+    # ── Confirmation ──────────────────────────────────────────────────────────
+    try:
+        answer = input(f"\nTap {len(tappable)} file(s)? [y/N] ").strip().lower()
+    except EOFError:
+        answer = ""
+
+    if answer not in {"y", "yes"}:
+        emit(MessageCode.TAP_FOLDER_ABORTED)
+        return 0
+
+    # ── Tap each tappable file ────────────────────────────────────────────────
+    # Pass the already-resolved source so _run_tap goes through _validate_source
+    # (silent path) rather than re-emitting TAP_FORMAT_DETECTED for each file.
+    overall_rc = 0
+    for csv_path, resolved_source in tappable:
+        rc = handle_tap(csv_path, resolved_source, wallet, settings)
+        if rc != 0:
+            overall_rc = rc
+    return overall_rc
 
 
 def _run_tap(file_path: Path, source: str | None, wallet: str | None, settings: Settings) -> int:
