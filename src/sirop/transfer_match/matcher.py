@@ -14,12 +14,28 @@ Design notes
 ------------
 - **txid matching** is the primary matching signal — if both legs (withdrawal
   and deposit) carry the same on-chain txid, they are definitively paired.
-- **Amount proximity** is the secondary signal: the deposit amount must be
-  within ``FEE_TOLERANCE_RELATIVE`` of the withdrawal amount (accounting for
-  the network fee deducted from the transferred amount).
-- The search window is ``MATCH_WINDOW_HOURS`` hours around the withdrawal
-  timestamp.  Cross-blockchain transfers that settle slowly are handled by the
-  wider default window.
+  Applies to: Shakepay ``crypto cashout`` / ``crypto purchase`` ↔ Sparrow.
+  Both Shakepay row types carry a real ``Blockchain Transaction ID``.
+
+- **Amount + timestamp proximity** is the secondary (and only available)
+  signal for sources that do not export the blockchain txid.  NDAX is the
+  primary example: its ``TX_ID`` column contains an internal order identifier
+  (a short integer such as ``10008``), NOT an on-chain txid.  The NDAX
+  importer therefore always sets ``txid = None``; NDAX withdrawals are matched
+  solely by amount proximity within ``MATCH_WINDOW_HOURS``.
+
+- **Amount+timestamp matches are probabilistic**, not cryptographically
+  verified.  Two independent transfers of the same amount on the same day
+  would be incorrectly merged into a single transfer pair.
+  TODO: surface amount+timestamp-matched pairs to the user for confirmation
+  before they are treated as definitive self-transfers.  The confirmation flag
+  should be stored in the ``classified_events`` table (e.g. a
+  ``match_confidence`` column: ``"txid"`` | ``"amount_time"`` | ``"manual"``).
+  TODO: the Bitcoin node integration module (see docs/ref/bitcoin-node-
+  validation-module.md) will be able to verify self-transfers independently
+  by confirming that the deposit address belongs to the user's own xpub — use
+  that as the definitive confirmation path for amount+timestamp matches.
+
 - A withdrawal that is not matched becomes a regular sell event (a disposition
   of crypto at the withdrawal CAD value).  This is the conservative choice —
   the user or a future node-verification stage can correct it.
@@ -364,7 +380,10 @@ def _find_match(
             )
             return candidate
 
-        # Amount + timestamp proximity match.
+        # Amount + timestamp proximity match — probabilistic.
+        # Used for sources with no blockchain txid (e.g. NDAX withdrawals).
+        # TODO: tag these matches with match_confidence="amount_time" and
+        # surface them to the user for confirmation (see module docstring).
         if not (window_start <= candidate.timestamp <= window_end):
             continue
 
@@ -376,9 +395,12 @@ def _find_match(
         )
         if abs(candidate.amount - expected_deposit) <= tolerance:
             logger.debug(
-                "transfer_match: amount+time match for %s on %s",
+                "transfer_match: amount+time match for %s on %s from %s"
+                " (probabilistic — no txid available from %s)",
                 outgoing.asset,
                 outgoing.timestamp.date(),
+                outgoing.source,
+                outgoing.source,
             )
             return candidate
 

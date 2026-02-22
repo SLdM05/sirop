@@ -1,0 +1,5 @@
+Date (UTC),Label,Value,Balance,Fee,Value (CAD),Txid
+2024-01-10 09:00:00,savings deposit,0.00150000,0.00150000,,8250.00,bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+2024-02-14 15:30:00,,-0.00050000,0.00100000,0.00001000,-2750.00,cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+
+# Historical CAD values are taken from daily rates and should only be considered as approximate.

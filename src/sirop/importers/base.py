@@ -113,8 +113,10 @@ def load_importer_config(yaml_path: Path, source_name: str | None = None) -> Imp
         date_column=str(raw["date_column"]),
         date_format=date_format,
         columns={str(k): str(v) for k, v in raw["columns"].items()},
-        transaction_type_map={str(k): str(v) for k, v in raw["transaction_type_map"].items()},
-        fee_model=str(raw["fee_model"]),
+        transaction_type_map={
+            str(k): str(v) for k, v in raw.get("transaction_type_map", {}).items()
+        },
+        fee_model=str(raw.get("fee_model", "explicit")),
         group_by_column=str(raw["group_by_column"]) if raw.get("group_by_column") else None,
         fiat_currencies=fiat_currencies,
     )
