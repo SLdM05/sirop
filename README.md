@@ -72,11 +72,14 @@ sirop tap ~/Downloads/ndax_2025_ledger.csv
 sirop tap ~/Downloads/shakepay_2025_btc.csv
 sirop tap ~/Downloads/sparrow_2025.csv
 
-# 3. Review transfer pairs (wallet-to-wallet moves)
+# 3. Run the tax calculation pipeline
+sirop boil
+
+# 4. Sometimes you will need to adjust your transfer pairs (wallet-to-wallet moves)
 sirop stir
 
-# 4. Run the tax calculation pipeline
-sirop boil
+# 5. Output your tax forms (PLANNED)
+sirop pour
 ```
 
 After `boil`, the `.sirop` batch file contains fully computed dispositions and

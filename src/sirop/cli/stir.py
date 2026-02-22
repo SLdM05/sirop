@@ -78,8 +78,8 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# Width of the separator line.
-_COL_WIDTH = 76
+# Width of the separator line — matches _fmt_tx() output width.
+_COL_WIDTH = 97
 # Expected part count for two-argument commands (cmd + id1 + id2).
 _TWO_ARG_PARTS = 3
 # Expected part count for one-argument commands (cmd + id).
@@ -501,7 +501,7 @@ def _wallet_label(tx: Transaction, wallets: list[Wallet]) -> str:
 
 def _fmt_tx(tx: Transaction, wallets: list[Wallet] | None = None) -> str:
     """One-line summary of a transaction."""
-    date_str = tx.timestamp.strftime("%Y-%m-%d")
+    date_str = tx.timestamp.strftime("%Y-%m-%d %H:%M:%S")
     amount_str = f"{tx.amount:>14.8f} {tx.asset}"
     cad_str = f"CAD {tx.cad_value:>10,.2f}"
     wallet_str = _wallet_label(tx, wallets or [])
@@ -610,7 +610,7 @@ def _print_state(  # noqa: PLR0912 PLR0915
         print(f"Active overrides ({len(overrides)} total):")
         print(_HR)
         for ov in overrides:
-            ts = ov.created_at.strftime("%Y-%m-%d %H:%M")
+            ts = ov.created_at.strftime("%Y-%m-%d %H:%M:%S")
             note_part = f"  note: {ov.note}" if ov.note else ""
             b_part = f" ↔ {ov.tx_id_b}" if ov.tx_id_b is not None else ""
             fee_part = (
