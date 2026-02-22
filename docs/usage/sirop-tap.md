@@ -93,8 +93,11 @@ WARNING  CSV has 2 column(s) not seen in any known NDAX format: ['Notes', 'Refer
 | `--source` name | Exchange / Wallet | Export type | Fee model |
 |-----------------|-------------------|-------------|-----------|
 | `ndax` | NDAX (AlphaPoint APEX) | Reports → CSV → Ledgers | Explicit `TRADE/FEE` rows |
+| `shakepay` | Shakepay | Account → Export Transactions | Embedded in spread (no explicit fee column) |
+| `sparrow` | Sparrow Wallet | File → Export Transactions | Explicit fee column (sends only; NULL on receives) |
 
-Further importers (Shakepay, Sparrow, Koinly) are planned.
+Full column specs, unit-detection rules (BTC vs satoshis for Sparrow), and
+cross-source transfer matching logic: `docs/ref/transaction-import-formats.md`.
 
 ---
 
@@ -184,7 +187,12 @@ Detected format: NDAX
 Tapped 47 transaction(s) from ndax_2025_ledger.csv [NDAX] into 'my2025tax'.
 
 $ sirop tap ~/Downloads/shakepay_2025.csv
-error: format detected as 'Shakepay' but no importer is implemented for 'shakepay' yet.
+Detected format: Shakepay
+Tapped 23 transaction(s) from shakepay_2025.csv [Shakepay] into 'my2025tax'.
+
+$ sirop tap ~/Downloads/sparrow_wallet.csv
+Detected format: Sparrow Wallet
+Tapped 8 transaction(s) from sparrow_wallet.csv [Sparrow Wallet] into 'my2025tax'.
 ```
 
 ---

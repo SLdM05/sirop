@@ -64,19 +64,39 @@ timestamps, amounts, and fees, writing any overrides to `audit_log`.
 
 ### transfer_match
 
-Identifies wallet-to-wallet transfers so they are not treated as dispositions:
+Identifies wallet-to-wallet transfers so they are not treated as dispositions.
+Overrides written by `sirop stir` are applied first; auto-matching runs after.
 
-- Matches withdrawals to deposits of the same asset by shared `txid` (primary signal)
-  or by amount proximity (±1%) + timestamp proximity (±4 hours).
-- Matched transfer legs are written to `classified_events` with `is_taxable=0` — they
-  reach the database for auditability but never enter the ACB engine.
-- On-chain network fees on matched transfers are emitted as **fee micro-dispositions**
-  (`event_type = fee_disposal`) — small taxable disposals of BTC/ETH at the prevailing
-  rate.
-- Income events (staking rewards, airdrops) are recorded in both `classified_events`
-  and `income_events`. The income establishes ACB at fair market value.
-- Unmatched withdrawals are treated conservatively as sells. A warning is emitted so
-  you can decide whether to tap the receiving wallet.
+**Pass 0 — apply stir overrides:**
+
+- `link` overrides: force two transactions into a transfer pair. If the sent
+  amount exceeds the received amount, the difference is emitted as a
+  `fee_disposal` event using `implied_fee_crypto`.
+- `external-out` / `external-in` overrides: mark a withdrawal or deposit as
+  going to / coming from an untracked external wallet. Excluded from taxable
+  events.
+- `unlink` overrides: prevent the auto-matcher from pairing those two
+  transactions.
+
+**Pass 1 — auto-matching (respects unlinks):**
+
+- Matches withdrawals to deposits of the same asset by shared `txid` (primary
+  signal) or by amount proximity (±1%) + timestamp proximity (±4 hours).
+
+**Classification:**
+
+- Matched transfer legs → `classified_events` with `is_taxable=0` — stored for
+  auditability but never enter the ACB engine.
+- On-chain network fees on matched transfers → **fee micro-dispositions**
+  (`event_type = fee_disposal`) — small taxable disposals at the prevailing rate.
+- Income events (staking rewards, airdrops) → both `classified_events` and
+  `income_events`. The income establishes ACB at fair market value.
+- Unmatched withdrawals → treated conservatively as sells. A warning is emitted
+  so you can decide whether to `stir link` or tap the receiving wallet.
+
+> **Tip:** Run `sirop stir` between `tap` and `boil` to review auto-detected
+> pairs, fix mismatches, and mark external transfers before tax calculations run.
+> Overrides survive `sirop boil --from transfer_match` so you only set them once.
 
 ### boil (ACB engine)
 
@@ -187,6 +207,18 @@ Created batch: my2025tax (2025) → data/my2025tax.sirop
 $ sirop tap ~/Downloads/ndax_2025_ledger.csv
 Detected format: NDAX
 Tapped 47 transaction(s) from ndax_2025_ledger.csv [NDAX] into 'my2025tax'.
+
+$ sirop tap ~/Downloads/shakepay_2025.csv
+Detected format: Shakepay
+Tapped 23 transaction(s) from shakepay_2025.csv [Shakepay] into 'my2025tax'.
+
+$ sirop tap ~/Downloads/sparrow_wallet.csv
+Detected format: Sparrow Wallet
+Tapped 8 transaction(s) from sparrow_wallet.csv [Sparrow Wallet] into 'my2025tax'.
+
+# Optional: review and fix transfer pairs before calculating
+$ sirop stir --list
+# (inspect auto-detected pairs, link/unlink as needed)
 
 $ sirop boil
  normalize    Checking sap levels...
