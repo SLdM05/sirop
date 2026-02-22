@@ -189,26 +189,155 @@ Date (UTC),Label,Value,Balance,Fee,Txid
 
 ## 3. Cross-Source Transfer Matching
 
-A `crypto cashout` from Shakepay that moves BTC to a Sparrow wallet is a **self-transfer** — not a disposition. The importer pipeline must detect these and tag them appropriately so they are excluded from ACB calculations.
+A withdrawal from Shakepay or NDAX that moves BTC to a Sparrow wallet is a
+**self-transfer** — not a disposition. The transfer_match stage detects these
+and marks both legs non-taxable so they are excluded from ACB calculations.
 
-**Matching logic:**
+### Matching strategies
 
-1. For each Shakepay `crypto cashout` row with a non-empty `Blockchain Transaction ID`:
-   - Look for a Sparrow row with the same `Txid`
-   - If found: tag both records as `transfer_pair` with a shared transfer ID
-   - If not found: flag as `unmatched_withdrawal` for manual review
+Two strategies are used, depending on whether a blockchain txid is available.
 
-2. For each Sparrow received transaction (positive `Value`):
-   - If not matched to a Shakepay cashout: tag as `external_receive`
-   - External receives require the user to provide ACB (e.g. from another exchange)
+#### Strategy A — txid match (definitive) — Shakepay ↔ Sparrow
 
-3. The calculation engine must never compute a capital gain/loss on a `transfer_pair` transaction.
+Shakepay exports the blockchain transaction ID for **both** incoming and
+outgoing on-chain transfers:
 
-**Implementation note:** Store the transfer matching result in the database, not as a derived calculation. This allows the user to override a match manually via the TUI.
+| Row type | Column with txid |
+|---|---|
+| `crypto cashout` (outgoing) | `Blockchain Transaction ID` |
+| `crypto purchase` (incoming) | `Blockchain Transaction ID` |
+
+These are real 64-character hex on-chain txids. The Sparrow `Txid` column
+contains the same value for the matching row on the other side of the transfer.
+
+**Rule:** if a Shakepay withdrawal and a Sparrow deposit share the same
+non-null txid, they are paired as a definitive self-transfer.
+
+#### Strategy B — amount + timestamp proximity (probabilistic) — NDAX ↔ Sparrow
+
+> **NDAX TX_ID is an internal order identifier, not a blockchain txid.**
+
+NDAX's `TX_ID` column contains a short integer (e.g. `10008`) that identifies
+the order in NDAX's internal system. It bears no relation to the on-chain
+transaction ID. **NDAX does not export the blockchain txid for withdrawals.**
+
+The NDAX importer therefore always sets `txid = None` on all records.
+Transfer matching for NDAX withdrawals falls back to:
+
+1. Same asset (e.g. BTC)
+2. Deposit amount ≈ withdrawal amount (within 1% or 0.00001 BTC absolute
+   floor, to account for miner fees deducted from the transferred amount)
+3. Deposit timestamp within ±4 hours of the withdrawal timestamp
+
+**This match is probabilistic.** Two independent transfers of the same amount
+on the same day would be incorrectly merged into a single self-transfer pair.
+The pipeline currently treats every amount+timestamp match as a self-transfer.
+
+> **TODO (user confirmation):** Amount+timestamp matched transfers must
+> eventually be surfaced to the user for explicit confirmation. A
+> `match_confidence` field (`"txid"` | `"amount_time"` | `"manual"`) should
+> be added to `classified_events` so the TUI can flag probabilistic pairs and
+> require a user acknowledgement before they are finalised.
+
+> **TODO (node integration):** Once the Bitcoin node module is integrated
+> (see `docs/ref/bitcoin-node-validation-module.md`), it will be able to
+> verify self-transfers by checking whether the deposit address derives from
+> the user's own xpub. This provides cryptographic confirmation for
+> amount+timestamp matches and eliminates the ambiguity.
+
+### Fallback behaviour
+
+A withdrawal with no matching deposit is treated as an **unmatched withdrawal**
+— a taxable sell event — and a warning is logged. This is the conservative
+choice: over-reporting a gain is less harmful than silently dropping a taxable
+event. The user can correct it by tapping the receiving wallet.
+
+### Implementation note
+
+Store transfer matching results in the database (`classified_events.is_taxable`
+and a future `match_confidence` column), not as derived calculations. This
+allows the user to override a match via the TUI without re-running the pipeline.
 
 ---
 
-## 4. YAML Configuration Reference
+## 4. NDAX (AlphaPoint Ledgers format)
+
+> **Status:** Implemented (`NDAXImporter`, `config/importers/ndax.yaml`).
+
+### Export Mechanics
+
+Export via NDAX web → **Reports → Create Report → CSV → Ledgers** report type.
+NDAX produces a single flat file containing one ledger row per asset movement.
+A single economic event (e.g. buying BTC with CAD) produces **multiple rows**
+sharing the same `TX_ID` and `DATE` (to-the-second precision). The importer
+groups rows by truncated timestamp and collapses each group into one record.
+
+### Header Row
+
+```
+ASSET,ASSET_CLASS,AMOUNT,BALANCE,TYPE,TX_ID,DATE
+```
+
+### Field Definitions
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `ASSET` | string | Asset ticker: `BTC`, `ETH`, `CAD`, etc. |
+| `ASSET_CLASS` | string | `FIAT` or `CRYPTO`. Used to distinguish fiat legs from crypto legs in a trade group. |
+| `AMOUNT` | decimal | **Signed.** Positive = credit (received). Negative = debit (sent). Parse as `Decimal`. |
+| `BALANCE` | decimal | Running balance of this asset after this row. Informational — not used for calculations. |
+| `TYPE` | string | Primary type, optionally followed by ` / SECONDARY` (e.g. `TRADE / FEE`). See type taxonomy below. |
+| `TX_ID` | integer string | **NDAX internal order identifier only.** Not a blockchain txid. Never store as txid. See critical note below. |
+| `DATE` | ISO 8601 datetime | Format: `2024-01-15T14:00:00.000Z`. Parse with `datetime.fromisoformat()` (handles trailing Z and fractional seconds). All timestamps are UTC. |
+
+### CRITICAL: TX_ID Is Not a Blockchain Txid
+
+`TX_ID` is a short integer that uniquely identifies an order within NDAX's
+internal ledger system (e.g. `10008`, `90002`). It is **not** an on-chain
+Bitcoin transaction ID and **must never be stored as `txid`** on the resulting
+`RawTransaction`.
+
+Consequences:
+- NDAX withdrawals have `txid = None` in the pipeline.
+- Transfer matching for NDAX → Sparrow uses **amount + timestamp proximity
+  only** (Strategy B in §3 above).
+- Do not attempt to validate or use TX_ID for cross-source matching.
+
+### TYPE Taxonomy
+
+`TYPE` uses a `PRIMARY / SECONDARY` format. Rows where the secondary part is
+`FEE` are extracted as the fee for the group before type routing.
+
+| TYPE (primary) | Meaning | Maps to |
+|---|---|---|
+| `TRADE` | Trade leg (BTC or CAD side of a buy/sell) | `"buy"` or `"sell"` (resolved from signed AMOUNT) |
+| `TRADE / FEE` | Trading fee for the same TX_ID group | `fee_amount` / `fee_currency` on the trade record |
+| `DEPOSIT` | Fiat or crypto deposit | `"fiat_deposit"` (fiat) or `"deposit"` (crypto) |
+| `WITHDRAW` | Fiat or crypto withdrawal | `"fiat_withdrawal"` (fiat) or `"withdrawal"` (crypto) |
+| `WITHDRAW / FEE` | On-chain fee for the same TX_ID group | `fee_amount` / `fee_currency` on the withdrawal record |
+| `STAKING / REWARD` | Staking income | `"income"` |
+| `STAKING / DEPOSIT` | Crypto locked for staking | `"transfer_out"` |
+| `STAKING / REFUND` | Crypto returned from staking | `"transfer_in"` |
+| `DUST / IN`, `DUST / OUT` | Dust conversion legs | `"other"` |
+
+### Sample Records
+
+```csv
+ASSET,ASSET_CLASS,AMOUNT,BALANCE,TYPE,TX_ID,DATE
+CAD,FIAT,5005.00,5005.00,DEPOSIT,90001,2024-01-14T10:00:00.000Z
+BTC,CRYPTO,0.10000000,0.10000000,TRADE,90002,2024-01-15T14:00:00.000Z
+CAD,FIAT,-5000.00,5.00,TRADE,90002,2024-01-15T14:00:00.000Z
+CAD,FIAT,-5.00,0.00,TRADE / FEE,90002,2024-01-15T14:00:00.000Z
+BTC,CRYPTO,-0.10000000,0.00000000,WITHDRAW,90003,2024-01-16T10:00:00.000Z
+```
+
+Note that TX_ID `90003` on the WITHDRAW row is an internal NDAX order number.
+The corresponding Sparrow deposit will carry the actual on-chain txid — these
+two records are linked only by amount + timestamp in the transfer_match stage.
+
+---
+
+## 5. YAML Configuration Reference
 
 The exchange format configurations live in `config/exchanges/`. Each file defines how to parse a specific source. Below is the expected structure for the two sources covered here.
 
@@ -276,7 +405,7 @@ fee_nullable: true         # Empty fee field = None, not zero
 
 ---
 
-## 5. Parser Implementation Requirements
+## 6. Parser Implementation Requirements
 
 The following requirements apply to all importers regardless of source.
 

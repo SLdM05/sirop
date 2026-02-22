@@ -352,9 +352,12 @@ class NDAXImporter(BaseImporter):
             tx_type = self._config.transaction_type_map.get(raw_type_full) or self._lookup_type(
                 primary
             )
-            # TX_ID may be an on-chain txid for non-fiat withdrawals; leave it
-            # as-is and let the normalizer validate it.
-            txid_value = row[cols["tx_id"]].strip() or None
+            # TX_ID is NDAX's internal order identifier (a short integer such as
+            # "10008"), NOT a blockchain transaction ID.  It cannot be used to
+            # match this withdrawal against a Sparrow or Shakepay deposit.
+            # The transfer_match stage will pair NDAX withdrawals by
+            # amount + timestamp proximity instead.
+            txid_value: str | None = None
             return RawTransaction(
                 source=self._config.source_name,
                 timestamp=timestamp,
