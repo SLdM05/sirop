@@ -116,6 +116,7 @@ def _normalize_one(raw: RawTransaction, conn: sqlite3.Connection) -> Transaction
         is_transfer=False,  # transfer_match stage sets this
         counterpart_id=None,
         notes="",
+        wallet_id=raw.wallet_id,  # propagated from tap time
     )
 
 

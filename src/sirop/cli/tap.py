@@ -34,6 +34,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from sirop.config.settings import Settings, get_settings
+from sirop.db import repositories as repo
 from sirop.db.connection import get_active_batch_name, open_batch
 from sirop.db.schema import PIPELINE_STAGES
 from sirop.importers.base import BaseImporter, ImporterError
@@ -72,6 +73,7 @@ class _TapError(Exception):
 def handle_tap(
     file_path: Path,
     source: str | None,
+    wallet: str | None = None,
     settings: Settings | None = None,
 ) -> int:
     """Parse *file_path* and write raw transactions into the active batch.
@@ -83,6 +85,10 @@ def handle_tap(
     source:
         Importer name (e.g. ``"ndax"``).  When ``None``, auto-detection
         is attempted.
+    wallet:
+        Wallet name to assign to these transactions.  When ``None``, the
+        detected source format name is used (e.g. ``"shakepay"``).
+        User-supplied names set ``auto_created=False`` on the wallet row.
     settings:
         Application settings; resolved from the environment if omitted.
 
@@ -94,7 +100,7 @@ def handle_tap(
     if settings is None:
         settings = get_settings()
     try:
-        return _run_tap(file_path, source, settings)
+        return _run_tap(file_path, source, wallet, settings)
     except _TapError as exc:
         emit(exc.msg_code, **exc.msg_kwargs)
         return 1
@@ -105,7 +111,7 @@ def handle_tap(
 # ---------------------------------------------------------------------------
 
 
-def _run_tap(file_path: Path, source: str | None, settings: Settings) -> int:
+def _run_tap(file_path: Path, source: str | None, wallet: str | None, settings: Settings) -> int:
     """Core tap logic; raises ``_TapError`` on any user-facing error."""
     # ── 1. Active batch ───────────────────────────────────────────────────────
     batch_name = get_active_batch_name(settings)
@@ -153,8 +159,16 @@ def _run_tap(file_path: Path, source: str | None, settings: Settings) -> int:
             detail=exc,
         ) from exc
 
-    # ── 5. Write to DB ────────────────────────────────────────────────────────
-    inserted, skipped = _write_to_batch(batch_name, settings, txs)
+    # ── 5. Resolve wallet (find or create) ────────────────────────────────────
+    # Wallet name: user-supplied (--wallet) or auto-derived from source format.
+    # auto_created=True when no --wallet flag was given.
+    wallet_name = wallet if wallet is not None else detected_source
+    auto_created = wallet is None
+
+    # ── 6. Write to DB ────────────────────────────────────────────────────────
+    inserted, skipped = _write_to_batch(
+        batch_name, settings, txs, wallet_name, auto_created, detected_source
+    )
 
     disp = detector.display_name(detected_source)
     if inserted == 0:
@@ -193,8 +207,13 @@ def _run_tap(file_path: Path, source: str | None, settings: Settings) -> int:
     return 0
 
 
-def _write_to_batch(
-    batch_name: str, settings: Settings, txs: list[RawTransaction]
+def _write_to_batch(  # noqa: PLR0913
+    batch_name: str,
+    settings: Settings,
+    txs: list[RawTransaction],
+    wallet_name: str,
+    auto_created: bool,
+    source: str,
 ) -> tuple[int, int]:
     """Write *txs* to the active batch DB in a single atomic transaction.
 
@@ -222,6 +241,9 @@ def _write_to_batch(
             raise _TapError(MessageCode.TAP_ERROR_STAGE_RUNNING, name=batch_name)
 
         is_append = stage_row and stage_row["status"] == "done"
+
+        # Resolve (find or create) the wallet for this tap.
+        wallet = repo.find_or_create_wallet(conn, wallet_name, source, auto_created)
 
         # Deduplication — single pass, covers two sources of duplicates:
         #
@@ -278,6 +300,7 @@ def _write_to_batch(
                 format(tx.spot_rate, "f") if tx.spot_rate is not None else None,
                 tx.txid,
                 json.dumps(tx.raw_row),
+                wallet.id,
             )
             for tx in txs
         ]
@@ -302,8 +325,8 @@ def _write_to_batch(
                 INSERT INTO raw_transactions
                     (source, raw_timestamp, transaction_type, asset, amount,
                      amount_currency, fee, fee_currency, cad_amount, fiat_currency,
-                     cad_rate, spot_rate, txid, extra_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     cad_rate, spot_rate, txid, extra_json, wallet_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 db_rows,
             )
