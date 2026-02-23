@@ -40,6 +40,12 @@ class MessageCode(StrEnum):
     TAP_EXPECTED_COLUMNS = "tap.expected_columns"
     TAP_NOTHING_NEW = "tap.nothing_new"
     TAP_SUCCESS = "tap.success"
+    TAP_FOLDER_NO_FILES = "tap.folder.no_files"
+    TAP_FOLDER_HEADER = "tap.folder.header"
+    TAP_FOLDER_FILE_DETECTED = "tap.folder.file_detected"
+    TAP_FOLDER_FILE_UNKNOWN = "tap.folder.file_unknown"
+    TAP_FOLDER_ALL_UNKNOWN = "tap.folder.all_unknown"
+    TAP_FOLDER_ABORTED = "tap.folder.aborted"
 
     # ── boil ──────────────────────────────────────────────────────────────────
     BOIL_ERROR_NOT_TAPPED = "boil.error.not_tapped"
@@ -49,6 +55,14 @@ class MessageCode(StrEnum):
     BOIL_ERROR_UNKNOWN_STAGE = "boil.error.unknown_stage"
     BOIL_SUMMARY_COMPLETE = "boil.summary.complete"
     BOIL_SUMMARY_HOLDINGS_HEADER = "boil.summary.holdings_header"
+
+    # ── stir ──────────────────────────────────────────────────────────────────
+    STIR_ERROR_NOT_NORMALIZED = "stir.error.not_normalized"
+    STIR_ERROR_TX_NOT_FOUND = "stir.error.tx_not_found"
+    STIR_LINK_APPLIED = "stir.link_applied"
+    STIR_UNLINK_APPLIED = "stir.unlink_applied"
+    STIR_CLEAR_APPLIED = "stir.clear_applied"
+    STIR_EXIT = "stir.exit"
 
     # ── list ──────────────────────────────────────────────────────────────────
     LIST_NO_BATCHES = "list.no_batches"

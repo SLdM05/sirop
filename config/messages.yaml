@@ -131,6 +131,30 @@ messages:
     category: output
     text: "Tapped {count} transaction(s) from {filename} [{fmt}] into '{batch}'.{skip_note}"
 
+  tap.folder.no_files:
+    category: output
+    text: "No CSV files found in {path}."
+
+  tap.folder.header:
+    category: output
+    text: "Found {count} CSV file(s) in {path}:"
+
+  tap.folder.file_detected:
+    category: output
+    text: "  {filename}  →  {fmt}"
+
+  tap.folder.file_unknown:
+    category: output
+    text: "  {filename}  →  unknown (will be skipped)"
+
+  tap.folder.all_unknown:
+    category: output
+    text: "No files could be identified — nothing to tap."
+
+  tap.folder.aborted:
+    category: output
+    text: "Tap cancelled."
+
   # ── boil ──────────────────────────────────────────────────────────────────
 
   boil.error.not_tapped:
@@ -165,6 +189,34 @@ messages:
   boil.summary.holdings_header:
     category: output
     text: "\n  Year-end holdings (cost basis):"
+
+  # ── stir ──────────────────────────────────────────────────────────────────
+
+  stir.error.not_normalized:
+    category: error
+    code: E020
+    text: "Batch '{name}' has not been normalized yet. Run 'sirop boil' first (or at least up to normalize)."
+
+  stir.error.tx_not_found:
+    category: error
+    code: E021
+    text: "Transaction id {tx_id} not found in the active batch."
+
+  stir.link_applied:
+    category: output
+    text: "Linked tx:{id_a} ↔ tx:{id_b} as a transfer pair (override id:{ov_id}). Run 'sirop boil --from transfer_match' to apply."
+
+  stir.unlink_applied:
+    category: output
+    text: "Unlinked tx:{id_a} ↔ tx:{id_b} — will be treated as separate taxable events (override id:{ov_id}). Run 'sirop boil --from transfer_match' to apply."
+
+  stir.clear_applied:
+    category: output
+    text: "Cleared {count} override(s) for tx:{tx_id}. Run 'sirop boil --from transfer_match' to apply."
+
+  stir.exit:
+    category: output
+    text: "Overrides saved. Run 'sirop boil --from transfer_match' to apply them."
 
   # ── list ──────────────────────────────────────────────────────────────────
 
