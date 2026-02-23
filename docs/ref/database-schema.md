@@ -45,7 +45,7 @@ open and refuses to process a file whose version does not match the current
 `SCHEMA_VERSION` constant in `db/schema.py`. Bump `SCHEMA_VERSION` whenever
 the schema changes.
 
-Current version: **5**
+Current version: **6**
 
 ---
 
@@ -196,6 +196,37 @@ Bank of Canada daily exchange rates. Fetched once per `(date, currency_pair)`
 pair and never re-fetched. The normalizer reads from this cache before
 calling the BoC Valet API, so repeated runs do not make network calls for
 already-seen dates.
+
+### `crypto_prices`
+
+```sql
+crypto_prices (
+    date        TEXT NOT NULL,   -- YYYY-MM-DD
+    asset       TEXT NOT NULL,   -- e.g. "BTC"
+    price_usd   TEXT NOT NULL,   -- Decimal string
+    price_cad   TEXT NOT NULL,   -- Decimal string (price_usd * BoC USDCAD rate)
+    source      TEXT NOT NULL,   -- "mempool" | "coingecko"
+    fetched_at  TEXT NOT NULL,   -- ISO 8601 UTC
+    PRIMARY KEY (date, asset)
+)
+```
+
+Historical cryptocurrency prices in USD and CAD. Fetched once per
+`(date, asset)` pair and never re-fetched. The normalizer calls
+`get_crypto_price_cad()` (in `src/sirop/utils/crypto_prices.py`) as a
+fallback when no exchange-provided fiat value is available — this prevents
+silent zero-CAD ACB entries for Sparrow wallet transactions that carry no
+fiat column.
+
+Fetch strategy:
+
+- **BTC**: Mempool.space historical-price endpoint first; CoinGecko as fallback.
+- **Other assets**: CoinGecko only.
+
+Asset → CoinGecko ID mapping and Mempool support flags are read from
+`config/currencies.yaml`. HTTP 429 responses trigger exponential back-off
+(2 s → 4 s → 8 s). All HTTP uses stdlib `urllib` — no additional
+dependencies.
 
 ---
 
@@ -572,3 +603,4 @@ that need a batch (and weren't given one explicitly) read this file first.
 | 3 | New table: `custom_importers` — stores user-supplied importer YAML configs inside the batch file so a `.sirop` file is self-contained and portable. |
 | 4 | New table: `transfer_overrides` (initial version — `link` and `unlink` actions only, `tx_id_b` NOT NULL). Written by `sirop stir`; consumed by the `transfer_match` stage. |
 | 5 | New table: `wallets`. `wallet_id` FK added to `raw_transactions` and `transactions` — traces each transaction to its originating wallet. `transfer_overrides` recreated with nullable `tx_id_b` (supports external-leg overrides), new columns `implied_fee_crypto` and `external_wallet`, and `external-out` / `external-in` added to `action` CHECK constraint. |
+| 6 | New table: `crypto_prices` — caches historical cryptocurrency prices (USD and CAD) fetched from Mempool.space (BTC) and CoinGecko. Used by the normalizer as a fallback when no exchange-provided fiat value is present. |
