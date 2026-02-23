@@ -17,6 +17,11 @@ columns:
   type: "TYPE"
   tx_id: "TX_ID"
   date: "DATE"
+# CRITICAL: TX_ID is NDAX's internal order identifier (a short integer such as
+# "10008").  It is NOT a blockchain transaction ID and MUST NOT be stored as the
+# txid on the resulting RawTransaction.  The importer always sets txid=None for
+# NDAX records.  Cross-source transfer matching for NDAX withdrawals relies
+# entirely on amount + timestamp proximity (see transfer_match/matcher.py).
 # TYPE field uses "PRIMARY / SECONDARY" notation (e.g. "TRADE / FEE").
 # Keys are the normalized full type string (lowercased).  The importer looks
 # up the full type first, then falls back to the primary part only.

@@ -34,12 +34,14 @@ from collections.abc import Callable
 from pathlib import Path
 
 from sirop.config.settings import Settings, get_settings
+from sirop.db import repositories as repo
 from sirop.db.connection import get_active_batch_name, open_batch
 from sirop.db.schema import PIPELINE_STAGES
 from sirop.importers.base import BaseImporter, ImporterError
 from sirop.importers.detector import FormatDetector
 from sirop.importers.ndax import NDAXImporter
 from sirop.importers.shakepay import ShakepayImporter
+from sirop.importers.sparrow import SparrowImporter
 from sirop.models.messages import MessageCode
 from sirop.models.raw import RawTransaction
 from sirop.utils.logging import get_logger
@@ -55,6 +57,7 @@ _BUILTIN_CONFIG_DIR = Path("config/importers")
 _IMPORTER_REGISTRY: dict[str, Callable[[Path], BaseImporter]] = {
     "ndax": NDAXImporter.from_yaml,
     "shakepay": ShakepayImporter.from_yaml,
+    "sparrow": SparrowImporter.from_yaml,
 }
 
 
@@ -70,6 +73,7 @@ class _TapError(Exception):
 def handle_tap(
     file_path: Path,
     source: str | None,
+    wallet: str | None = None,
     settings: Settings | None = None,
 ) -> int:
     """Parse *file_path* and write raw transactions into the active batch.
@@ -81,6 +85,10 @@ def handle_tap(
     source:
         Importer name (e.g. ``"ndax"``).  When ``None``, auto-detection
         is attempted.
+    wallet:
+        Wallet name to assign to these transactions.  When ``None``, the
+        detected source format name is used (e.g. ``"shakepay"``).
+        User-supplied names set ``auto_created=False`` on the wallet row.
     settings:
         Application settings; resolved from the environment if omitted.
 
@@ -91,8 +99,10 @@ def handle_tap(
     """
     if settings is None:
         settings = get_settings()
+    if file_path.is_dir():
+        return _handle_tap_folder(file_path, source, wallet, settings)
     try:
-        return _run_tap(file_path, source, settings)
+        return _run_tap(file_path, source, wallet, settings)
     except _TapError as exc:
         emit(exc.msg_code, **exc.msg_kwargs)
         return 1
@@ -103,7 +113,83 @@ def handle_tap(
 # ---------------------------------------------------------------------------
 
 
-def _run_tap(file_path: Path, source: str | None, settings: Settings) -> int:
+def _detect_csv_format(
+    csv_path: Path, source: str | None, detector: FormatDetector
+) -> tuple[str | None, str | None]:
+    """Return ``(source_name, display_name)`` for *csv_path*, or ``(None, None)``."""
+    headers = _read_headers(csv_path)
+    if not headers:
+        return None, None
+    if source is not None:
+        result = detector.validate(headers, source)
+        if result.ok:
+            return source, detector.display_name(source)
+        return None, None
+    result_d = detector.detect(headers)
+    if len(result_d.matched) == 1:
+        detected = result_d.matched[0]
+        return detected, detector.display_name(detected)
+    return None, None
+
+
+def _handle_tap_folder(
+    folder_path: Path,
+    source: str | None,
+    wallet: str | None,
+    settings: Settings,
+) -> int:
+    """Discover CSVs in *folder_path*, show detected formats, confirm, then tap each.
+
+    Skips any CSV whose format cannot be identified (or whose headers do not
+    satisfy the user-declared ``--source`` fingerprint).  Files that are
+    tappable are shown in the listing and tapped after the user confirms.
+    """
+    config_dirs = [_BUILTIN_CONFIG_DIR, settings.data_dir / "importers"]
+    detector = FormatDetector(config_dirs)
+
+    csv_files = sorted(folder_path.glob("*.csv"))
+    if not csv_files:
+        emit(MessageCode.TAP_FOLDER_NO_FILES, path=folder_path)
+        return 0
+
+    # ── Detect (or validate) format for each CSV ─────────────────────────────
+    detections = [(p, *_detect_csv_format(p, source, detector)) for p in csv_files]
+
+    # ── Listing ───────────────────────────────────────────────────────────────
+    emit(MessageCode.TAP_FOLDER_HEADER, count=len(csv_files), path=folder_path)
+    for csv_path, detected, disp in detections:
+        if detected is not None and disp is not None:
+            emit(MessageCode.TAP_FOLDER_FILE_DETECTED, filename=csv_path.name, fmt=disp)
+        else:
+            emit(MessageCode.TAP_FOLDER_FILE_UNKNOWN, filename=csv_path.name)
+
+    tappable = [(p, s) for p, s, _ in detections if s is not None]
+    if not tappable:
+        emit(MessageCode.TAP_FOLDER_ALL_UNKNOWN)
+        return 1
+
+    # ── Confirmation ──────────────────────────────────────────────────────────
+    try:
+        answer = input(f"\nTap {len(tappable)} file(s)? [y/N] ").strip().lower()
+    except EOFError:
+        answer = ""
+
+    if answer not in {"y", "yes"}:
+        emit(MessageCode.TAP_FOLDER_ABORTED)
+        return 0
+
+    # ── Tap each tappable file ────────────────────────────────────────────────
+    # Pass the already-resolved source so _run_tap goes through _validate_source
+    # (silent path) rather than re-emitting TAP_FORMAT_DETECTED for each file.
+    overall_rc = 0
+    for csv_path, resolved_source in tappable:
+        rc = handle_tap(csv_path, resolved_source, wallet, settings)
+        if rc != 0:
+            overall_rc = rc
+    return overall_rc
+
+
+def _run_tap(file_path: Path, source: str | None, wallet: str | None, settings: Settings) -> int:
     """Core tap logic; raises ``_TapError`` on any user-facing error."""
     # ── 1. Active batch ───────────────────────────────────────────────────────
     batch_name = get_active_batch_name(settings)
@@ -151,8 +237,16 @@ def _run_tap(file_path: Path, source: str | None, settings: Settings) -> int:
             detail=exc,
         ) from exc
 
-    # ── 5. Write to DB ────────────────────────────────────────────────────────
-    inserted, skipped = _write_to_batch(batch_name, settings, txs)
+    # ── 5. Resolve wallet (find or create) ────────────────────────────────────
+    # Wallet name: user-supplied (--wallet) or auto-derived from source format.
+    # auto_created=True when no --wallet flag was given.
+    wallet_name = wallet if wallet is not None else detected_source
+    auto_created = wallet is None
+
+    # ── 6. Write to DB ────────────────────────────────────────────────────────
+    inserted, skipped = _write_to_batch(
+        batch_name, settings, txs, wallet_name, auto_created, detected_source
+    )
 
     disp = detector.display_name(detected_source)
     if inserted == 0:
@@ -191,8 +285,13 @@ def _run_tap(file_path: Path, source: str | None, settings: Settings) -> int:
     return 0
 
 
-def _write_to_batch(
-    batch_name: str, settings: Settings, txs: list[RawTransaction]
+def _write_to_batch(  # noqa: PLR0913
+    batch_name: str,
+    settings: Settings,
+    txs: list[RawTransaction],
+    wallet_name: str,
+    auto_created: bool,
+    source: str,
 ) -> tuple[int, int]:
     """Write *txs* to the active batch DB in a single atomic transaction.
 
@@ -220,6 +319,9 @@ def _write_to_batch(
             raise _TapError(MessageCode.TAP_ERROR_STAGE_RUNNING, name=batch_name)
 
         is_append = stage_row and stage_row["status"] == "done"
+
+        # Resolve (find or create) the wallet for this tap.
+        wallet = repo.find_or_create_wallet(conn, wallet_name, source, auto_created)
 
         # Deduplication — single pass, covers two sources of duplicates:
         #
@@ -276,6 +378,7 @@ def _write_to_batch(
                 format(tx.spot_rate, "f") if tx.spot_rate is not None else None,
                 tx.txid,
                 json.dumps(tx.raw_row),
+                wallet.id,
             )
             for tx in txs
         ]
@@ -300,8 +403,8 @@ def _write_to_batch(
                 INSERT INTO raw_transactions
                     (source, raw_timestamp, transaction_type, asset, amount,
                      amount_currency, fee, fee_currency, cad_amount, fiat_currency,
-                     cad_rate, spot_rate, txid, extra_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     cad_rate, spot_rate, txid, extra_json, wallet_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 db_rows,
             )
