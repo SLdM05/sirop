@@ -14,7 +14,7 @@ from typing import Final
 
 # Bump this when the schema changes. The migration guard reads this value
 # and refuses to open a file whose schema_version doesn't match.
-SCHEMA_VERSION: Final[int] = 6
+SCHEMA_VERSION: Final[int] = 5
 
 # All pipeline stage names in execution order.
 PIPELINE_STAGES: Final[tuple[str, ...]] = (
@@ -64,18 +64,6 @@ CREATE TABLE IF NOT EXISTS boc_rates (
     rate            TEXT    NOT NULL,   -- Decimal string
     fetched_at      TEXT    NOT NULL,   -- ISO 8601 UTC
     PRIMARY KEY (date, currency_pair)
-)
-"""
-
-_CRYPTO_PRICES_DDL = """
-CREATE TABLE IF NOT EXISTS crypto_prices (
-    date        TEXT NOT NULL,   -- YYYY-MM-DD
-    asset       TEXT NOT NULL,   -- e.g. "BTC"
-    price_usd   TEXT NOT NULL,   -- Decimal string
-    price_cad   TEXT NOT NULL,   -- Decimal string (price_usd * BoC USDCAD rate)
-    source      TEXT NOT NULL,   -- "mempool" | "coingecko"
-    fetched_at  TEXT NOT NULL,   -- ISO 8601 UTC
-    PRIMARY KEY (date, asset)
 )
 """
 
@@ -324,7 +312,6 @@ _ALL_DDL: Final[tuple[str, ...]] = (
     _SCHEMA_VERSION_DDL,
     _STAGE_STATUS_DDL,
     _BOC_RATES_DDL,
-    _CRYPTO_PRICES_DDL,
     _CUSTOM_IMPORTERS_DDL,
     _WALLETS_DDL,
     _RAW_TRANSACTIONS_DDL,
@@ -411,15 +398,3 @@ def migrate_to_v5(conn: sqlite3.Connection) -> None:
             )
             conn.execute("DROP TABLE transfer_overrides")
             conn.execute("ALTER TABLE transfer_overrides_v5 RENAME TO transfer_overrides")
-
-
-def migrate_to_v6(conn: sqlite3.Connection) -> None:
-    """Apply v6 schema migrations to an existing batch file.
-
-    Idempotent — safe to call on fresh databases and already-migrated ones.
-    v6 adds the ``crypto_prices`` table for caching historical cryptocurrency
-    prices (USD and CAD) fetched from public APIs.  Because it is a brand-new
-    table, ``CREATE TABLE IF NOT EXISTS`` inside ``create_tables`` is sufficient
-    and no column-level ALTER TABLE statements are required.
-    """
-    create_tables(conn)

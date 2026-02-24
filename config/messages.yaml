@@ -182,19 +182,6 @@ messages:
     code: E017
     text: "Unknown stage {stage!r}. Valid stages: {valid}"
 
-  boil.normalize.prefetch_boc:
-    category: output
-    text: "  Fetching Bank of Canada rates for {count} day(s)…"
-
-  boil.normalize.prefetch_crypto:
-    category: output
-    text: "  Fetching market prices for {count} date(s)…"
-
-  boil.normalize.zero_cad_warning:
-    category: warning
-    code: W001
-    text: "Transaction {count} row(s) could not be valued in CAD and were recorded as 0. ACB for those rows may be incorrect. Check the audit log."
-
   boil.summary.complete:
     category: output
     text: "\nBatch '{name}' pipeline complete."
