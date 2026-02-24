@@ -378,6 +378,52 @@ def _read_cached(
     return Decimal(row[0])
 
 
+def prefetch_crypto_prices(
+    conn: sqlite3.Connection,
+    requests: list[tuple[str, date]],
+) -> int:
+    """Fetch and cache CAD prices for all *(asset, date)* pairs in *requests*.
+
+    Cache hits are skipped — only missing prices trigger network calls.
+    CoinGecko calls are serialised (one per unique date for non-BTC assets)
+    and use the existing back-off on HTTP 429.  Mempool.space calls for BTC
+    have no documented rate limit and are interleaved naturally.
+
+    Parameters
+    ----------
+    conn:
+        Open SQLite connection to the active ``.sirop`` batch file.
+    requests:
+        List of ``(asset_upper, price_date)`` pairs to warm.
+
+    Returns
+    -------
+    int
+        Number of new prices fetched (cache hits not counted).
+    """
+    fetched = 0
+    seen: set[tuple[str, date]] = set()
+    for asset, price_date in requests:
+        asset_upper = asset.upper()
+        key = (asset_upper, price_date)
+        if key in seen:
+            continue
+        seen.add(key)
+        if _read_cached(conn, asset_upper, price_date) is not None:
+            continue
+        try:
+            get_crypto_price_cad(conn, asset_upper, price_date)
+            fetched += 1
+        except CryptoPriceError as exc:
+            logger.warning(
+                "crypto_prices: prefetch failed for %s on %s — %s",
+                asset_upper,
+                price_date,
+                exc,
+            )
+    return fetched
+
+
 def _write_cache(  # noqa: PLR0913
     conn: sqlite3.Connection,
     asset: str,
