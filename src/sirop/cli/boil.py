@@ -20,6 +20,7 @@ from __future__ import annotations
 import sqlite3
 from decimal import Decimal
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import yaml
 
@@ -33,8 +34,15 @@ from sirop.engine.acb import TaxRules
 from sirop.models.messages import MessageCode
 from sirop.normalizer import normalizer
 from sirop.transfer_match import matcher
+from sirop.utils.boc import BoCRateError, prefetch_rates
+from sirop.utils.crypto_prices import prefetch_crypto_prices
 from sirop.utils.logging import StageContext, get_logger
 from sirop.utils.messages import emit
+
+if TYPE_CHECKING:
+    from datetime import date
+
+    from sirop.models.raw import RawTransaction
 
 logger = get_logger(__name__)
 
@@ -164,10 +172,86 @@ def _run_normalize(conn: object) -> None:
     if not raw_txs:
         raise _BoilError(MessageCode.BOIL_ERROR_NO_RAW_TRANSACTIONS)
 
+    _prefetch_boc_rates(conn, raw_txs)
+    _prefetch_crypto_prices_bulk(conn, raw_txs)
+
     logger.info("normalize: processing %d raw transaction(s)", len(raw_txs))
     txs = normalizer.normalize(raw_txs, conn)
     txs = repo.write_transactions(conn, txs)
     logger.info("normalize: wrote %d normalized transaction(s)", len(txs))
+
+    zero_count = sum(
+        1
+        for tx in txs
+        if tx.cad_value == 0
+        and tx.tx_type.value
+        not in {
+            "deposit",
+            "withdrawal",
+            "transfer_in",
+            "transfer_out",
+            "fiat_deposit",
+            "fiat_withdrawal",
+        }
+    )
+    if zero_count:
+        emit(MessageCode.BOIL_NORMALIZE_ZERO_CAD_WARNING, count=zero_count)
+
+
+def _prefetch_boc_rates(conn: object, raw_txs: list[RawTransaction]) -> None:
+    """Prefetch Bank of Canada USDCAD rates for the full date span of USD transactions.
+
+    Makes a single range HTTP call covering the entire tax year instead of
+    one-per-transaction, then caches all results so the normalizer never
+    touches the network for BoC rates.
+    """
+    assert isinstance(conn, sqlite3.Connection)
+
+    usd_fiat = frozenset({"USD", "USDT", "USDC"})
+    usd_dates = [
+        raw.timestamp.date()
+        for raw in raw_txs
+        if (raw.fiat_currency or "").upper() in usd_fiat and raw.fiat_value is not None
+    ]
+    if not usd_dates:
+        return
+
+    min_date = min(usd_dates)
+    max_date = max(usd_dates)
+    day_count = (max_date - min_date).days + 1
+    emit(MessageCode.BOIL_NORMALIZE_PREFETCH_BOC, count=day_count)
+    try:
+        prefetch_rates(conn, "USDCAD", min_date, max_date)
+    except BoCRateError as exc:
+        logger.warning("boil: BoC prefetch failed — %s. Will retry per-transaction.", exc)
+
+
+def _prefetch_crypto_prices_bulk(conn: object, raw_txs: list[RawTransaction]) -> None:
+    """Prefetch crypto CAD prices for all no-fiat transactions.
+
+    Each unique (asset, date) pair triggers at most one API call.  Results are
+    cached in SQLite so the normalizer never hits the network for these prices.
+    """
+    assert isinstance(conn, sqlite3.Connection)
+
+    pairs: list[tuple[str, date]] = [
+        (raw.asset.upper(), raw.timestamp.date())
+        for raw in raw_txs
+        if raw.fiat_value is None or raw.fiat_currency is None
+    ]
+    # Deduplicate while preserving deterministic order for logging.
+    seen: set[tuple[str, date]] = set()
+    unique_pairs: list[tuple[str, date]] = []
+    for p in pairs:
+        if p not in seen:
+            seen.add(p)
+            unique_pairs.append(p)
+
+    if not unique_pairs:
+        return
+
+    emit(MessageCode.BOIL_NORMALIZE_PREFETCH_CRYPTO, count=len(unique_pairs))
+    prefetch_crypto_prices(conn, unique_pairs)
 
 
 def _run_verify(conn: object) -> None:
