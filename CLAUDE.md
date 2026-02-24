@@ -61,11 +61,10 @@ poetry add --group dev <package>
 ## Branch Model
 
 ```
-main                    ← releases only (tagged v0.1.0, v0.2.0, …)
-  └── sirop-0.x         ← RC branch; PR → main with merge commit, then tag
-        └── dev         ← integration branch; squash merges in from feat/*
-              └── feat/<name>
-                    └── claude/<name>-<id>   ← Claude session sub-branches
+main   ← releases only (tagged v0.1.0, v0.2.0, …)
+ └── dev   ← integration branch; squash merges in from feat/*
+      └── feat/<name>
+            └── claude/<name>-<id>   ← Claude session sub-branches
 ```
 
 ### Starting a session
@@ -152,6 +151,7 @@ and cross-source transfer matching logic for Shakepay ↔ Sparrow.
 - **Poetry** for dependency management and virtualenv (`pyproject.toml`)
 - `decimal.Decimal` for all money (never float)
 - Bank of Canada Valet API for FX rates (no key required)
+- Mempool.space + CoinGecko public APIs for historical crypto prices (no key required)
 - SQLite via `sqlite3` (stdlib) for pipeline persistence (one `.sirop` file per batch)
 - Bitcoin Core RPC or Mempool REST API for node verification
 - `ruff` for linting and formatting
@@ -189,7 +189,7 @@ src/
 ├── db/              # Repository layer — SQLite read/write ONLY
 ├── reports/         # Output formatting ONLY (Schedule 3, Schedule G, TP-21.4.39-V)
 ├── models/          # Dataclasses and type definitions shared across modules
-└── utils/           # Stateless helpers (BoC API client, caching, date math)
+└── utils/           # Stateless helpers (BoC API client, crypto price client, caching, date math)
 ```
 
 Rules for module boundaries:
@@ -224,7 +224,7 @@ config/
 │   ├── ndax.yaml          # Column mappings, date format, transaction type map
 │   ├── sparrow.yaml       # Column mappings, date format
 │   └── koinly.yaml        # Column mappings, date format, transaction type map
-├── currencies.yaml        # Supported currencies, BoC API series codes
+├── currencies.yaml        # Supported currencies: BoC API series codes (fiat) and CoinGecko IDs + Mempool flags (crypto)
 └── reports.yaml           # Output form field mappings, line numbers
 ```
 
@@ -291,7 +291,7 @@ hand `my2025tax.sirop` to your accountant or archive it independently.
 Full table definitions and column specs: `docs/ref/database-schema.md`
 
 Key tables: `batch_meta`, `schema_version`, `stage_status` (values: `pending` | `running` | `done` | `invalidated`),
-`boc_rates`, `raw_transactions`, `transactions`, `verified_transactions`, `classified_events`,
+`boc_rates`, `crypto_prices`, `raw_transactions`, `transactions`, `verified_transactions`, `classified_events`,
 `dispositions`, `acb_state`, `dispositions_adjusted`, `audit_log`.
 
 ### `classified_events` — what it contains

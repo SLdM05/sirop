@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 from sirop.models.enums import TransactionType
 from sirop.models.transaction import Transaction
 from sirop.utils.boc import get_rate
+from sirop.utils.crypto_prices import CryptoPriceError, get_crypto_price_cad
 from sirop.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -180,7 +181,20 @@ def _resolve_cad_value(
         cad_val = raw.amount * raw.rate
         return cad_val, raw.rate
 
-    # No rate either — use 0 and warn for non-transfer types.
+    # No exchange rate either — look up the crypto price for the transaction date.
+    tx_date = raw.timestamp.date()
+    try:
+        price_cad = get_crypto_price_cad(conn, raw.asset, tx_date)
+        cad_val = raw.amount * price_cad
+        return cad_val, price_cad
+    except CryptoPriceError:
+        logger.warning(
+            "normalize: crypto price lookup failed for %s on %s — continuing without CAD value",
+            raw.asset,
+            tx_date,
+        )
+
+    # Last resort — use 0 and warn for non-transfer types.
     if tx_type.value not in _TRANSFER_TYPES:
         logger.warning(
             "normalize: no CAD value for %s %s %s on %s — using 0. "
