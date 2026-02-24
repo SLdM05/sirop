@@ -31,7 +31,15 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from sirop.db.schema import create_tables, migrate_to_v5, migrate_to_v6
-from sirop.utils.boc import BoCRateError, _fetch_from_api, _read_cached, _write_cache, get_rate
+from sirop.utils.boc import (
+    BoCRateError,
+    _fetch_from_api,
+    _fetch_range_from_api,
+    _read_cached,
+    _write_cache,
+    get_rate,
+    prefetch_rates,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -50,6 +58,12 @@ def _make_conn() -> sqlite3.Connection:
     migrate_to_v5(conn)
     migrate_to_v6(conn)
     return conn
+
+
+def _boc_range_response(series: str, observations: list[tuple[str, str]]) -> bytes:
+    """Build a BoC Valet API JSON response with multiple observations."""
+    payload = {"observations": [{"d": d, series: {"v": v}} for d, v in observations]}
+    return json.dumps(payload).encode("utf-8")
 
 
 def _boc_response(series: str, date_str: str, value: str) -> bytes:
@@ -291,3 +305,113 @@ class TestGetRate:
 
         assert get_rate(conn, "USDCAD", date(2025, 3, 15)) == Decimal("1.4321")
         assert get_rate(conn, "EURCAD", date(2025, 3, 15)) == Decimal("1.5500")
+
+
+# ---------------------------------------------------------------------------
+# _fetch_range_from_api
+# ---------------------------------------------------------------------------
+
+
+class TestFetchRangeFromApi:
+    def test_returns_dict_of_decimals(self) -> None:
+        obs = [("2025-03-10", "1.4300"), ("2025-03-11", "1.4310"), ("2025-03-12", "1.4320")]
+        with _mock_urlopen([_boc_range_response("FXUSDCAD", obs)]):
+            result = _fetch_range_from_api("USDCAD", date(2025, 3, 10), date(2025, 3, 12))
+        assert len(result) == 3  # noqa: PLR2004
+        assert result[date(2025, 3, 10)] == Decimal("1.4300")
+        assert result[date(2025, 3, 11)] == Decimal("1.4310")
+        assert result[date(2025, 3, 12)] == Decimal("1.4320")
+
+    def test_skips_observation_missing_value_key(self) -> None:
+        """An observation without a 'v' key is silently skipped."""
+        payload = json.dumps(
+            {
+                "observations": [
+                    {"d": "2025-03-10", "FXUSDCAD": {}},  # missing 'v'
+                    {"d": "2025-03-11", "FXUSDCAD": {"v": "1.4310"}},
+                ]
+            }
+        ).encode("utf-8")
+        with _mock_urlopen([payload]):
+            result = _fetch_range_from_api("USDCAD", date(2025, 3, 10), date(2025, 3, 11))
+        assert date(2025, 3, 10) not in result
+        assert result[date(2025, 3, 11)] == Decimal("1.4310")
+
+    def test_empty_observations_returns_empty_dict(self) -> None:
+        with _mock_urlopen([_empty_response()]):
+            result = _fetch_range_from_api("USDCAD", date(2025, 3, 15), date(2025, 3, 15))
+        assert result == {}
+
+    def test_raises_on_network_error(self) -> None:
+        with (
+            patch(
+                "sirop.utils.boc.urllib.request.urlopen",
+                side_effect=OSError("connection refused"),
+            ),
+            pytest.raises(BoCRateError, match="Failed to fetch"),
+        ):
+            _fetch_range_from_api("USDCAD", date(2025, 3, 10), date(2025, 3, 14))
+
+    def test_raises_on_unparseable_rate(self) -> None:
+        obs = [("2025-03-10", "not-a-number")]
+        with (
+            _mock_urlopen([_boc_range_response("FXUSDCAD", obs)]),
+            pytest.raises(BoCRateError, match="Cannot parse"),
+        ):
+            _fetch_range_from_api("USDCAD", date(2025, 3, 10), date(2025, 3, 10))
+
+
+# ---------------------------------------------------------------------------
+# prefetch_rates
+# ---------------------------------------------------------------------------
+
+
+class TestPrefetchRates:
+    def test_writes_all_rates_to_cache(self) -> None:
+        conn = _make_conn()
+        obs = [("2025-03-10", "1.4300"), ("2025-03-11", "1.4310"), ("2025-03-12", "1.4320")]
+        with _mock_urlopen([_boc_range_response("FXUSDCAD", obs)]):
+            prefetch_rates(conn, "USDCAD", date(2025, 3, 10), date(2025, 3, 12))
+        assert _read_cached(conn, "USDCAD", date(2025, 3, 10)) == Decimal("1.4300")
+        assert _read_cached(conn, "USDCAD", date(2025, 3, 11)) == Decimal("1.4310")
+        assert _read_cached(conn, "USDCAD", date(2025, 3, 12)) == Decimal("1.4320")
+
+    def test_returns_count(self) -> None:
+        conn = _make_conn()
+        obs = [("2025-03-10", "1.4300"), ("2025-03-11", "1.4310"), ("2025-03-12", "1.4320")]
+        with _mock_urlopen([_boc_range_response("FXUSDCAD", obs)]):
+            count = prefetch_rates(conn, "USDCAD", date(2025, 3, 10), date(2025, 3, 12))
+        assert count == 3  # noqa: PLR2004
+
+    def test_empty_response_returns_zero(self) -> None:
+        conn = _make_conn()
+        with _mock_urlopen([_empty_response()]):
+            count = prefetch_rates(conn, "USDCAD", date(2025, 3, 15), date(2025, 3, 15))
+        assert count == 0
+
+    def test_pair_is_uppercased(self) -> None:
+        conn = _make_conn()
+        obs = [("2025-03-10", "1.4300")]
+        with _mock_urlopen([_boc_range_response("FXUSDCAD", obs)]):
+            prefetch_rates(conn, "usdcad", date(2025, 3, 10), date(2025, 3, 10))
+        assert _read_cached(conn, "USDCAD", date(2025, 3, 10)) == Decimal("1.4300")
+
+    def test_overwrites_stale_cached_rate(self) -> None:
+        """INSERT OR REPLACE updates a previously cached rate."""
+        conn = _make_conn()
+        _write_cache(conn, "USDCAD", date(2025, 3, 10), Decimal("1.0000"))
+        obs = [("2025-03-10", "1.4300")]
+        with _mock_urlopen([_boc_range_response("FXUSDCAD", obs)]):
+            prefetch_rates(conn, "USDCAD", date(2025, 3, 10), date(2025, 3, 10))
+        assert _read_cached(conn, "USDCAD", date(2025, 3, 10)) == Decimal("1.4300")
+
+    def test_network_error_raises_boc_rate_error(self) -> None:
+        conn = _make_conn()
+        with (
+            patch(
+                "sirop.utils.boc.urllib.request.urlopen",
+                side_effect=OSError("timeout"),
+            ),
+            pytest.raises(BoCRateError, match="Failed to fetch"),
+        ):
+            prefetch_rates(conn, "USDCAD", date(2025, 3, 10), date(2025, 3, 14))

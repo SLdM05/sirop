@@ -61,11 +61,10 @@ poetry add --group dev <package>
 ## Branch Model
 
 ```
-main                    ← releases only (tagged v0.1.0, v0.2.0, …)
-  └── sirop-0.x         ← RC branch; PR → main with merge commit, then tag
-        └── dev         ← integration branch; squash merges in from feat/*
-              └── feat/<name>
-                    └── claude/<name>-<id>   ← Claude session sub-branches
+main   ← releases only (tagged v0.1.0, v0.2.0, …)
+ └── dev   ← integration branch; squash merges in from feat/*
+      └── feat/<name>
+            └── claude/<name>-<id>   ← Claude session sub-branches
 ```
 
 ### Starting a session
