@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Final
 
 from sirop.config.settings import Settings
-from sirop.db.schema import create_tables, migrate_to_v5, migrate_to_v6
+from sirop.db.schema import create_tables, migrate_to_v5
 
 # Batch names must start with a letter or digit and contain only alphanumerics,
 # underscores, and hyphens. Max 64 chars. This prevents path traversal
@@ -84,7 +84,6 @@ def open_batch(name: str, settings: Settings) -> sqlite3.Connection:
     create_tables(conn)
     # Apply column-level migrations that CREATE TABLE IF NOT EXISTS cannot handle.
     migrate_to_v5(conn)
-    migrate_to_v6(conn)
     return conn
 
 

@@ -45,7 +45,6 @@ flowchart TD
 
         subgraph DBCACHE ["  Cached External Data  "]
             T_BOC[("boc_rates<br/><i>date · currency_pair · rate · fetched_at</i>")]:::dbtable
-            T_CRYPTO[("crypto_prices<br/><i>date · asset · price_usd · price_cad · source · fetched_at</i><br/><i>source: mempool | coingecko</i>")]:::dbtable
         end
 
         subgraph DBSUPPORT ["  Support Tables  "]
@@ -123,13 +122,11 @@ flowchart TD
     %% STAGE 2 — normalize
     %% ═══════════════════════════════════════════
 
-    NORM["Normalizer<br/><i>CAD conversion via BoC rates</i><br/><i>crypto price fallback (Mempool / CoinGecko)</i><br/><i>UTC timestamp standardization</i><br/><i>Transaction type classification</i>"]:::process
+    NORM["Normalizer<br/><i>CAD conversion via BoC rates</i><br/><i>UTC timestamp standardization</i><br/><i>Transaction type classification</i>"]:::process
     BOC[("Bank of Canada<br/>Valet API")]:::external
-    PRICE_API[("Mempool.space / CoinGecko<br/><i>historical crypto prices</i><br/><i>BTC: Mempool first, CoinGecko fallback</i><br/><i>other assets: CoinGecko only</i>")]:::external
 
     T_RAW -->|"via repo"| NORM
     BOC -.->|"rates cached → T_BOC"| NORM
-    PRICE_API -.->|"fallback when no fiat value · cached → T_CRYPTO"| NORM
     NORM -->|"via repo → atomic write"| T_TX
 
     %% ═══════════════════════════════════════════

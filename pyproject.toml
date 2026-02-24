@@ -5,7 +5,7 @@ build-backend = "poetry.core.masonry.api"
 [tool.poetry]
 name = "sirop"
 version = "0.1.0"
-description = "Canadian/Quebec Bitcoin‑First Crypto Tax Calculator"
+description = "Canadian/Quebec crypto tax calculator"
 packages = [{include = "sirop", from = "src"}]
 
 [tool.poetry.scripts]
