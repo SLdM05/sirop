@@ -55,6 +55,7 @@ class MessageCode(StrEnum):
     BOIL_ERROR_UNKNOWN_STAGE = "boil.error.unknown_stage"
     BOIL_NORMALIZE_PREFETCH_BOC = "boil.normalize.prefetch_boc"
     BOIL_NORMALIZE_PREFETCH_CRYPTO = "boil.normalize.prefetch_crypto"
+    BOIL_NORMALIZE_COINGECKO_ATTRIBUTION = "boil.normalize.coingecko_attribution"
     BOIL_NORMALIZE_ZERO_CAD_WARNING = "boil.normalize.zero_cad_warning"
     BOIL_SUMMARY_COMPLETE = "boil.summary.complete"
     BOIL_SUMMARY_HOLDINGS_HEADER = "boil.summary.holdings_header"

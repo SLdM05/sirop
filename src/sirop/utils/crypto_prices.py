@@ -405,7 +405,7 @@ def _read_cached(
 def prefetch_crypto_prices(
     conn: sqlite3.Connection,
     requests: list[tuple[str, date]],
-) -> int:
+) -> tuple[int, int]:
     """Fetch and cache CAD prices for all *(asset, date)* pairs in *requests*.
 
     Cache hits are skipped — only missing prices trigger network calls.
@@ -422,10 +422,12 @@ def prefetch_crypto_prices(
 
     Returns
     -------
-    int
-        Number of new prices fetched (cache hits not counted).
+    tuple[int, int]
+        ``(total_fetched, coingecko_fetched)`` — total new prices fetched and
+        how many of those came from CoinGecko (cache hits not counted).
     """
     fetched = 0
+    coingecko_fetched = 0
     seen: set[tuple[str, date]] = set()
     for asset, price_date in requests:
         asset_upper = asset.upper()
@@ -438,6 +440,12 @@ def prefetch_crypto_prices(
         try:
             get_crypto_price_cad(conn, asset_upper, price_date)
             fetched += 1
+            row = conn.execute(
+                "SELECT source FROM crypto_prices WHERE asset = ? AND date = ?",
+                (asset_upper, str(price_date)),
+            ).fetchone()
+            if row and row[0] == "coingecko":
+                coingecko_fetched += 1
         except CryptoPriceError as exc:
             logger.warning(
                 "crypto_prices: prefetch failed for %s on %s — %s",
@@ -445,7 +453,7 @@ def prefetch_crypto_prices(
                 price_date,
                 exc,
             )
-    return fetched
+    return fetched, coingecko_fetched
 
 
 def _write_cache(  # noqa: PLR0913

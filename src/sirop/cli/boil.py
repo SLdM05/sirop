@@ -253,7 +253,9 @@ def _prefetch_crypto_prices_bulk(conn: object, raw_txs: list[RawTransaction]) ->
         return
 
     emit(MessageCode.BOIL_NORMALIZE_PREFETCH_CRYPTO, count=len(unique_pairs))
-    prefetch_crypto_prices(conn, unique_pairs)
+    _total, coingecko_count = prefetch_crypto_prices(conn, unique_pairs)
+    if coingecko_count > 0:
+        emit(MessageCode.BOIL_NORMALIZE_COINGECKO_ATTRIBUTION)
 
 
 def _run_verify(conn: object) -> None:
