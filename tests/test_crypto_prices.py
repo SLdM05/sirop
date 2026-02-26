@@ -272,7 +272,7 @@ class TestLoadAssetConfig:
         assert cfg["mempool_supported"] is False
 
     def test_unknown_asset_raises(self) -> None:
-        with pytest.raises(CryptoPriceError, match="not found in currencies.yaml"):
+        with pytest.raises(CryptoPriceError, match=r"not found in currencies\.yaml"):
             _load_asset_config("UNKNOWNXYZ")
 
 
@@ -348,7 +348,7 @@ class TestGetCryptoPriceCad:
         conn = _make_conn()
         with (
             _mock_boc_rate(conn),
-            pytest.raises(CryptoPriceError, match="not found in currencies.yaml"),
+            pytest.raises(CryptoPriceError, match=r"not found in currencies\.yaml"),
         ):
             get_crypto_price_cad(conn, "UNKNOWNXYZ", _TEST_DATE)
 

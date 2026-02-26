@@ -10,7 +10,7 @@ Run with:
 from __future__ import annotations
 
 import sqlite3
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from unittest.mock import patch
 
@@ -85,8 +85,6 @@ class TestBoCLive:
 
         with patch("sirop.utils.boc.urllib.request.urlopen") as mock_no_call:
             for offset in range(5):
-                from datetime import timedelta
-
                 d = _KNOWN_WEEK_START + timedelta(days=offset)
                 rate = get_rate(conn, "USDCAD", d)
                 assert rate > Decimal("0")

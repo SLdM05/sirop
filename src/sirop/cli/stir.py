@@ -52,6 +52,7 @@ Non-interactive flags
 
 from __future__ import annotations
 
+from datetime import timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
@@ -399,8 +400,6 @@ def _build_state(  # noqa: PLR0912 PLR0915
     overrides: list[TransferOverride],
 ) -> _MatchState:
     """Compute a preview of how the transfer matcher will classify *txs*."""
-    from datetime import timedelta
-
     state = _MatchState()
     tx_by_id: dict[int, Transaction] = {t.id: t for t in txs}
     sorted_txs = sorted(txs, key=lambda t: t.timestamp)
@@ -479,8 +478,6 @@ def _build_state(  # noqa: PLR0912 PLR0915
 
 def _would_match(tx: Transaction, candidate: Transaction, window: object) -> bool:
     """Quick check: would these two auto-match if not blocked?"""
-    from datetime import timedelta
-
     w = window if isinstance(window, timedelta) else timedelta(hours=MATCH_WINDOW_HOURS)
     if tx.txid and candidate.txid and tx.txid == candidate.txid:
         return True

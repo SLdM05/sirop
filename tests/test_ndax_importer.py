@@ -175,9 +175,9 @@ def test_direction_rate_is_consistent(direction_txs: list[RawTransaction]) -> No
             continue
         assert tx.rate is not None
         expected = tx.fiat_value / tx.amount
-        assert abs(tx.rate - expected) < Decimal(
-            "0.01"
-        ), f"{tx.transaction_type} rate mismatch: {tx.rate} vs {expected}"
+        assert abs(tx.rate - expected) < Decimal("0.01"), (
+            f"{tx.transaction_type} rate mismatch: {tx.rate} vs {expected}"
+        )
 
 
 def test_no_trade_type_in_direction_fixture(direction_txs: list[RawTransaction]) -> None:
@@ -225,9 +225,9 @@ def test_btc_buy_rate_is_consistent(transactions: list[RawTransaction]) -> None:
         assert tx.rate is not None
         assert tx.fiat_value is not None
         expected_rate = tx.fiat_value / tx.amount
-        assert abs(tx.rate - expected_rate) < Decimal(
-            "0.01"
-        ), f"Rate mismatch on {tx.timestamp}: {tx.rate} vs {expected_rate}"
+        assert abs(tx.rate - expected_rate) < Decimal("0.01"), (
+            f"Rate mismatch on {tx.timestamp}: {tx.rate} vs {expected_rate}"
+        )
 
 
 def test_earliest_btc_buy(transactions: list[RawTransaction]) -> None:
@@ -323,9 +323,9 @@ def test_eth_sell_type_is_sell_not_buy(transactions: list[RawTransaction]) -> No
     buys = _find(transactions, "buy", "ETH")
     sell_timestamps = {t.timestamp for t in sells}
     buy_timestamps = {t.timestamp for t in buys}
-    assert sell_timestamps.isdisjoint(
-        buy_timestamps
-    ), "Same timestamp appears in both buy and sell ETH lists — direction detection broken"
+    assert sell_timestamps.isdisjoint(buy_timestamps), (
+        "Same timestamp appears in both buy and sell ETH lists — direction detection broken"
+    )
 
 
 # ---------------------------------------------------------------------------

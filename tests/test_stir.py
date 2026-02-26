@@ -14,6 +14,7 @@ from decimal import Decimal
 
 import pytest
 
+from sirop.cli.stir import _compute_implied_fee
 from sirop.db import repositories as repo
 from sirop.db.schema import create_tables, migrate_to_v5
 from sirop.models.enums import TransactionType
@@ -338,7 +339,7 @@ class TestMatcherForcedLink:
         in_tx = _tx(2, TransactionType.DEPOSIT, amount="0.05", offset_hours=48, cad_value="3000")
         # These won't auto-match (amount mismatch + too far apart).
         override = _make_override(1, 2, "link")
-        events, income = match_transfers([out_tx, in_tx], overrides=[override])
+        events, _income = match_transfers([out_tx, in_tx], overrides=[override])
 
         transfer_events = [e for e in events if e.event_type == "transfer"]
         assert len(transfer_events) == 2  # noqa: PLR2004
@@ -529,8 +530,6 @@ class TestMatcherNoOverrides:
 class TestComputeImpliedFee:
     def test_clean_transfer_no_fee(self) -> None:
         """Sent == received → fee is zero, no error."""
-        from sirop.cli.stir import _compute_implied_fee
-
         out_tx = _tx(1, TransactionType.WITHDRAWAL, amount="0.01")
         in_tx = _tx(2, TransactionType.DEPOSIT, amount="0.01")
         fee, err = _compute_implied_fee(out_tx, in_tx)
@@ -539,8 +538,6 @@ class TestComputeImpliedFee:
 
     def test_fee_equals_difference(self) -> None:
         """Sent > received → fee = sent - received."""
-        from sirop.cli.stir import _compute_implied_fee
-
         out_tx = _tx(1, TransactionType.WITHDRAWAL, amount="0.01005")
         in_tx = _tx(2, TransactionType.DEPOSIT, amount="0.01")
         fee, err = _compute_implied_fee(out_tx, in_tx)
@@ -549,8 +546,6 @@ class TestComputeImpliedFee:
 
     def test_impossible_link_rejected(self) -> None:
         """Received > sent → non-empty error string, fee=0."""
-        from sirop.cli.stir import _compute_implied_fee
-
         out_tx = _tx(1, TransactionType.WITHDRAWAL, amount="0.01")
         in_tx = _tx(2, TransactionType.DEPOSIT, amount="0.02")
         fee, err = _compute_implied_fee(out_tx, in_tx)
@@ -560,8 +555,6 @@ class TestComputeImpliedFee:
 
     def test_asset_mismatch_rejected(self) -> None:
         """Different assets → non-empty error string."""
-        from sirop.cli.stir import _compute_implied_fee
-
         out_tx = _tx(1, TransactionType.WITHDRAWAL, amount="0.01", asset="BTC")
         in_tx = _tx(2, TransactionType.DEPOSIT, amount="0.01", asset="ETH")
         fee, err = _compute_implied_fee(out_tx, in_tx)
@@ -570,8 +563,6 @@ class TestComputeImpliedFee:
 
     def test_eth_asset_agnostic(self) -> None:
         """Works for non-BTC assets."""
-        from sirop.cli.stir import _compute_implied_fee
-
         out_tx = _tx(1, TransactionType.WITHDRAWAL, amount="1.005", asset="ETH")
         in_tx = _tx(2, TransactionType.DEPOSIT, amount="1.000", asset="ETH")
         fee, err = _compute_implied_fee(out_tx, in_tx)

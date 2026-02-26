@@ -191,7 +191,7 @@ def _fetch_usd_price(asset: str, price_date: date) -> tuple[Decimal, str]:
         f"No price available for {asset} on {price_date}. "
         "Both Mempool.space and CoinGecko returned no data."
         if mempool_ok
-        else f"No price available for {asset} on {price_date}. " "CoinGecko returned no data."
+        else f"No price available for {asset} on {price_date}. CoinGecko returned no data."
     )
 
 
@@ -248,7 +248,7 @@ def _fetch_usd_coingecko(coin_id: str, price_date: date) -> Decimal | None:
     Returns None when no market data is available; raises CryptoPriceError
     on unrecoverable errors (network, parse failures after all retries).
     """
-    from sirop.config.settings import get_settings  # local import to avoid circular
+    from sirop.config.settings import get_settings  # noqa: PLC0415 - avoid circular import
 
     date_str = price_date.strftime("%d-%m-%Y")
     url = f"{_COINGECKO_URL.format(coin_id=coin_id)}?date={date_str}&localization=false"

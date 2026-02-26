@@ -225,7 +225,7 @@ def _fetch_range_from_api(pair_upper: str, start_date: date, end_date: date) -> 
     Raises BoCRateError on network or parse errors.
     """
     series = f"FX{pair_upper}"
-    url = f"{_BOC_VALET_URL.format(series=series)}" f"?start_date={start_date}&end_date={end_date}"
+    url = f"{_BOC_VALET_URL.format(series=series)}?start_date={start_date}&end_date={end_date}"
     try:
         with urllib.request.urlopen(url, timeout=10) as resp:  # noqa: S310
             payload = json.loads(resp.read().decode("utf-8"))
