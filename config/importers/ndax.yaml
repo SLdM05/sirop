@@ -31,8 +31,15 @@ transaction_type_map:
   "trade": "trade"
   "deposit": "deposit"
   "withdraw": "withdrawal"
-  "dust": "other"
-  "dust / in": "other"
+  # DUST / IN is a crypto-to-crypto dust conversion: the user sends one asset
+  # (embedded in _ndax_sent_asset / _ndax_sent_amount on the raw_row) and
+  # receives another.  The received leg is a taxable acquisition — map to "buy"
+  # so the normalizer adds it to the ACB pool at FMV.
+  # NOTE: _parse_dust() looks up the primary key "dust", not the full type
+  # "dust / in" or "dust / out".  The two entries below are dead config kept
+  # for documentation only.
+  "dust": "buy"
+  "dust / in": "buy"
   "dust / out": "other"
   "staking / reward": "income"
   "staking / deposit": "transfer_out"

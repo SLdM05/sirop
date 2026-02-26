@@ -79,6 +79,46 @@ def set_stages_invalidated(conn: sqlite3.Connection, stages: list[str]) -> None:
             )
 
 
+# Reverse-dependency order for safe deletion during stage re-runs.
+# Most-downstream stage first so FK constraints are never violated.
+_BOIL_CLEAR_ORDER: tuple[str, ...] = (
+    "superficial_loss",
+    "boil",
+    "transfer_match",
+    "verify",
+    "normalize",
+)
+_CLEAR_TABLES_BY_STAGE: dict[str, tuple[str, ...]] = {
+    "superficial_loss": ("dispositions_adjusted",),
+    "boil": ("acb_state", "dispositions"),
+    "transfer_match": ("income_events", "classified_events"),
+    "verify": ("verified_transactions",),
+    "normalize": ("transactions",),
+}
+
+
+def clear_stages_output(conn: sqlite3.Connection, stages: tuple[str, ...]) -> None:
+    """Delete all output rows for the given pipeline *stages*.
+
+    Deletion is performed in reverse-dependency order (most downstream first)
+    to satisfy FK constraints.  Call this before a ``--from`` re-run to
+    prevent rows from the previous run stacking on top of fresh output.
+
+    Parameters
+    ----------
+    stages:
+        Tuple of stage names to clear, e.g. ``("normalize", "verify",
+        "transfer_match", "boil", "superficial_loss")``.
+    """
+    stages_set = set(stages)
+    with conn:
+        for stage in _BOIL_CLEAR_ORDER:
+            if stage not in stages_set:
+                continue
+            for table in _CLEAR_TABLES_BY_STAGE[stage]:
+                conn.execute(f"DELETE FROM {table}")  # noqa: S608
+
+
 # ---------------------------------------------------------------------------
 # Stage 1 → Stage 2: raw_transactions
 # ---------------------------------------------------------------------------
@@ -264,6 +304,21 @@ def promote_to_verified(conn: sqlite3.Connection) -> int:
 # ---------------------------------------------------------------------------
 # Stage 4 output: classified_events, income_events
 # ---------------------------------------------------------------------------
+
+
+def read_verified_tx_id_map(conn: sqlite3.Connection) -> dict[int, int]:
+    """Return a mapping from ``transactions.id`` to ``verified_transactions.id``.
+
+    The transfer matcher receives ``Transaction`` objects whose ``.id`` equals
+    ``transactions.id`` and uses it as ``vtx_id`` in ``ClassifiedEvent`` and
+    ``IncomeEvent``.  But ``classified_events.vtx_id`` and
+    ``income_events.vtx_id`` FK-reference ``verified_transactions.id`` — a
+    separate autoincrement sequence.  On an untouched batch these happen to
+    match; after a ``--from`` re-run the sequences diverge.  Use this map to
+    patch ``vtx_id`` before writing to the DB.
+    """
+    rows = conn.execute("SELECT id, tx_id FROM verified_transactions").fetchall()
+    return {int(row["tx_id"]): int(row["id"]) for row in rows}
 
 
 def write_classified_events(

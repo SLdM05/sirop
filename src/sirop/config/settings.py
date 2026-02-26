@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     btc_rpc_password: str = ""
     btc_mempool_url: str = "http://localhost:3006/api"
 
+    # ── External APIs ─────────────────────────────────────────────────────────
+
+    coingecko_api_key: str = ""
+
 
 def get_settings() -> Settings:
     """Return a Settings instance loaded from the environment / .env file."""

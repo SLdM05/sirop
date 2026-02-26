@@ -17,6 +17,7 @@ Usage
 
 from __future__ import annotations
 
+import dataclasses
 import sqlite3
 from decimal import Decimal
 from pathlib import Path
@@ -110,11 +111,12 @@ def _run_boil(from_stage: str | None, settings: Settings) -> int:
 
         tax_rules = _load_tax_rules()
 
-        # Invalidate stages that will be re-run.
+        # Invalidate stages that will be re-run and clear their stale output.
         if from_stage is not None:
             _validate_from_stage(from_stage)
             stages_to_invalidate = _stages_from(from_stage)
             repo.set_stages_invalidated(conn, list(stages_to_invalidate))
+            repo.clear_stages_output(conn, stages_to_invalidate)
 
         # Execute each stage in order.
         for stage in _BOIL_STAGES:
@@ -279,6 +281,18 @@ def _run_transfer_match(conn: object) -> None:
         )
 
     events, income_evts = matcher.match_transfers(txs, overrides=overrides)
+
+    # The matcher uses transactions.id as vtx_id; patch to verified_transactions.id
+    # before writing, since classified_events.vtx_id and income_events.vtx_id both
+    # FK-reference verified_transactions.id (a separate autoincrement sequence).
+    # On an untouched batch these IDs coincidentally match, but after a --from re-run
+    # the sequences diverge and the FK insert fails without this correction.
+    vtx_id_map = repo.read_verified_tx_id_map(conn)
+    events = [dataclasses.replace(e, vtx_id=vtx_id_map.get(e.vtx_id, e.vtx_id)) for e in events]
+    income_evts = [
+        dataclasses.replace(e, vtx_id=vtx_id_map.get(e.vtx_id, e.vtx_id)) for e in income_evts
+    ]
+
     events = repo.write_classified_events(conn, events)
     income_evts = repo.write_income_events(conn, income_evts)
     logger.info(
