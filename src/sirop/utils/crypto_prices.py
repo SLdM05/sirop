@@ -248,7 +248,7 @@ def _fetch_usd_coingecko(coin_id: str, price_date: date) -> Decimal | None:
     Returns None when no market data is available; raises CryptoPriceError
     on unrecoverable errors (network, parse failures after all retries).
     """
-    from sirop.config.settings import get_settings  # noqa: PLC0415 - avoid circular import
+    from sirop.config.settings import get_settings
 
     date_str = price_date.strftime("%d-%m-%Y")
     url = f"{_COINGECKO_URL.format(coin_id=coin_id)}?date={date_str}&localization=false"
