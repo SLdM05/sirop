@@ -224,6 +224,7 @@ def _prefetch_boc_rates(conn: object, raw_txs: list[RawTransaction]) -> None:
     emit(MessageCode.BOIL_NORMALIZE_PREFETCH_BOC, count=day_count)
     try:
         prefetch_rates(conn, "USDCAD", min_date, max_date)
+        emit(MessageCode.BOIL_NORMALIZE_BOC_ATTRIBUTION)
     except BoCRateError as exc:
         logger.warning("boil: BoC prefetch failed — %s. Will retry per-transaction.", exc)
 
@@ -253,9 +254,11 @@ def _prefetch_crypto_prices_bulk(conn: object, raw_txs: list[RawTransaction]) ->
         return
 
     emit(MessageCode.BOIL_NORMALIZE_PREFETCH_CRYPTO, count=len(unique_pairs))
-    _total, coingecko_count = prefetch_crypto_prices(conn, unique_pairs)
+    _total, coingecko_count, mempool_count = prefetch_crypto_prices(conn, unique_pairs)
     if coingecko_count > 0:
         emit(MessageCode.BOIL_NORMALIZE_COINGECKO_ATTRIBUTION)
+    if mempool_count > 0:
+        emit(MessageCode.BOIL_NORMALIZE_MEMPOOL_ATTRIBUTION)
 
 
 def _run_verify(conn: object) -> None:
