@@ -23,3 +23,11 @@ crypto:
     display_name: "Ethereum"
     coingecko_id: "ethereum"
     mempool_supported: false
+  SOL:
+    display_name: "Solana"
+    coingecko_id: "solana"
+    mempool_supported: false
+  RPL:
+    display_name: "Rocket Pool"
+    coingecko_id: "rocket-pool"
+    mempool_supported: false

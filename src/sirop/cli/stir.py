@@ -52,12 +52,14 @@ Non-interactive flags
 
 from __future__ import annotations
 
+from datetime import timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from sirop.config.settings import Settings, get_settings
 from sirop.db import repositories as repo
 from sirop.db.connection import get_active_batch_name, open_batch
+from sirop.models.enums import TransactionType
 from sirop.models.messages import MessageCode
 from sirop.transfer_match.matcher import (
     _INCOMING,
@@ -80,6 +82,14 @@ logger = get_logger(__name__)
 
 # Width of the separator line — matches _fmt_tx() output width.
 _COL_WIDTH = 97
+
+# Transaction types that become taxable sells when unmatched — mirrors _classify_disposal()
+# in the matcher.  TRANSFER_OUT is intentionally excluded: an unmatched staking lock/unlock
+# (NDAX STAKING / DEPOSIT → transfer_out) is non-taxable and must not appear as a sell.
+_TAXABLE_OUT = frozenset({TransactionType.WITHDRAWAL, TransactionType.SELL, TransactionType.SPEND})
+# Transaction types that become taxable buys when unmatched — mirrors _classify_acquisition().
+# TRANSFER_IN without a counterpart (e.g. NDAX STAKING / REFUND) is non-taxable.
+_TAXABLE_IN = frozenset({TransactionType.DEPOSIT, TransactionType.BUY, TransactionType.TRADE})
 # Expected part count for two-argument commands (cmd + id1 + id2).
 _TWO_ARG_PARTS = 3
 # Expected part count for one-argument commands (cmd + id).
@@ -390,8 +400,6 @@ def _build_state(  # noqa: PLR0912 PLR0915
     overrides: list[TransferOverride],
 ) -> _MatchState:
     """Compute a preview of how the transfer matcher will classify *txs*."""
-    from datetime import timedelta
-
     state = _MatchState()
     tx_by_id: dict[int, Transaction] = {t.id: t for t in txs}
     sorted_txs = sorted(txs, key=lambda t: t.timestamp)
@@ -457,9 +465,9 @@ def _build_state(  # noqa: PLR0912 PLR0915
     for tx in sorted_txs:
         if tx.id in paired_ids:
             continue
-        if tx.tx_type in _OUTGOING:
+        if tx.tx_type in _TAXABLE_OUT:
             state.unmatched_out.append(tx)
-        elif tx.tx_type in _INCOMING:
+        elif tx.tx_type in _TAXABLE_IN:
             state.unmatched_in.append(tx)
         else:
             state.other.append(tx)
@@ -470,8 +478,6 @@ def _build_state(  # noqa: PLR0912 PLR0915
 
 def _would_match(tx: Transaction, candidate: Transaction, window: object) -> bool:
     """Quick check: would these two auto-match if not blocked?"""
-    from datetime import timedelta
-
     w = window if isinstance(window, timedelta) else timedelta(hours=MATCH_WINDOW_HOURS)
     if tx.txid and candidate.txid and tx.txid == candidate.txid:
         return True

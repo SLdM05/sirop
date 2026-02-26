@@ -27,10 +27,9 @@ poetry run pytest -m "not slow and not integration" -v   # should all pass
 ## Branch model
 
 ```
-main          ← releases only (tagged v0.1.0, v0.2.0, …)
-  sirop-0.x   ← RC branch; PR → main with merge commit
-    dev        ← integration branch; target for all feature PRs
-      feat/*   ← your feature branch
+main         ← releases only (tagged v0.1.0, v0.2.0, …)
+  dev        ← integration branch; target for all feature PRs
+    feat/*   ← your feature branch
 ```
 
 Fork the repo, branch from `dev`, and open your PR targeting `dev`. Direct PRs to `main`

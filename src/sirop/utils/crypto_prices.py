@@ -191,7 +191,7 @@ def _fetch_usd_price(asset: str, price_date: date) -> tuple[Decimal, str]:
         f"No price available for {asset} on {price_date}. "
         "Both Mempool.space and CoinGecko returned no data."
         if mempool_ok
-        else f"No price available for {asset} on {price_date}. " "CoinGecko returned no data."
+        else f"No price available for {asset} on {price_date}. CoinGecko returned no data."
     )
 
 
@@ -248,12 +248,21 @@ def _fetch_usd_coingecko(coin_id: str, price_date: date) -> Decimal | None:
     Returns None when no market data is available; raises CryptoPriceError
     on unrecoverable errors (network, parse failures after all retries).
     """
+    from sirop.config.settings import get_settings
+
     date_str = price_date.strftime("%d-%m-%Y")
     url = f"{_COINGECKO_URL.format(coin_id=coin_id)}?date={date_str}&localization=false"
+    api_key = get_settings().coingecko_api_key
 
     try:
-        raw = _fetch_with_backoff(url)
-    except CryptoPriceError:
+        raw = _fetch_with_backoff(url, api_key=api_key)
+    except CryptoPriceError as exc:
+        logger.debug(
+            "crypto_prices: CoinGecko request failed for %s on %s: %s",
+            coin_id,
+            price_date,
+            exc,
+        )
         return None
 
     try:
@@ -286,16 +295,31 @@ def _fetch_usd_coingecko(coin_id: str, price_date: date) -> Decimal | None:
         return None
 
 
-def _fetch_with_backoff(url: str) -> bytes:
+def _fetch_with_backoff(url: str, api_key: str = "") -> bytes:
     """Fetch *url*, retrying on HTTP 429 with exponential back-off.
 
     Returns raw response bytes on success.
     Raises ``CryptoPriceError`` after all retries are exhausted or on
     non-retryable HTTP errors.
+
+    Parameters
+    ----------
+    url:
+        Fully-formed URL to fetch.
+    api_key:
+        Optional CoinGecko Demo API key.  When non-empty, sent as the
+        ``x-cg-demo-api-key`` request header, which gives a higher rate
+        limit and more reliable responses than the unauthenticated public
+        API.
     """
+    headers: dict[str, str] = {}
+    if api_key:
+        headers["x-cg-demo-api-key"] = api_key
+
     for attempt, wait in enumerate((*_BACKOFF_DELAYS, None), start=1):
+        req = urllib.request.Request(url, headers=headers)  # noqa: S310
         try:
-            with urllib.request.urlopen(url, timeout=_TIMEOUT) as resp:  # noqa: S310
+            with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:  # noqa: S310
                 return resp.read()  # type: ignore[no-any-return]
         except urllib.error.HTTPError as exc:
             if exc.code == _HTTP_TOO_MANY_REQUESTS:
@@ -381,7 +405,7 @@ def _read_cached(
 def prefetch_crypto_prices(
     conn: sqlite3.Connection,
     requests: list[tuple[str, date]],
-) -> int:
+) -> tuple[int, int, int]:
     """Fetch and cache CAD prices for all *(asset, date)* pairs in *requests*.
 
     Cache hits are skipped — only missing prices trigger network calls.
@@ -398,10 +422,14 @@ def prefetch_crypto_prices(
 
     Returns
     -------
-    int
-        Number of new prices fetched (cache hits not counted).
+    tuple[int, int, int]
+        ``(total_fetched, coingecko_fetched, mempool_fetched)`` — total new
+        prices fetched and how many came from each source (cache hits not
+        counted).
     """
     fetched = 0
+    coingecko_fetched = 0
+    mempool_fetched = 0
     seen: set[tuple[str, date]] = set()
     for asset, price_date in requests:
         asset_upper = asset.upper()
@@ -414,6 +442,14 @@ def prefetch_crypto_prices(
         try:
             get_crypto_price_cad(conn, asset_upper, price_date)
             fetched += 1
+            row = conn.execute(
+                "SELECT source FROM crypto_prices WHERE asset = ? AND date = ?",
+                (asset_upper, str(price_date)),
+            ).fetchone()
+            if row and row[0] == "coingecko":
+                coingecko_fetched += 1
+            elif row and row[0] == "mempool":
+                mempool_fetched += 1
         except CryptoPriceError as exc:
             logger.warning(
                 "crypto_prices: prefetch failed for %s on %s — %s",
@@ -421,7 +457,7 @@ def prefetch_crypto_prices(
                 price_date,
                 exc,
             )
-    return fetched
+    return fetched, coingecko_fetched, mempool_fetched
 
 
 def _write_cache(  # noqa: PLR0913
