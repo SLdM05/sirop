@@ -59,6 +59,8 @@ class MessageCode(StrEnum):
     BOIL_NORMALIZE_BOC_ATTRIBUTION = "boil.normalize.boc_attribution"
     BOIL_NORMALIZE_MEMPOOL_ATTRIBUTION = "boil.normalize.mempool_attribution"
     BOIL_NORMALIZE_ZERO_CAD_WARNING = "boil.normalize.zero_cad_warning"
+    BOIL_TRANSFER_MATCH_UNMATCHED_WITHDRAWAL = "boil.transfer_match.unmatched_withdrawal"
+    BOIL_TRANSFER_MATCH_UNMATCHED_DEPOSIT = "boil.transfer_match.unmatched_deposit"
     BOIL_SUMMARY_COMPLETE = "boil.summary.complete"
     BOIL_SUMMARY_HOLDINGS_HEADER = "boil.summary.holdings_header"
 

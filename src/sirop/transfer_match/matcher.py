@@ -50,7 +50,9 @@ from typing import TYPE_CHECKING
 from sirop.models.disposition import IncomeEvent
 from sirop.models.enums import TransactionType
 from sirop.models.event import ClassifiedEvent
+from sirop.models.messages import MessageCode
 from sirop.utils.logging import get_logger
+from sirop.utils.messages import emit
 
 if TYPE_CHECKING:
     from sirop.models.override import TransferOverride
@@ -316,14 +318,14 @@ def match_transfers(  # noqa: PLR0912 PLR0915
     taxable = sum(1 for e in events if e.is_taxable)
     transfers = sum(1 for e in events if not e.is_taxable)
     logger.info(
-        "transfer_match: %d events (%d taxable, %d transfers), %d income events",
+        "%d events (%d taxable, %d transfers), %d income events",
         len(events),
         taxable,
         transfers,
         len(income_events),
     )
     if paired_ids:
-        logger.info("transfer_match: %d transfer legs paired", len(paired_ids))
+        logger.info("%d transfer legs paired", len(paired_ids))
 
     return events, income_events
 
@@ -459,12 +461,11 @@ def _classify_acquisition(tx: Transaction) -> ClassifiedEvent:
     whether the deposit is actually a wallet-to-wallet transfer.
     """
     if tx.tx_type == TransactionType.DEPOSIT:
-        logger.warning(
-            "transfer_match: unmatched deposit of %s %s on %s — treating as buy. "
-            "If this is a wallet-to-wallet transfer, tag it manually.",
-            tx.amount,
-            tx.asset,
-            tx.timestamp.date(),
+        emit(
+            MessageCode.BOIL_TRANSFER_MATCH_UNMATCHED_DEPOSIT,
+            amount=tx.amount,
+            asset=tx.asset,
+            date=tx.timestamp.date(),
         )
     return ClassifiedEvent(
         id=0,
@@ -489,12 +490,11 @@ def _classify_disposal(tx: Transaction) -> ClassifiedEvent:
     the receiving wallet if this is actually a transfer.
     """
     if tx.tx_type == TransactionType.WITHDRAWAL:
-        logger.warning(
-            "transfer_match: unmatched withdrawal of %s %s on %s — treating as sell. "
-            "If this is a wallet-to-wallet transfer, tap the receiving wallet.",
-            tx.amount,
-            tx.asset,
-            tx.timestamp.date(),
+        emit(
+            MessageCode.BOIL_TRANSFER_MATCH_UNMATCHED_WITHDRAWAL,
+            amount=tx.amount,
+            asset=tx.asset,
+            date=tx.timestamp.date(),
         )
     return ClassifiedEvent(
         id=0,

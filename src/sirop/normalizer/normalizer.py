@@ -84,7 +84,7 @@ def normalize(
         try:
             tx = _normalize_one(raw, conn)
         except NormalizationError as exc:
-            logger.warning("normalize: skipping row — %s", exc)
+            logger.warning("skipping row — %s", exc)
             continue
         result.append(tx)
 
@@ -130,7 +130,7 @@ def _map_tx_type(raw_type: str) -> TransactionType:
     try:
         return TransactionType(raw_type)
     except ValueError:
-        logger.warning("normalize: unknown transaction type %r → OTHER", raw_type)
+        logger.warning("unknown transaction type %r → OTHER", raw_type)
         return TransactionType.OTHER
 
 
