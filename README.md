@@ -115,6 +115,15 @@ privacy rule (no real transaction data anywhere in the repo).
 
 ---
 
+## Support
+
+sirop is free and open source. If it saved you some time (or some money with the taxman),
+consider sending a few sats — coffee for the dev, or tokens to keep the AI tools running.
+
+⚡ `brighteast77@walletofsatoshi.com`
+
+---
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
