@@ -207,6 +207,16 @@ messages:
     code: W001
     text: "Transaction {count} row(s) could not be valued in CAD and were recorded as 0. ACB for those rows may be incorrect. Check the audit log."
 
+  boil.transfer_match.unmatched_withdrawal:
+    category: warning
+    code: W002
+    text: "Unmatched withdrawal of {amount} {asset} on {date} — treated as sell. Use 'sirop stir' to link wallet transfers."
+
+  boil.transfer_match.unmatched_deposit:
+    category: warning
+    code: W003
+    text: "Unmatched deposit of {amount} {asset} on {date} — treated as buy. Use 'sirop stir' to link wallet transfers."
+
   boil.summary.complete:
     category: output
     text: "\nBatch '{name}' pipeline complete."

@@ -177,10 +177,10 @@ def _run_normalize(conn: object) -> None:
     _prefetch_boc_rates(conn, raw_txs)
     _prefetch_crypto_prices_bulk(conn, raw_txs)
 
-    logger.info("normalize: processing %d raw transaction(s)", len(raw_txs))
+    logger.info("processing %d raw transaction(s)", len(raw_txs))
     txs = normalizer.normalize(raw_txs, conn)
     txs = repo.write_transactions(conn, txs)
-    logger.info("normalize: wrote %d normalized transaction(s)", len(txs))
+    logger.info("wrote %d normalized transaction(s)", len(txs))
 
     zero_count = sum(
         1
@@ -226,7 +226,7 @@ def _prefetch_boc_rates(conn: object, raw_txs: list[RawTransaction]) -> None:
         prefetch_rates(conn, "USDCAD", min_date, max_date)
         emit(MessageCode.BOIL_NORMALIZE_BOC_ATTRIBUTION)
     except BoCRateError as exc:
-        logger.warning("boil: BoC prefetch failed — %s. Will retry per-transaction.", exc)
+        logger.warning("BoC prefetch failed — %s. Will retry per-transaction.", exc)
 
 
 def _prefetch_crypto_prices_bulk(conn: object, raw_txs: list[RawTransaction]) -> None:
@@ -264,9 +264,9 @@ def _prefetch_crypto_prices_bulk(conn: object, raw_txs: list[RawTransaction]) ->
 def _run_verify(conn: object) -> None:
     assert isinstance(conn, sqlite3.Connection)
 
-    logger.info("verify: promoting transactions to verified (pass-through — no node)")
+    logger.info("promoting transactions to verified (pass-through — no node)")
     count = repo.promote_to_verified(conn)
-    logger.info("verify: %d row(s) promoted to verified_transactions", count)
+    logger.info("%d row(s) promoted to verified_transactions", count)
 
 
 def _run_transfer_match(conn: object) -> None:
@@ -274,12 +274,12 @@ def _run_transfer_match(conn: object) -> None:
 
     logger.info("Tracing the flow...")
     txs = repo.read_transactions(conn)
-    logger.info("transfer_match: classifying %d transaction(s)", len(txs))
+    logger.info("classifying %d transaction(s)", len(txs))
 
     overrides = repo.read_transfer_overrides(conn)
     if overrides:
         logger.info(
-            "transfer_match: applying %d stir override(s) (%d link, %d unlink)",
+            "applying %d stir override(s) (%d link, %d unlink)",
             len(overrides),
             sum(1 for o in overrides if o.action == "link"),
             sum(1 for o in overrides if o.action == "unlink"),
@@ -301,7 +301,7 @@ def _run_transfer_match(conn: object) -> None:
     events = repo.write_classified_events(conn, events)
     income_evts = repo.write_income_events(conn, income_evts)
     logger.info(
-        "transfer_match: wrote %d classified event(s), %d income event(s)",
+        "wrote %d classified event(s), %d income event(s)",
         len(events),
         len(income_evts),
     )
@@ -312,23 +312,23 @@ def _run_acb(conn: object, tax_rules: TaxRules) -> None:
 
     logger.info("Boiling the sap...")
     events = repo.read_classified_events(conn)
-    logger.info("boil: running ACB engine on %d taxable event(s)", len(events))
+    logger.info("running ACB engine on %d taxable event(s)", len(events))
 
     disps, states = acb_engine.run(events, tax_rules)
     disps = repo.write_dispositions(conn, disps, states)
-    logger.info("boil: wrote %d disposition(s)", len(disps))
+    logger.info("wrote %d disposition(s)", len(disps))
 
 
 def _run_superficial_loss(conn: object, tax_rules: TaxRules) -> None:
     assert isinstance(conn, sqlite3.Connection)
 
-    logger.info("superficial_loss: scanning for 61-day window violations")
+    logger.info("scanning for 61-day window violations")
     disps = repo.read_dispositions(conn)
     all_events = repo.read_all_classified_events(conn)
 
     adjs = sld_engine.run(disps, all_events, tax_rules)
     adjs = repo.write_adjusted_dispositions(conn, adjs)
-    logger.info("superficial_loss: wrote %d adjusted disposition(s)", len(adjs))
+    logger.info("wrote %d adjusted disposition(s)", len(adjs))
 
 
 def _load_tax_rules() -> TaxRules:
@@ -435,6 +435,30 @@ def _print_summary(conn: object, batch_name: str) -> None:
                 f"    {h['asset']:<6} {units_val:>14.8f} units"
                 f"   ACB: {cost_val:>12,.2f} CAD"
                 f"   ({per_unit:>12,.2f} CAD/unit)"
+            )
+
+    # Superficial losses — show details if any were found.
+    sld_rows = conn.execute(
+        """
+        SELECT asset, timestamp, gain_loss, superficial_loss_denied, allowable_loss
+        FROM dispositions_adjusted
+        WHERE is_superficial_loss = 1
+        ORDER BY timestamp
+        """
+    ).fetchall()
+    if sld_rows:
+        hr = "─" * 68
+        print(f"\n  Superficial losses adjusted ({len(sld_rows)}):")
+        print(f"  {hr}")
+        for r in sld_rows:
+            date_str = r["timestamp"][:10]
+            denied = float(r["superficial_loss_denied"])
+            allow = float(r["allowable_loss"])
+            loss = float(r["gain_loss"])
+            print(
+                f"    {r['asset']:<5}  {date_str}"
+                f"  loss: {loss:>10,.2f} CAD"
+                f"  denied: {denied:>8,.2f}  allowable: {allow:>18.8f} CAD"
             )
 
     # Pipeline stage statuses.
