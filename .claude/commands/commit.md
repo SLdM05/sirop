@@ -17,7 +17,6 @@ Prepare and execute a git commit for the current working state of the sirop proj
    - Subject line: conventional prefix (`feat`, `fix`, `docs`, `test`, `refactor`, `style`, `chore`),
      colon, space, imperative verb, ≤ 72 characters total.
    - Body (optional): wrap at 100 characters. Explain *why*, not *what*.
-   - Trailer (required): `Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>`
 
 5. **Commit** using a HEREDOC to preserve formatting:
    ```bash
@@ -26,7 +25,6 @@ Prepare and execute a git commit for the current working state of the sirop proj
 
    Optional body here.
 
-   Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
    EOF
    )"
    ```

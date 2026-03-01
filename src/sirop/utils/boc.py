@@ -178,6 +178,67 @@ def prefetch_rates(
     return len(rates)
 
 
+def fill_rate_gaps(
+    conn: sqlite3.Connection,
+    currency_pair: str,
+    start_date: date,
+    end_date: date,
+) -> int:
+    """Fill weekend/holiday gaps in the boc_rates cache for a date range.
+
+    ``prefetch_rates`` writes only the business-day rates returned by the BoC
+    API.  Weekend and holiday dates have no entry in ``boc_rates``.  When
+    ``get_rate`` is called for those dates it falls back day-by-day and, on
+    each cache miss, makes a fresh API call — which can fail on network errors
+    even though the bulk prefetch already proved no BoC observation exists.
+
+    This function walks the range and, for any date with no cached rate,
+    stores the most recent prior known rate under that date.  All reads and
+    writes are cache-only — no network calls are made.
+
+    Call immediately after a successful ``prefetch_rates`` on the same range.
+
+    Parameters
+    ----------
+    conn:
+        Open SQLite connection to the active ``.sirop`` batch file.
+    currency_pair:
+        BoC series suffix, e.g. ``"USDCAD"``.
+    start_date:
+        First date of the range (inclusive).
+    end_date:
+        Last date of the range (inclusive).
+
+    Returns
+    -------
+    int
+        Number of gap dates filled.
+    """
+    pair_upper = currency_pair.upper()
+    filled = 0
+    last_known: Decimal | None = None
+    current = start_date
+
+    while current <= end_date:
+        cached = _read_cached(conn, pair_upper, current)
+        if cached is not None:
+            last_known = cached
+        elif last_known is not None:
+            _write_cache(conn, pair_upper, current, last_known)
+            filled += 1
+        current += timedelta(days=1)
+
+    if filled:
+        logger.debug(
+            "boc: filled %d gap date(s) for %s (%s to %s)",
+            filled,
+            pair_upper,
+            start_date,
+            end_date,
+        )
+    return filled
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------

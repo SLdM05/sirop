@@ -6,30 +6,41 @@ without touching Python source.
 
 Usage
 -----
-from sirop.utils.messages import emit
+from sirop.utils.messages import emit, spinner
 from sirop.models.messages import MessageCode
 
 emit(MessageCode.TAP_SUCCESS, count=42, filename="export.csv", fmt="Shakepay",
      batch="my2025tax", skip_note="")
 
+with spinner("Reading export.csv…"):
+    rows = importer.parse(path)
+
 Output format by category
 -------------------------
-  error   → "error [E001]: text"   to stderr  (code always shown)
-  warning → "warning [W001]: text" to stderr  (code always shown)
+  error   → "error [E001]: text"   to stderr  (code always shown, bold red)
+  warning → "warning [W001]: text" to stderr  (code always shown, bold yellow)
   output  → "text"                 to stdout  (no prefix, no code)
-  fluff   → "text"                 to stdout  (no prefix, no code)
+  fluff   → "text"                 to stdout  (no prefix, no code, dimmed)
 """
 
 from __future__ import annotations
 
-import sys
+from contextlib import contextmanager
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NotRequired, TypedDict
 
 import yaml
+from rich.text import Text
+
+from sirop.utils.console import err as _err
+from sirop.utils.console import out as _out
 
 if TYPE_CHECKING:
+    from collections.abc import Generator
+
+    from rich.status import Status
+
     from sirop.models.messages import MessageCode
 
 _CATALOG_PATH = Path("config/messages.yaml")
@@ -58,8 +69,9 @@ def emit(code: MessageCode, **kwargs: object) -> None:
     """Look up *code* in the message catalog, format with *kwargs*, and print.
 
     Routing by category:
-      error / warning → stderr, prefixed with level and code identifier
-      output / fluff  → stdout, message text only
+      error / warning → stderr, prefixed with level and code (bold coloured)
+      output          → stdout, message text only
+      fluff           → stdout, message text dimmed
 
     Parameters
     ----------
@@ -86,20 +98,59 @@ def emit(code: MessageCode, **kwargs: object) -> None:
             f"sirop bug: message {key!r} is missing required kwarg {exc}. "
             "Check the emit() call site."
         ) from None
+
     category = entry["category"]
     ref = entry.get("code", "")
 
     match category:
         case "error":
-            code_part = f" [{ref}]" if ref else ""
-            print(f"error{code_part}: {text}", file=sys.stderr)
+            t = Text()
+            t.append(f"error [{ref}]: " if ref else "error: ", style="bold red")
+            t.append(text)
+            _err.print(t)
         case "warning":
-            code_part = f" [{ref}]" if ref else ""
-            print(f"warning{code_part}: {text}", file=sys.stderr)
-        case "output" | "fluff":
-            print(text)
+            t = Text()
+            t.append(f"warning [{ref}]: " if ref else "warning: ", style="bold yellow")
+            t.append(text)
+            _err.print(t)
+        case "output":
+            _out.print(text, markup=False)
+        case "fluff":
+            _out.print(text, style="dim", markup=False)
         case _:
             raise RuntimeError(
                 f"sirop bug: unknown message category {category!r} for code {key!r}. "
                 "Valid categories: error, warning, output, fluff."
             )
+
+
+@contextmanager
+def spinner(text: str) -> Generator[Status, None, None]:
+    """Context manager showing a transient spinner for long-running operations.
+
+    Yields the Rich ``Status`` object so callers can update the displayed text
+    mid-operation (e.g. to show a progress counter).  The spinner clears itself
+    on exit. Any ``emit()`` calls made inside the context are printed above the
+    spinner line and remain visible.
+
+    Parameters
+    ----------
+    text:
+        Short description displayed next to the spinner dots.
+
+    Example
+    -------
+    Basic use — no update needed::
+
+        with spinner("Normalizing transactions…"):
+            result = do_work()
+
+    With live counter::
+
+        with spinner(f"Fetching prices… [0/{total}]") as status:
+            for i, item in enumerate(items, 1):
+                fetch(item)
+                status.update(f"Fetching prices… [{i}/{total}]")
+    """
+    with _err.status(text, spinner="dots") as status:
+        yield status

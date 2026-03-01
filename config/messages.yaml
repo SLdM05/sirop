@@ -210,12 +210,17 @@ messages:
   boil.transfer_match.unmatched_withdrawal:
     category: warning
     code: W002
-    text: "Unmatched withdrawal of {amount} {asset} on {date} — treated as sell. Use 'sirop stir' to link wallet transfers."
+    text: "Unmatched withdrawal of {amount} {asset} on {date} — treated as sell."
 
   boil.transfer_match.unmatched_deposit:
     category: warning
     code: W003
-    text: "Unmatched deposit of {amount} {asset} on {date} — treated as buy. Use 'sirop stir' to link wallet transfers."
+    text: "Unmatched deposit of {amount} {asset} on {date} — treated as buy."
+
+  boil.warning.future_year_dispositions:
+    category: warning
+    code: W004
+    text: "Skipped {count} disposition(s) dated after {tax_year}-12-31 (future tax year). These are excluded from the {tax_year} report. Future-year acquisitions within the 30-day superficial loss window are still used for loss detection."
 
   boil.summary.complete:
     category: output
@@ -224,6 +229,10 @@ messages:
   boil.summary.holdings_header:
     category: output
     text: "\n  Year-end holdings (cost basis):"
+
+  boil.summary.stir_hint:
+    category: output
+    text: "  Use 'sirop stir' to link wallet transfers — {w} unmatched withdrawal(s) and {d} unmatched deposit(s)."
 
   # ── stir ──────────────────────────────────────────────────────────────────
 
