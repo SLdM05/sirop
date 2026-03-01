@@ -220,7 +220,7 @@ messages:
   boil.warning.future_year_dispositions:
     category: warning
     code: W004
-    text: "Skipped {count} disposition(s) dated after {tax_year}-12-31 (future tax year). These are excluded from the {tax_year} report. Future-year acquisitions within the 30-day superficial loss window are still used for loss detection."
+    text: "{count} disposal(s) dated after {tax_year}-12-31 — excluded from the {tax_year} report. Future-year acquisitions within the 30-day superficial loss window are still used for loss detection."
 
   boil.summary.complete:
     category: output

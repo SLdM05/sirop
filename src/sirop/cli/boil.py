@@ -314,6 +314,7 @@ def _run_verify(conn: object) -> None:
 def _run_transfer_match(conn: object) -> None:
     assert isinstance(conn, sqlite3.Connection)
 
+    tax_year = repo.read_tax_year(conn)
     logger.debug("Tracing the flow...")
     txs = repo.read_transactions(conn)
     logger.debug("classifying %d transaction(s)", len(txs))
@@ -328,7 +329,7 @@ def _run_transfer_match(conn: object) -> None:
         )
 
     with spinner("Classifying events…"):
-        events, income_evts = matcher.match_transfers(txs, overrides=overrides)
+        events, income_evts = matcher.match_transfers(txs, overrides=overrides, tax_year=tax_year)
 
     # The matcher uses transactions.id as vtx_id; patch to verified_transactions.id
     # before writing, since classified_events.vtx_id and income_events.vtx_id both
@@ -349,35 +350,39 @@ def _run_transfer_match(conn: object) -> None:
         len(income_evts),
     )
 
+    # Emit a single consolidated warning if future-year disposals were found.
+    # Per-event W002 is suppressed by the matcher for future-year events.
+    future_sell_count = sum(
+        1 for e in events if e.event_type == "sell" and e.timestamp.year > tax_year
+    )
+    if future_sell_count:
+        emit(
+            MessageCode.BOIL_WARNING_FUTURE_YEAR_DISPOSITIONS,
+            count=future_sell_count,
+            tax_year=tax_year,
+        )
+
 
 def _run_acb(conn: object, tax_rules: TaxRules) -> None:
     assert isinstance(conn, sqlite3.Connection)
 
-    logger.debug("Boiling the sap...")
-    events = repo.read_classified_events(conn)
-    logger.debug("running ACB engine on %d taxable event(s)", len(events))
+    tax_year = repo.read_tax_year(conn)
+    all_events = repo.read_classified_events(conn)
+    # Feed only current-year events to the ACB engine.
+    # Future-year acquisitions remain in classified_events for SL detection.
+    events = [e for e in all_events if e.timestamp.year <= tax_year]
+    logger.debug(
+        "running ACB engine on %d taxable event(s) (%d total, %d future-year excluded)",
+        len(events),
+        len(all_events),
+        len(all_events) - len(events),
+    )
 
     with spinner("Running ACB engine…"):
         disps, states = acb_engine.run(events, tax_rules)
 
-    # Drop future-year dispositions — they don't belong in the tax year report.
-    # Future-year acquisitions remain in classified_events so the superficial loss
-    # engine can still detect Dec loss + Jan repurchase cross-year cases.
-    tax_year = repo.read_tax_year(conn)
-    paired = [(d, s) for d, s in zip(disps, states, strict=False) if d.timestamp.year <= tax_year]
-    skipped = len(disps) - len(paired)
-    if skipped:
-        emit(
-            MessageCode.BOIL_WARNING_FUTURE_YEAR_DISPOSITIONS,
-            count=skipped,
-            tax_year=tax_year,
-        )
-    if paired:
-        f_disps, f_states = map(list, zip(*paired, strict=False))
-    else:
-        f_disps, f_states = [], []
-    disps = repo.write_dispositions(conn, f_disps, f_states)
-    logger.debug("wrote %d disposition(s) (%d future-year skipped)", len(disps), skipped)
+    disps = repo.write_dispositions(conn, disps, states)
+    logger.debug("wrote %d disposition(s)", len(disps))
 
 
 def _run_superficial_loss(conn: object, tax_rules: TaxRules) -> None:

@@ -184,6 +184,7 @@ def _run_stir(
             return _apply_clear(conn, clear)
 
         # Display mode — shared by --list and interactive.
+        tax_year = repo.read_tax_year(conn)
         txs = repo.read_transactions(conn)
         wallets = repo.read_wallets(conn)
         overrides = repo.read_transfer_overrides(conn)
@@ -192,8 +193,8 @@ def _run_stir(
             _print_state(batch_name, txs, state, overrides, wallets)
             return 0
 
-        _print_unmatched(batch_name, txs, state, wallets)
-        return _interactive_loop(conn, txs, wallets, overrides, state, batch_name)
+        _print_unmatched(batch_name, txs, state, wallets, tax_year)
+        return _interactive_loop(conn, txs, wallets, overrides, state, batch_name, tax_year)
 
     finally:
         conn.close()
@@ -685,36 +686,47 @@ def _print_unmatched(
     txs: list[Transaction],
     state: _MatchState,
     wallets: list[Wallet] | None = None,
+    tax_year: int | None = None,
 ) -> None:
-    """Print only unmatched withdrawals and deposits inline (no pager)."""
+    """Print only unmatched withdrawals and deposits inline (no pager).
+
+    When *tax_year* is supplied, future-year unmatched items are hidden from
+    the display — they are silently handled by the boil pipeline.
+    """
     _wallets = wallets or []
     resolved = (
         len(state.auto_pairs) * 2 + len(state.forced_link_pairs) * 2 + len(state.external_markers)
     )
+    unmatched_out = [
+        t for t in state.unmatched_out if tax_year is None or t.timestamp.year <= tax_year
+    ]
+    unmatched_in = [
+        t for t in state.unmatched_in if tax_year is None or t.timestamp.year <= tax_year
+    ]
     out.print()
     out.print(
         f"Batch: [bold]{batch_name}[/bold]  "
         f"[dim]{len(txs)} transactions · "
         f"{resolved} resolved · "
-        f"{len(state.unmatched_out)} unmatched withdrawals · "
-        f"{len(state.unmatched_in)} unmatched deposits[/dim]"
+        f"{len(unmatched_out)} unmatched withdrawals · "
+        f"{len(unmatched_in)} unmatched deposits[/dim]"
     )
     out.print()
     out.rule(
-        f"Unmatched withdrawals — will be treated as sells ({len(state.unmatched_out)})",
+        f"Unmatched withdrawals — will be treated as sells ({len(unmatched_out)})",
         style="red dim",
     )
-    if state.unmatched_out:
-        out.print(_tx_table(state.unmatched_out, _wallets))
+    if unmatched_out:
+        out.print(_tx_table(unmatched_out, _wallets))
     else:
         out.print("  [dim](none — all withdrawals resolved)[/dim]")
     out.print()
     out.rule(
-        f"Unmatched deposits — will be treated as buys ({len(state.unmatched_in)})",
+        f"Unmatched deposits — will be treated as buys ({len(unmatched_in)})",
         style="green dim",
     )
-    if state.unmatched_in:
-        out.print(_tx_table(state.unmatched_in, _wallets))
+    if unmatched_in:
+        out.print(_tx_table(unmatched_in, _wallets))
     else:
         out.print("  [dim](none — all deposits resolved)[/dim]")
     out.print()
@@ -752,6 +764,7 @@ def _cmd_link(  # noqa: PLR0911 PLR0913
     batch_name: str,
     txs: list[Transaction],
     wallets: list[Wallet],
+    tax_year: int | None = None,
 ) -> tuple[list[TransferOverride], _MatchState] | None:
     """Handle the ``link`` sub-command. Returns updated (overrides, state) or None on error."""
     if len(parts) != _TWO_ARG_PARTS:
@@ -791,7 +804,7 @@ def _cmd_link(  # noqa: PLR0911 PLR0913
     emit(MessageCode.STIR_LINK_APPLIED, id_a=id_a, id_b=id_b, ov_id=ov.id)
     overrides = repo.read_transfer_overrides(conn)
     state = _build_state(txs, overrides)
-    _print_unmatched(batch_name, txs, state, wallets)
+    _print_unmatched(batch_name, txs, state, wallets, tax_year)
     return overrides, state
 
 
@@ -802,6 +815,7 @@ def _cmd_unlink(  # noqa: PLR0913
     batch_name: str,
     txs: list[Transaction],
     wallets: list[Wallet],
+    tax_year: int | None = None,
 ) -> tuple[list[TransferOverride], _MatchState] | None:
     """Handle the ``unlink`` sub-command. Returns updated (overrides, state) or None on error."""
     if len(parts) != _TWO_ARG_PARTS:
@@ -823,7 +837,7 @@ def _cmd_unlink(  # noqa: PLR0913
     emit(MessageCode.STIR_UNLINK_APPLIED, id_a=id_a, id_b=id_b, ov_id=ov.id)
     overrides = repo.read_transfer_overrides(conn)
     state = _build_state(txs, overrides)
-    _print_unmatched(batch_name, txs, state, wallets)
+    _print_unmatched(batch_name, txs, state, wallets, tax_year)
     return overrides, state
 
 
@@ -834,6 +848,7 @@ def _cmd_clear(  # noqa: PLR0913
     batch_name: str,
     txs: list[Transaction],
     wallets: list[Wallet],
+    tax_year: int | None = None,
 ) -> tuple[list[TransferOverride], _MatchState] | None:
     """Handle the ``clear`` sub-command. Returns updated (overrides, state) or None on error."""
     if len(parts) != _ONE_ARG_PARTS:
@@ -851,7 +866,7 @@ def _cmd_clear(  # noqa: PLR0913
     emit(MessageCode.STIR_CLEAR_APPLIED, tx_id=tx_id, count=count)
     overrides = repo.read_transfer_overrides(conn)
     state = _build_state(txs, overrides)
-    _print_unmatched(batch_name, txs, state, wallets)
+    _print_unmatched(batch_name, txs, state, wallets, tax_year)
     return overrides, state
 
 
@@ -862,6 +877,7 @@ def _cmd_external(  # noqa: PLR0913
     batch_name: str,
     txs: list[Transaction],
     wallets: list[Wallet],
+    tax_year: int | None = None,
 ) -> tuple[list[TransferOverride], _MatchState] | None:
     """Handle the ``external <id>`` sub-command.
 
@@ -911,7 +927,7 @@ def _cmd_external(  # noqa: PLR0913
     out.print("  Run 'boil --from transfer_match' to apply.")
     overrides = repo.read_transfer_overrides(conn)
     state = _build_state(txs, overrides)
-    _print_unmatched(batch_name, txs, state, wallets)
+    _print_unmatched(batch_name, txs, state, wallets, tax_year)
     return overrides, state
 
 
@@ -922,6 +938,7 @@ def _cmd_transfer(  # noqa: PLR0911 PLR0912 PLR0915 PLR0913
     batch_name: str,
     txs: list[Transaction],
     wallets: list[Wallet],
+    tax_year: int | None = None,
 ) -> tuple[list[TransferOverride], _MatchState] | None:
     """Guided transfer wizard.
 
@@ -1005,7 +1022,7 @@ def _cmd_transfer(  # noqa: PLR0911 PLR0912 PLR0915 PLR0913
         out.print("  Run 'boil --from transfer_match' to apply.")
         overrides = repo.read_transfer_overrides(conn)
         state = _build_state(txs, overrides)
-        _print_unmatched(batch_name, txs, state, wallets)
+        _print_unmatched(batch_name, txs, state, wallets, tax_year)
         return overrides, state
 
     if not wallet_name:
@@ -1113,7 +1130,7 @@ def _cmd_transfer(  # noqa: PLR0911 PLR0912 PLR0915 PLR0913
     emit(MessageCode.STIR_LINK_APPLIED, id_a=tx.id, id_b=counterpart.id, ov_id=ov.id)
     overrides = repo.read_transfer_overrides(conn)
     state = _build_state(txs, overrides)
-    _print_unmatched(batch_name, txs, state, wallets)
+    _print_unmatched(batch_name, txs, state, wallets, tax_year)
     return overrides, state
 
 
@@ -1124,6 +1141,7 @@ def _interactive_loop(  # noqa: PLR0912 PLR0913 PLR0915
     overrides: list[TransferOverride],
     state: _MatchState,
     batch_name: str,
+    tax_year: int | None = None,
 ) -> int:
     """Prompt-based REPL for reviewing and editing transfer assignments."""
     tx_ids: set[int] = {t.id for t in txs}
@@ -1154,7 +1172,7 @@ def _interactive_loop(  # noqa: PLR0912 PLR0913 PLR0915
             wallets = repo.read_wallets(conn)
             overrides = repo.read_transfer_overrides(conn)
             state = _build_state(txs, overrides)
-            _print_unmatched(batch_name, txs, state, wallets)
+            _print_unmatched(batch_name, txs, state, wallets, tax_year)
             continue
 
         if cmd in {"view", "v"}:
@@ -1174,32 +1192,32 @@ def _interactive_loop(  # noqa: PLR0912 PLR0913 PLR0915
                     if total > 1:
                         out.print(f"\n  — Transfer {idx} of {total} (id: {raw_id}) —")
                     result = _cmd_transfer(
-                        conn, ["transfer", raw_id], tx_ids, batch_name, txs, wallets
+                        conn, ["transfer", raw_id], tx_ids, batch_name, txs, wallets, tax_year
                     )
                     if result is not None:
                         overrides, state = result
             continue
 
         if cmd == "external":
-            result = _cmd_external(conn, parts, tx_ids, batch_name, txs, wallets)
+            result = _cmd_external(conn, parts, tx_ids, batch_name, txs, wallets, tax_year)
             if result is not None:
                 overrides, state = result
             continue
 
         if cmd == "link":
-            result = _cmd_link(conn, parts, tx_ids, batch_name, txs, wallets)
+            result = _cmd_link(conn, parts, tx_ids, batch_name, txs, wallets, tax_year)
             if result is not None:
                 overrides, state = result
             continue
 
         if cmd == "unlink":
-            result = _cmd_unlink(conn, parts, tx_ids, batch_name, txs, wallets)
+            result = _cmd_unlink(conn, parts, tx_ids, batch_name, txs, wallets, tax_year)
             if result is not None:
                 overrides, state = result
             continue
 
         if cmd == "clear":
-            result = _cmd_clear(conn, parts, tx_ids, batch_name, txs, wallets)
+            result = _cmd_clear(conn, parts, tx_ids, batch_name, txs, wallets, tax_year)
             if result is not None:
                 overrides, state = result
             continue
