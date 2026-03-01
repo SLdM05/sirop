@@ -1,0 +1,19 @@
+# Normalize line endings to LF on commit
+* text=auto eol=lf
+
+# Explicit text files
+*.py   text eol=lf
+*.yaml text eol=lf
+*.toml text eol=lf
+*.md   text eol=lf
+*.txt  text eol=lf
+*.csv  text eol=lf
+*.json text eol=lf
+
+# Suppress diff and prevent line-ending mangling on binary files
+*.sirop  binary
+*.db     binary
+*.sqlite binary
+
+# Lock file: treat as text but suppress noisy diffs
+poetry.lock text eol=lf -diff

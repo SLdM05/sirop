@@ -1,0 +1,33 @@
+# Supported currencies for sirop rate lookups.
+#
+# fiat: currencies that have Bank of Canada Valet API series codes.
+#   boc_series: the BoC series identifier (e.g. FXUSDCAD for USD→CAD).
+#
+# crypto: assets supported for historical price lookups.
+#   display_name:      human-readable name used in reports.
+#   coingecko_id:      CoinGecko coin ID for the public history endpoint.
+#   mempool_supported: true if mempool.space historical-price is available
+#                      (BTC only). When true, mempool is tried first and
+#                      CoinGecko is used as a fallback.
+
+fiat:
+  USD:
+    boc_series: FXUSDCAD
+
+crypto:
+  BTC:
+    display_name: "Bitcoin"
+    coingecko_id: "bitcoin"
+    mempool_supported: true
+  ETH:
+    display_name: "Ethereum"
+    coingecko_id: "ethereum"
+    mempool_supported: false
+  SOL:
+    display_name: "Solana"
+    coingecko_id: "solana"
+    mempool_supported: false
+  RPL:
+    display_name: "Rocket Pool"
+    coingecko_id: "rocket-pool"
+    mempool_supported: false

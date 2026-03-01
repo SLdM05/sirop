@@ -203,15 +203,25 @@ def test_btc_buy_has_positive_amount(transactions: list[RawTransaction]) -> None
 
 
 def test_btc_buy_has_fiat_value(transactions: list[RawTransaction]) -> None:
+    """TRADE-originated buys always carry a fiat value from the matching CAD row.
+    Dust conversion buys have no fiat_value at import time — BoC rate is applied
+    by the normalizer."""
     for tx in _find(transactions, "buy", "BTC"):
-        assert tx.fiat_value is not None
-        assert tx.fiat_value > Decimal("0")
-        assert tx.fiat_currency == "CAD"
+        if tx.raw_type == "dust / in":
+            assert tx.fiat_value is None
+        else:
+            assert tx.fiat_value is not None
+            assert tx.fiat_value > Decimal("0")
+            assert tx.fiat_currency == "CAD"
 
 
 def test_btc_buy_rate_is_consistent(transactions: list[RawTransaction]) -> None:
-    """rate == fiat_value / amount for every BTC buy."""
+    """rate == fiat_value / amount for every TRADE-originated BTC buy.
+    Dust conversion buys have no embedded rate; the normalizer applies the BoC rate."""
     for tx in _find(transactions, "buy", "BTC"):
+        if tx.raw_type == "dust / in":
+            assert tx.rate is None
+            continue
         assert tx.rate is not None
         assert tx.fiat_value is not None
         expected_rate = tx.fiat_value / tx.amount
@@ -339,11 +349,11 @@ def test_staking_reward_fields(transactions: list[RawTransaction]) -> None:
 
 
 def test_dust_conversions_present(transactions: list[RawTransaction]) -> None:
-    assert len(_find(transactions, "other")) > 0
+    assert len(_find(transactions, "buy")) > 0
 
 
 def test_dust_received_asset_is_positive(transactions: list[RawTransaction]) -> None:
-    for tx in _find(transactions, "other"):
+    for tx in _find(transactions, "buy"):
         assert tx.amount > Decimal("0")
 
 

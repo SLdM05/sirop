@@ -17,9 +17,11 @@ Usage
 
 from __future__ import annotations
 
+import dataclasses
 import sqlite3
 from decimal import Decimal
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import yaml
 
@@ -33,8 +35,15 @@ from sirop.engine.acb import TaxRules
 from sirop.models.messages import MessageCode
 from sirop.normalizer import normalizer
 from sirop.transfer_match import matcher
+from sirop.utils.boc import BoCRateError, fill_rate_gaps, prefetch_rates
+from sirop.utils.crypto_prices import prefetch_crypto_prices, prefetch_crypto_prices_by_range
 from sirop.utils.logging import StageContext, get_logger
-from sirop.utils.messages import emit
+from sirop.utils.messages import emit, spinner
+
+if TYPE_CHECKING:
+    from datetime import date
+
+    from sirop.models.raw import RawTransaction
 
 logger = get_logger(__name__)
 
@@ -102,11 +111,12 @@ def _run_boil(from_stage: str | None, settings: Settings) -> int:
 
         tax_rules = _load_tax_rules()
 
-        # Invalidate stages that will be re-run.
+        # Invalidate stages that will be re-run and clear their stale output.
         if from_stage is not None:
             _validate_from_stage(from_stage)
             stages_to_invalidate = _stages_from(from_stage)
             repo.set_stages_invalidated(conn, list(stages_to_invalidate))
+            repo.clear_stages_output(conn, stages_to_invalidate)
 
         # Execute each stage in order.
         for stage in _BOIL_STAGES:
@@ -159,73 +169,233 @@ def _execute_stage(
 def _run_normalize(conn: object) -> None:
     assert isinstance(conn, sqlite3.Connection)
 
-    logger.info("Checking sap levels...")
+    logger.debug("Checking sap levels...")
     raw_txs = repo.read_raw_transactions(conn)
     if not raw_txs:
         raise _BoilError(MessageCode.BOIL_ERROR_NO_RAW_TRANSACTIONS)
 
-    logger.info("normalize: processing %d raw transaction(s)", len(raw_txs))
-    txs = normalizer.normalize(raw_txs, conn)
+    boc_attributed = _prefetch_boc_rates(conn, raw_txs)
+    _prefetch_crypto_prices_bulk(conn, raw_txs, boc_already_attributed=boc_attributed)
+
+    logger.debug("processing %d raw transaction(s)", len(raw_txs))
+    with spinner("Normalizing transactions…"):
+        txs = normalizer.normalize(raw_txs, conn)
     txs = repo.write_transactions(conn, txs)
-    logger.info("normalize: wrote %d normalized transaction(s)", len(txs))
+    logger.debug("wrote %d normalized transaction(s)", len(txs))
+
+    zero_count = sum(
+        1
+        for tx in txs
+        if tx.cad_value == 0
+        and tx.tx_type.value
+        not in {
+            "deposit",
+            "withdrawal",
+            "transfer_in",
+            "transfer_out",
+            "fiat_deposit",
+            "fiat_withdrawal",
+        }
+    )
+    if zero_count:
+        emit(MessageCode.BOIL_NORMALIZE_ZERO_CAD_WARNING, count=zero_count)
+
+
+def _prefetch_boc_rates(conn: object, raw_txs: list[RawTransaction]) -> bool:
+    """Prefetch Bank of Canada USDCAD rates for the full date span of all transactions.
+
+    Makes a single range HTTP call covering the entire batch date range instead
+    of one-per-transaction, then caches all results so the normalizer and the
+    crypto price converter never touch the network for BoC rates.
+
+    The full range is always prefetched (not just USD-fiat dates) because
+    get_crypto_price_cad() also calls get_rate() internally to convert USD
+    crypto prices to CAD — even for CAD-only batches.
+
+    Returns True if the BoC attribution message was emitted (so the caller can
+    avoid a duplicate attribution if crypto prices also use BoC).
+    """
+    assert isinstance(conn, sqlite3.Connection)
+
+    if not raw_txs:
+        return False
+
+    min_date = min(raw.timestamp.date() for raw in raw_txs)
+    max_date = max(raw.timestamp.date() for raw in raw_txs)
+    day_count = (max_date - min_date).days + 1
+    emit(MessageCode.BOIL_NORMALIZE_PREFETCH_BOC, count=day_count)
+    try:
+        with spinner("Fetching Bank of Canada rates…"):
+            prefetch_rates(conn, "USDCAD", min_date, max_date)
+        fill_rate_gaps(conn, "USDCAD", min_date, max_date)
+        emit(MessageCode.BOIL_NORMALIZE_BOC_ATTRIBUTION)
+        return True
+    except BoCRateError as exc:
+        logger.warning("BoC prefetch failed — %s. Will retry per-transaction.", exc)
+        return False
+
+
+def _prefetch_crypto_prices_bulk(
+    conn: object,
+    raw_txs: list[RawTransaction],
+    *,
+    boc_already_attributed: bool = False,
+) -> None:
+    """Prefetch crypto CAD prices for all no-fiat transactions.
+
+    Strategy (two passes):
+    1. Range pass — one CoinGecko ``/market_chart/range`` call per unique
+       asset covers the full date span.  O(N_assets) HTTP calls instead of
+       O(N_dates x N_assets).
+    2. Per-date fallback — handles any dates the range response did not cover
+       (CoinGecko gaps, very recent dates, unsupported assets).  Mempool.space
+       is preferred for BTC in this pass.
+
+    Results are cached in SQLite so the normalizer never hits the network for
+    these prices.
+
+    Pass boc_already_attributed=True when _prefetch_boc_rates already emitted
+    the BoC attribution line, to avoid printing it twice in the same run.
+    """
+    assert isinstance(conn, sqlite3.Connection)
+
+    pairs: list[tuple[str, date]] = [
+        (raw.asset.upper(), raw.timestamp.date())
+        for raw in raw_txs
+        if raw.fiat_value is None or raw.fiat_currency is None
+    ]
+    # Deduplicate while preserving deterministic order for logging.
+    seen_dedup: set[tuple[str, date]] = set()
+    unique_pairs: list[tuple[str, date]] = []
+    for p in pairs:
+        if p not in seen_dedup:
+            seen_dedup.add(p)
+            unique_pairs.append(p)
+
+    if not unique_pairs:
+        return
+
+    emit(MessageCode.BOIL_NORMALIZE_PREFETCH_CRYPTO, count=len(unique_pairs))
+
+    asset_date_groups: dict[str, list[date]] = {}
+    for asset, d in unique_pairs:
+        asset_date_groups.setdefault(asset, []).append(d)
+
+    total = len(unique_pairs)
+    with spinner(f"Fetching crypto prices… [0/{total}]") as status:
+        # Pass 1: range-based bulk fetch (one CoinGecko call per unique asset).
+        _range_written, range_cg = prefetch_crypto_prices_by_range(conn, asset_date_groups)
+
+        # Pass 2: per-date fallback; callback keeps the spinner counter current.
+        def _progress(done: int, _total: int) -> None:
+            status.update(f"Fetching crypto prices… [{done}/{_total}]")
+
+        _per_total, per_cg, mempool_count = prefetch_crypto_prices(
+            conn, unique_pairs, progress_cb=_progress
+        )
+
+    coingecko_count = range_cg + per_cg
+    if coingecko_count > 0:
+        emit(MessageCode.BOIL_NORMALIZE_COINGECKO_ATTRIBUTION)
+    if mempool_count > 0:
+        emit(MessageCode.BOIL_NORMALIZE_MEMPOOL_ATTRIBUTION)
+    if (coingecko_count > 0 or mempool_count > 0) and not boc_already_attributed:
+        emit(MessageCode.BOIL_NORMALIZE_BOC_ATTRIBUTION)
 
 
 def _run_verify(conn: object) -> None:
     assert isinstance(conn, sqlite3.Connection)
 
-    logger.info("verify: promoting transactions to verified (pass-through — no node)")
+    logger.debug("promoting transactions to verified (pass-through — no node)")
     count = repo.promote_to_verified(conn)
-    logger.info("verify: %d row(s) promoted to verified_transactions", count)
+    logger.debug("%d row(s) promoted to verified_transactions", count)
 
 
 def _run_transfer_match(conn: object) -> None:
     assert isinstance(conn, sqlite3.Connection)
 
-    logger.info("Tracing the flow...")
+    tax_year = repo.read_tax_year(conn)
+    logger.debug("Tracing the flow...")
     txs = repo.read_transactions(conn)
-    logger.info("transfer_match: classifying %d transaction(s)", len(txs))
+    logger.debug("classifying %d transaction(s)", len(txs))
 
     overrides = repo.read_transfer_overrides(conn)
     if overrides:
         logger.info(
-            "transfer_match: applying %d stir override(s) (%d link, %d unlink)",
+            "applying %d stir override(s) (%d link, %d unlink)",
             len(overrides),
             sum(1 for o in overrides if o.action == "link"),
             sum(1 for o in overrides if o.action == "unlink"),
         )
 
-    events, income_evts = matcher.match_transfers(txs, overrides=overrides)
+    with spinner("Classifying events…"):
+        events, income_evts = matcher.match_transfers(txs, overrides=overrides, tax_year=tax_year)
+
+    # The matcher uses transactions.id as vtx_id; patch to verified_transactions.id
+    # before writing, since classified_events.vtx_id and income_events.vtx_id both
+    # FK-reference verified_transactions.id (a separate autoincrement sequence).
+    # On an untouched batch these IDs coincidentally match, but after a --from re-run
+    # the sequences diverge and the FK insert fails without this correction.
+    vtx_id_map = repo.read_verified_tx_id_map(conn)
+    events = [dataclasses.replace(e, vtx_id=vtx_id_map.get(e.vtx_id, e.vtx_id)) for e in events]
+    income_evts = [
+        dataclasses.replace(e, vtx_id=vtx_id_map.get(e.vtx_id, e.vtx_id)) for e in income_evts
+    ]
+
     events = repo.write_classified_events(conn, events)
     income_evts = repo.write_income_events(conn, income_evts)
-    logger.info(
-        "transfer_match: wrote %d classified event(s), %d income event(s)",
+    logger.debug(
+        "wrote %d classified event(s), %d income event(s)",
         len(events),
         len(income_evts),
     )
+
+    # Emit a single consolidated warning if future-year disposals were found.
+    # Per-event W002 is suppressed by the matcher for future-year events.
+    future_sell_count = sum(
+        1 for e in events if e.event_type == "sell" and e.timestamp.year > tax_year
+    )
+    if future_sell_count:
+        emit(
+            MessageCode.BOIL_WARNING_FUTURE_YEAR_DISPOSITIONS,
+            count=future_sell_count,
+            tax_year=tax_year,
+        )
 
 
 def _run_acb(conn: object, tax_rules: TaxRules) -> None:
     assert isinstance(conn, sqlite3.Connection)
 
-    logger.info("Boiling the sap...")
-    events = repo.read_classified_events(conn)
-    logger.info("boil: running ACB engine on %d taxable event(s)", len(events))
+    tax_year = repo.read_tax_year(conn)
+    all_events = repo.read_classified_events(conn)
+    # Feed only current-year events to the ACB engine.
+    # Future-year acquisitions remain in classified_events for SL detection.
+    events = [e for e in all_events if e.timestamp.year <= tax_year]
+    logger.debug(
+        "running ACB engine on %d taxable event(s) (%d total, %d future-year excluded)",
+        len(events),
+        len(all_events),
+        len(all_events) - len(events),
+    )
 
-    disps, states = acb_engine.run(events, tax_rules)
+    with spinner("Running ACB engine…"):
+        disps, states = acb_engine.run(events, tax_rules)
+
     disps = repo.write_dispositions(conn, disps, states)
-    logger.info("boil: wrote %d disposition(s)", len(disps))
+    logger.debug("wrote %d disposition(s)", len(disps))
 
 
 def _run_superficial_loss(conn: object, tax_rules: TaxRules) -> None:
     assert isinstance(conn, sqlite3.Connection)
 
-    logger.info("superficial_loss: scanning for 61-day window violations")
+    logger.debug("scanning for 61-day window violations")
     disps = repo.read_dispositions(conn)
     all_events = repo.read_all_classified_events(conn)
 
-    adjs = sld_engine.run(disps, all_events, tax_rules)
+    with spinner("Detecting superficial losses…"):
+        adjs = sld_engine.run(disps, all_events, tax_rules)
     adjs = repo.write_adjusted_dispositions(conn, adjs)
-    logger.info("superficial_loss: wrote %d adjusted disposition(s)", len(adjs))
+    logger.debug("wrote %d adjusted disposition(s)", len(adjs))
 
 
 def _load_tax_rules() -> TaxRules:
@@ -334,6 +504,30 @@ def _print_summary(conn: object, batch_name: str) -> None:
                 f"   ({per_unit:>12,.2f} CAD/unit)"
             )
 
+    # Superficial losses — show details if any were found.
+    sld_rows = conn.execute(
+        """
+        SELECT asset, timestamp, gain_loss, superficial_loss_denied, allowable_loss
+        FROM dispositions_adjusted
+        WHERE is_superficial_loss = 1
+        ORDER BY timestamp
+        """
+    ).fetchall()
+    if sld_rows:
+        hr = "─" * 68
+        print(f"\n  Superficial losses adjusted ({len(sld_rows)}):")
+        print(f"  {hr}")
+        for r in sld_rows:
+            date_str = r["timestamp"][:10]
+            denied = float(r["superficial_loss_denied"])
+            allow = float(r["allowable_loss"])
+            loss = float(r["gain_loss"])
+            print(
+                f"    {r['asset']:<5}  {date_str}"
+                f"  loss: {loss:>10,.2f} CAD"
+                f"  denied: {denied:>8,.2f}  allowable: {allow:>18.8f} CAD"
+            )
+
     # Pipeline stage statuses.
     print()
     for stage in PIPELINE_STAGES:
@@ -344,3 +538,23 @@ def _print_summary(conn: object, batch_name: str) -> None:
             status = row["status"]
             completed = row["completed_at"] or ""
             print(f"  [{status:>11}]  {stage}  {completed[:10]}")
+
+    # Consolidated stir hint — only shown when unmatched transfers exist.
+    unmatched = conn.execute(
+        """
+        SELECT
+            SUM(CASE WHEN vt.transaction_type = 'withdrawal' THEN 1 ELSE 0 END) AS w,
+            SUM(CASE WHEN vt.transaction_type = 'deposit'    THEN 1 ELSE 0 END) AS d
+        FROM classified_events ce
+        JOIN verified_transactions vt ON ce.vtx_id = vt.id
+        WHERE vt.transaction_type IN ('withdrawal', 'deposit')
+          AND ce.event_type IN ('sell', 'buy')
+        """
+    ).fetchone()
+    if unmatched and (unmatched["w"] or unmatched["d"]):
+        print()
+        emit(
+            MessageCode.BOIL_SUMMARY_STIR_HINT,
+            w=unmatched["w"] or 0,
+            d=unmatched["d"] or 0,
+        )

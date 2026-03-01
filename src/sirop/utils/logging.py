@@ -29,6 +29,8 @@ import sys
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
+from sirop.utils.console import err as _log_err
+
 if TYPE_CHECKING:
     from types import TracebackType
 
@@ -142,6 +144,33 @@ class _SiropFormatter(logging.Formatter):
 
 
 # ──────────────────────────────────────────────────────────────
+# Rich log handler
+# ──────────────────────────────────────────────────────────────
+
+
+class _RichLogHandler(logging.Handler):
+    """Writes log records to a Rich stderr console with dim styling.
+
+    INFO records are dimmed so they read as background context, clearly
+    subordinate to emit() output.  WARNING records get dim bold yellow —
+    visible but less prominent than emit()'s full bold yellow warnings.
+
+    ``markup=False`` is required because ``[sirop]`` in formatted text
+    must not be parsed as Rich markup.
+    """
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            text = self.format(record)
+            if record.levelno >= logging.WARNING:
+                _log_err.print(text, style="bold yellow dim", markup=False)
+            else:
+                _log_err.print(text, style="dim", markup=False)
+        except Exception:
+            self.handleError(record)
+
+
+# ──────────────────────────────────────────────────────────────
 # Public API
 # ──────────────────────────────────────────────────────────────
 
@@ -168,7 +197,10 @@ def configure_logging(*, verbose: bool = False, debug: bool = False) -> None:
     root.setLevel(logging.DEBUG if debug else logging.INFO)
     root.propagate = False
 
-    handler = logging.StreamHandler(sys.stderr)
+    # Debug mode: plain StreamHandler at full brightness so --debug output
+    # is maximally readable. Normal mode: Rich handler with dim styling so
+    # log lines read as subordinate context next to emit() output.
+    handler: logging.Handler = logging.StreamHandler(sys.stderr) if debug else _RichLogHandler()
     handler.setLevel(logging.DEBUG if debug else logging.INFO)
     handler.setFormatter(_SiropFormatter(debug=debug))
     handler.addFilter(_ContextInjectFilter())

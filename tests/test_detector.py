@@ -21,16 +21,18 @@ CONFIG_DIR = Path(__file__).parent.parent / "config" / "importers"
 NDAX_HEADERS: set[str] = {"ASSET", "ASSET_CLASS", "AMOUNT", "BALANCE", "TYPE", "TX_ID", "DATE"}
 SHAKEPAY_HEADERS: set[str] = {
     "Date",
-    "Transaction Type",
     "Amount Debited",
-    "Debit Currency",
+    "Asset Debited",
     "Amount Credited",
-    "Credit Currency",
-    "Buy / Sell Rate",
+    "Asset Credited",
+    "Market Value",
+    "Market Value Currency",
+    "Book Cost",
+    "Book Cost Currency",
+    "Type",
     "Spot Rate",
-    "Direction",
-    "Source / Destination",
-    "Blockchain Transaction ID",
+    "Buy / Sell Rate",
+    "Description",
 }
 UNKNOWN_HEADERS: set[str] = {"OrderID", "Quantity", "Symbol", "Side", "Price", "Timestamp"}
 

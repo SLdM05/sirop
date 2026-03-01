@@ -53,8 +53,18 @@ class MessageCode(StrEnum):
     BOIL_ERROR_NO_TAX_RULES = "boil.error.no_tax_rules"
     BOIL_ERROR_STAGE_RUNNING = "boil.error.stage_running"
     BOIL_ERROR_UNKNOWN_STAGE = "boil.error.unknown_stage"
+    BOIL_NORMALIZE_PREFETCH_BOC = "boil.normalize.prefetch_boc"
+    BOIL_NORMALIZE_PREFETCH_CRYPTO = "boil.normalize.prefetch_crypto"
+    BOIL_NORMALIZE_COINGECKO_ATTRIBUTION = "boil.normalize.coingecko_attribution"
+    BOIL_NORMALIZE_BOC_ATTRIBUTION = "boil.normalize.boc_attribution"
+    BOIL_NORMALIZE_MEMPOOL_ATTRIBUTION = "boil.normalize.mempool_attribution"
+    BOIL_NORMALIZE_ZERO_CAD_WARNING = "boil.normalize.zero_cad_warning"
+    BOIL_TRANSFER_MATCH_UNMATCHED_WITHDRAWAL = "boil.transfer_match.unmatched_withdrawal"
+    BOIL_TRANSFER_MATCH_UNMATCHED_DEPOSIT = "boil.transfer_match.unmatched_deposit"
+    BOIL_WARNING_FUTURE_YEAR_DISPOSITIONS = "boil.warning.future_year_dispositions"
     BOIL_SUMMARY_COMPLETE = "boil.summary.complete"
     BOIL_SUMMARY_HOLDINGS_HEADER = "boil.summary.holdings_header"
+    BOIL_SUMMARY_STIR_HINT = "boil.summary.stir_hint"
 
     # ── stir ──────────────────────────────────────────────────────────────────
     STIR_ERROR_NOT_NORMALIZED = "stir.error.not_normalized"

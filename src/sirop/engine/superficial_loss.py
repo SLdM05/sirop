@@ -86,16 +86,15 @@ def run(
         if adj.is_superficial_loss:
             sld_count += 1
             logger.warning(
-                "superficial_loss: %s loss of %s on %s is superficial — denied %s, allowable %s",
+                "%s on %s is superficial — denied %s CAD, allowable %s CAD",
                 disp.asset,
-                disp.gain_loss_cad,
                 disp.timestamp.date(),
                 adj.superficial_loss_denied_cad,
                 adj.allowable_loss_cad,
             )
 
     logger.info(
-        "superficial_loss: %d disposition(s) examined, %d superficial loss(es) found",
+        "%d disposition(s) examined, %d superficial loss(es) found",
         len(dispositions),
         sld_count,
     )

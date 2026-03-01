@@ -144,8 +144,8 @@ def test_cad_debit_btc_credit_becomes_buy(transactions: list[RawTransaction]) ->
 
     Fixture row: 250 CAD debited, 0.00405049 BTC credited.
     """
-    buys = _find(transactions, "buy", "BTC")
-    assert len(buys) == 1, f"Expected 1 BTC buy, got {len(buys)}"
+    buys = [t for t in _find(transactions, "buy", "BTC") if t.raw_type == "purchase/sale"]
+    assert len(buys) == 1, f"Expected 1 purchase/sale BTC buy, got {len(buys)}"
 
 
 def test_btc_debit_cad_credit_becomes_sell(transactions: list[RawTransaction]) -> None:
@@ -286,11 +286,13 @@ def test_fiat_withdrawal_fields(transactions: list[RawTransaction]) -> None:
 
 
 def test_withdrawal_present(transactions: list[RawTransaction]) -> None:
-    assert len(_find(transactions, "withdrawal", "BTC")) == 1
+    # crypto cashout + Send (2025 type)
+    assert len(_find(transactions, "withdrawal", "BTC")) == 2  # noqa: PLR2004
 
 
 def test_withdrawal_fields(transactions: list[RawTransaction]) -> None:
-    tx = _find(transactions, "withdrawal", "BTC")[0]
+    txs = _find(transactions, "withdrawal", "BTC")
+    tx = next(t for t in txs if t.raw_type == "crypto cashout")
     assert tx.asset == "BTC"
     assert tx.amount == Decimal("0.00405049")
     assert tx.fiat_value is None
@@ -299,8 +301,18 @@ def test_withdrawal_fields(transactions: list[RawTransaction]) -> None:
 
 def test_withdrawal_txid(transactions: list[RawTransaction]) -> None:
     """Crypto cashout rows carry the on-chain txid for node verification."""
-    tx = _find(transactions, "withdrawal", "BTC")[0]
+    txs = _find(transactions, "withdrawal", "BTC")
+    tx = next(t for t in txs if t.raw_type == "crypto cashout")
     assert tx.txid == "aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd"
+
+
+def test_send_type_maps_to_withdrawal(transactions: list[RawTransaction]) -> None:
+    """'Send' is the 2025 Shakepay type for crypto sent to an external address."""
+    txs = _find(transactions, "withdrawal", "BTC")
+    tx = next(t for t in txs if t.raw_type == "send")
+    assert tx.asset == "BTC"
+    assert tx.amount == Decimal("0.00103685")
+    assert tx.fiat_value is None
 
 
 # ---------------------------------------------------------------------------
@@ -321,22 +333,51 @@ def test_deposit_fields(transactions: list[RawTransaction]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Income — shakingsats
+# Buy (2025 credit-only purchase type)
+# ---------------------------------------------------------------------------
+
+
+def test_buy_2025_present(transactions: list[RawTransaction]) -> None:
+    """'Buy' rows emit a 'buy' transaction; normalizer will supply CAD value via BoC/CoinGecko."""
+    txs = [t for t in transactions if t.transaction_type == "buy" and t.raw_type == "buy"]
+    assert len(txs) == 1
+
+
+def test_buy_2025_fields(transactions: list[RawTransaction]) -> None:
+    tx = next(t for t in transactions if t.transaction_type == "buy" and t.raw_type == "buy")
+    assert tx.asset == "BTC"
+    assert tx.amount == Decimal("0.00000619")
+    assert tx.fiat_value is None  # normalizer fetches BoC/CoinGecko rate for ACB
+
+
+# ---------------------------------------------------------------------------
+# Income — shakingsats and Reward (2025 type name)
 # ---------------------------------------------------------------------------
 
 
 def test_income_present(transactions: list[RawTransaction]) -> None:
-    assert len(_find(transactions, "income", "BTC")) == 1
+    assert len(_find(transactions, "income", "BTC")) == 2  # noqa: PLR2004
 
 
 def test_income_fields(transactions: list[RawTransaction]) -> None:
     """shakingsats income: BTC credited, no fiat_value (normalizer handles FMV)."""
-    tx = _find(transactions, "income", "BTC")[0]
+    txs = _find(transactions, "income", "BTC")
+    tx = next(t for t in txs if t.raw_type == "shakingsats")
     assert tx.asset == "BTC"
     assert tx.amount == Decimal("0.00001500")
     assert tx.fiat_value is None  # normalizer fetches BoC rate
     assert tx.fiat_currency is None
     assert tx.fee_amount is None
+    assert tx.txid is None
+
+
+def test_reward_type_maps_to_income(transactions: list[RawTransaction]) -> None:
+    """'Reward' is the 2025 Shakepay type name for what was 'shakingsats'."""
+    txs = _find(transactions, "income", "BTC")
+    tx = next(t for t in txs if t.raw_type == "reward")
+    assert tx.asset == "BTC"
+    assert tx.amount == Decimal("0.00000021")
+    assert tx.fiat_value is None
     assert tx.txid is None
 
 
@@ -430,10 +471,11 @@ def test_missing_column_raises(importer: ShakepayImporter, tmp_path: Path) -> No
     """A CSV missing 'Amount Debited' should raise MissingColumnError."""
     bad_csv = tmp_path / "bad.csv"
     bad_csv.write_text(
-        "Transaction Type,Date,Debit Currency,Amount Credited,Credit Currency,"
-        "Buy / Sell Rate,Direction,Spot Rate,Source / Destination,"
-        "Blockchain Transaction ID\n"
-        "fiat funding,2025-01-01T10:00:00+00,,,500.00,CAD,,credit,,,\n"
+        # All required columns present except 'Amount Debited'.
+        "Date,Asset Debited,Amount Credited,Asset Credited,"
+        "Market Value,Market Value Currency,Book Cost,Book Cost Currency,"
+        "Type,Spot Rate,Buy / Sell Rate,Description\n"
+        "2025-01-01T10:00:00+00,,500.00,CAD,500.00,CAD,500.00,CAD,fiat funding,,,\n"
     )
     with pytest.raises(MissingColumnError):
         importer.parse(bad_csv)
@@ -442,9 +484,9 @@ def test_missing_column_raises(importer: ShakepayImporter, tmp_path: Path) -> No
 def test_empty_csv_returns_empty_list(importer: ShakepayImporter, tmp_path: Path) -> None:
     empty_csv = tmp_path / "empty.csv"
     empty_csv.write_text(
-        "Transaction Type,Date,Amount Debited,Debit Currency,Amount Credited,"
-        "Credit Currency,Buy / Sell Rate,Direction,Spot Rate,"
-        "Source / Destination,Blockchain Transaction ID\n"
+        "Date,Amount Debited,Asset Debited,Amount Credited,Asset Credited,"
+        "Market Value,Market Value Currency,Book Cost,Book Cost Currency,"
+        "Type,Spot Rate,Buy / Sell Rate,Description\n"
     )
     result = importer.parse(empty_csv)
     assert result == []

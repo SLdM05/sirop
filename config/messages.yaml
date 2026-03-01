@@ -182,6 +182,46 @@ messages:
     code: E017
     text: "Unknown stage {stage!r}. Valid stages: {valid}"
 
+  boil.normalize.prefetch_boc:
+    category: output
+    text: "  Fetching Bank of Canada rates for {count} day(s)…"
+
+  boil.normalize.prefetch_crypto:
+    category: output
+    text: "  Fetching market prices for {count} date(s)…"
+
+  boil.normalize.coingecko_attribution:
+    category: output
+    text: "  Powered by CoinGecko API — https://www.coingecko.com/en/api"
+
+  boil.normalize.boc_attribution:
+    category: output
+    text: "  Bank of Canada exchange rates — https://www.bankofcanada.ca/rates/exchange/"
+
+  boil.normalize.mempool_attribution:
+    category: output
+    text: "  BTC prices sourced from mempool.space — https://mempool.space"
+
+  boil.normalize.zero_cad_warning:
+    category: warning
+    code: W001
+    text: "Transaction {count} row(s) could not be valued in CAD and were recorded as 0. ACB for those rows may be incorrect. Check the audit log."
+
+  boil.transfer_match.unmatched_withdrawal:
+    category: warning
+    code: W002
+    text: "Unmatched withdrawal of {amount} {asset} on {date} — treated as sell."
+
+  boil.transfer_match.unmatched_deposit:
+    category: warning
+    code: W003
+    text: "Unmatched deposit of {amount} {asset} on {date} — treated as buy."
+
+  boil.warning.future_year_dispositions:
+    category: warning
+    code: W004
+    text: "{count} disposal(s) dated after {tax_year}-12-31 — excluded from the {tax_year} report. Future-year acquisitions within the 30-day superficial loss window are still used for loss detection."
+
   boil.summary.complete:
     category: output
     text: "\nBatch '{name}' pipeline complete."
@@ -189,6 +229,10 @@ messages:
   boil.summary.holdings_header:
     category: output
     text: "\n  Year-end holdings (cost basis):"
+
+  boil.summary.stir_hint:
+    category: output
+    text: "  Use 'sirop stir' to link wallet transfers — {w} unmatched withdrawal(s) and {d} unmatched deposit(s)."
 
   # ── stir ──────────────────────────────────────────────────────────────────
 
