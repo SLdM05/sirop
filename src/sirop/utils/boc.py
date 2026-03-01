@@ -35,7 +35,10 @@ logger = get_logger(__name__)
 _BOC_VALET_URL = "https://www.bankofcanada.ca/valet/observations/{series}/json"
 
 # Maximum number of prior calendar days to look back for weekends/holidays.
-_MAX_FALLBACK_DAYS = 3
+# Worst case: transaction on Dec 28 (Sunday) must fall back through
+# Dec 27 (Sat) + Dec 26 (Boxing Day) + Dec 25 (Christmas) to Dec 24 = 4 days.
+# Set to 5 to cover that cluster with one day of buffer.
+_MAX_FALLBACK_DAYS = 5
 
 
 class BoCRateError(Exception):

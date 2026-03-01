@@ -4,6 +4,15 @@ name: "Shakepay"
 # accept and merge all files from a single export.  Files are identified by
 # their header row, not by filename.
 #
+# This config targets the 2025 export format.  Column names changed from the
+# earlier format:
+#   "Transaction Type" → "Type"
+#   "Debit Currency"   → "Asset Debited"
+#   "Credit Currency"  → "Asset Credited"
+# Columns removed: "Direction", "Source / Destination", "Blockchain Transaction ID"
+# Columns added:   "Market Value", "Market Value Currency", "Book Cost",
+#                  "Book Cost Currency", "Description"
+#
 # Full column spec: docs/ref/transaction-import-formats.md §1
 date_column: "Date"
 # Shakepay timestamps: "2022-09-10T00:36:12+00" — the offset uses the bare
@@ -11,20 +20,24 @@ date_column: "Date"
 # this form; only datetime.fromisoformat() handles it correctly (Python 3.11+).
 date_format: "iso8601"
 columns:
-  transaction_type: "Transaction Type"
+  transaction_type: "Type"
   amount_debited: "Amount Debited"
-  debit_currency: "Debit Currency"
+  debit_currency: "Asset Debited"
   amount_credited: "Amount Credited"
-  credit_currency: "Credit Currency"
-  direction: "Direction"
-  source_destination: "Source / Destination"
-  txid: "Blockchain Transaction ID"
+  credit_currency: "Asset Credited"
+  txid: "Description"
 # "Buy / Sell Rate" and "Spot Rate" are Shakepay's internal/proprietary rates —
 # NOT Bank of Canada rates.  Store in the raw record for audit trail purposes
 # but NEVER pass to the calculation engine or use for ACB.
+# "Market Value" and "Book Cost" are Shakepay's own computed values — also
+# NOT Bank of Canada rates and must never be used for ACB.
 ignored_columns:
   - "Buy / Sell Rate"
   - "Spot Rate"
+  - "Market Value"
+  - "Market Value Currency"
+  - "Book Cost"
+  - "Book Cost Currency"
 # Direction for "purchase/sale" rows is determined by the debit/credit currency
 # columns in the importer code, NOT by a simple type-map lookup:
 #   Amount Debited = CAD, Amount Credited = BTC/ETH  → "buy"  (acquiring crypto)
@@ -37,7 +50,10 @@ transaction_type_map:
   "crypto purchase": "deposit"      # BTC received from external wallet
   "fiat funding": "fiat_deposit"    # CAD bank deposit — no tax event
   "fiat cashout": "fiat_withdrawal" # CAD withdrawal — no tax event
-  "shakingsats": "income"           # BTC rewards — income event; FMV = ACB
+  "shakingsats": "income"           # BTC rewards — income event; FMV = ACB (pre-2025 type name)
+  "reward": "income"                # BTC rewards — income event; FMV = ACB (2025 type name)
+  "buy": "buy"                      # 2025: credit-only BTC purchase; normalizer fetches BoC/CoinGecko rate for ACB
+  "send": "withdrawal"              # 2025: crypto sent to external address
   "peer transfer": "other"          # Shakepay-to-Shakepay — no disposition
   "other": "other"                  # Referral bonuses etc. — flag for review
 # Unknown types must NOT crash the importer.  Log a warning and store the
@@ -50,11 +66,11 @@ fee_model: "spread"  # fees are embedded in the buy/sell spread, not a separate 
 fiat_currencies:
   - CAD
   - USD
-# Minimal set of CSV column names that uniquely identify this exchange's export.
-# "Buy / Sell Rate" and "Spot Rate" are Shakepay-specific and unambiguous.
+# Minimal set of CSV column names that uniquely identify this 2025 export format.
+# "Buy / Sell Rate", "Spot Rate", and "Market Value Currency" are Shakepay-specific.
 fingerprint_columns:
-  - "Transaction Type"
   - "Amount Debited"
-  - "Debit Currency"
+  - "Asset Debited"
   - "Buy / Sell Rate"
   - "Spot Rate"
+  - "Market Value Currency"

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import dataclasses
 import sqlite3
+import sys
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -36,11 +37,12 @@ from sirop.models.messages import MessageCode
 from sirop.normalizer import normalizer
 from sirop.transfer_match import matcher
 from sirop.utils.boc import BoCRateError, prefetch_rates
-from sirop.utils.crypto_prices import prefetch_crypto_prices
+from sirop.utils.crypto_prices import prefetch_crypto_prices, prefetch_crypto_prices_by_range
 from sirop.utils.logging import StageContext, get_logger
 from sirop.utils.messages import emit
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from datetime import date
 
     from sirop.models.raw import RawTransaction
@@ -174,8 +176,8 @@ def _run_normalize(conn: object) -> None:
     if not raw_txs:
         raise _BoilError(MessageCode.BOIL_ERROR_NO_RAW_TRANSACTIONS)
 
-    _prefetch_boc_rates(conn, raw_txs)
-    _prefetch_crypto_prices_bulk(conn, raw_txs)
+    boc_attributed = _prefetch_boc_rates(conn, raw_txs)
+    _prefetch_crypto_prices_bulk(conn, raw_txs, boc_already_attributed=boc_attributed)
 
     logger.info("processing %d raw transaction(s)", len(raw_txs))
     txs = normalizer.normalize(raw_txs, conn)
@@ -200,40 +202,82 @@ def _run_normalize(conn: object) -> None:
         emit(MessageCode.BOIL_NORMALIZE_ZERO_CAD_WARNING, count=zero_count)
 
 
-def _prefetch_boc_rates(conn: object, raw_txs: list[RawTransaction]) -> None:
-    """Prefetch Bank of Canada USDCAD rates for the full date span of USD transactions.
+def _prefetch_boc_rates(conn: object, raw_txs: list[RawTransaction]) -> bool:
+    """Prefetch Bank of Canada USDCAD rates for the full date span of all transactions.
 
-    Makes a single range HTTP call covering the entire tax year instead of
-    one-per-transaction, then caches all results so the normalizer never
-    touches the network for BoC rates.
+    Makes a single range HTTP call covering the entire batch date range instead
+    of one-per-transaction, then caches all results so the normalizer and the
+    crypto price converter never touch the network for BoC rates.
+
+    The full range is always prefetched (not just USD-fiat dates) because
+    get_crypto_price_cad() also calls get_rate() internally to convert USD
+    crypto prices to CAD — even for CAD-only batches.
+
+    Returns True if the BoC attribution message was emitted (so the caller can
+    avoid a duplicate attribution if crypto prices also use BoC).
     """
     assert isinstance(conn, sqlite3.Connection)
 
-    usd_fiat = frozenset({"USD", "USDT", "USDC"})
-    usd_dates = [
-        raw.timestamp.date()
-        for raw in raw_txs
-        if (raw.fiat_currency or "").upper() in usd_fiat and raw.fiat_value is not None
-    ]
-    if not usd_dates:
-        return
+    if not raw_txs:
+        return False
 
-    min_date = min(usd_dates)
-    max_date = max(usd_dates)
+    min_date = min(raw.timestamp.date() for raw in raw_txs)
+    max_date = max(raw.timestamp.date() for raw in raw_txs)
     day_count = (max_date - min_date).days + 1
     emit(MessageCode.BOIL_NORMALIZE_PREFETCH_BOC, count=day_count)
     try:
         prefetch_rates(conn, "USDCAD", min_date, max_date)
         emit(MessageCode.BOIL_NORMALIZE_BOC_ATTRIBUTION)
+        return True
     except BoCRateError as exc:
         logger.warning("BoC prefetch failed — %s. Will retry per-transaction.", exc)
+        return False
 
 
-def _prefetch_crypto_prices_bulk(conn: object, raw_txs: list[RawTransaction]) -> None:
+def _make_fetch_progress(total: int) -> Callable[[int, int], None] | None:
+    """Return a progress callback for the per-date crypto price fallback loop.
+
+    On TTY: overwrites a single line in-place using carriage return so the
+    display does not scroll.
+    Off TTY (CI, pipes): prints a milestone line every ~10 % and at completion.
+    Returns None when total == 0 (nothing to fetch).
+    """
+    if total == 0:
+        return None
+    is_tty = sys.stdout.isatty()
+    width = len(str(total))
+    milestone = max(1, total // 10)
+
+    def _cb(done: int, _total: int) -> None:
+        if is_tty:
+            print(f"\r  [{done:{width}}/{_total}]", end="", flush=True)
+        elif done % milestone == 0 or done == _total:
+            print(f"  [{done}/{_total}]", flush=True)
+
+    return _cb
+
+
+def _prefetch_crypto_prices_bulk(
+    conn: object,
+    raw_txs: list[RawTransaction],
+    *,
+    boc_already_attributed: bool = False,
+) -> None:
     """Prefetch crypto CAD prices for all no-fiat transactions.
 
-    Each unique (asset, date) pair triggers at most one API call.  Results are
-    cached in SQLite so the normalizer never hits the network for these prices.
+    Strategy (two passes):
+    1. Range pass — one CoinGecko ``/market_chart/range`` call per unique
+       asset covers the full date span.  O(N_assets) HTTP calls instead of
+       O(N_dates x N_assets).
+    2. Per-date fallback — handles any dates the range response did not cover
+       (CoinGecko gaps, very recent dates, unsupported assets).  Mempool.space
+       is preferred for BTC in this pass.
+
+    Results are cached in SQLite so the normalizer never hits the network for
+    these prices.
+
+    Pass boc_already_attributed=True when _prefetch_boc_rates already emitted
+    the BoC attribution line, to avoid printing it twice in the same run.
     """
     assert isinstance(conn, sqlite3.Connection)
 
@@ -243,22 +287,39 @@ def _prefetch_crypto_prices_bulk(conn: object, raw_txs: list[RawTransaction]) ->
         if raw.fiat_value is None or raw.fiat_currency is None
     ]
     # Deduplicate while preserving deterministic order for logging.
-    seen: set[tuple[str, date]] = set()
+    seen_dedup: set[tuple[str, date]] = set()
     unique_pairs: list[tuple[str, date]] = []
     for p in pairs:
-        if p not in seen:
-            seen.add(p)
+        if p not in seen_dedup:
+            seen_dedup.add(p)
             unique_pairs.append(p)
 
     if not unique_pairs:
         return
 
     emit(MessageCode.BOIL_NORMALIZE_PREFETCH_CRYPTO, count=len(unique_pairs))
-    _total, coingecko_count, mempool_count = prefetch_crypto_prices(conn, unique_pairs)
+
+    # Pass 1: range-based bulk fetch (one CoinGecko call per unique asset).
+    asset_date_groups: dict[str, list[date]] = {}
+    for asset, d in unique_pairs:
+        asset_date_groups.setdefault(asset, []).append(d)
+    _range_written, range_cg = prefetch_crypto_prices_by_range(conn, asset_date_groups)
+
+    # Pass 2: per-date fallback for any gaps left by the range call.
+    progress_cb = _make_fetch_progress(len(unique_pairs))
+    _per_total, per_cg, mempool_count = prefetch_crypto_prices(
+        conn, unique_pairs, progress_cb=progress_cb
+    )
+    if sys.stdout.isatty() and progress_cb is not None:
+        print()  # end the \r progress line before attribution messages
+
+    coingecko_count = range_cg + per_cg
     if coingecko_count > 0:
         emit(MessageCode.BOIL_NORMALIZE_COINGECKO_ATTRIBUTION)
     if mempool_count > 0:
         emit(MessageCode.BOIL_NORMALIZE_MEMPOOL_ATTRIBUTION)
+    if (coingecko_count > 0 or mempool_count > 0) and not boc_already_attributed:
+        emit(MessageCode.BOIL_NORMALIZE_BOC_ATTRIBUTION)
 
 
 def _run_verify(conn: object) -> None:

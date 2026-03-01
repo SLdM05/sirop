@@ -32,29 +32,35 @@ The importer must accept and merge all files from a single Shakepay export. File
 
 ### Header Row
 
+2025 export format (current):
+
 ```
-Transaction Type,Date,Amount Debited,Debit Currency,Amount Credited,Credit Currency,Buy / Sell Rate,Direction,Spot Rate,Source / Destination,Blockchain Transaction ID
+Date,Amount Debited,Asset Debited,Amount Credited,Asset Credited,Market Value,Market Value Currency,Book Cost,Book Cost Currency,Type,Spot Rate,Buy / Sell Rate,Description
 ```
+
+> **Column renames from the pre-2025 format:** `Transaction Type` → `Type`, `Debit Currency` → `Asset Debited`, `Credit Currency` → `Asset Credited`. Columns removed: `Direction`, `Source / Destination`, `Blockchain Transaction ID`. Columns added: `Market Value`, `Market Value Currency`, `Book Cost`, `Book Cost Currency`, `Description`.
 
 ### Field Definitions
 
 | Column | Type | Notes |
 |--------|------|-------|
-| `Transaction Type` | string | See transaction type taxonomy below |
 | `Date` | ISO 8601 datetime | Format: `2022-09-10T00:36:12+00`. The timezone offset is always `+00` (UTC). Parse with timezone awareness. |
 | `Amount Debited` | decimal or empty | Positive number. Empty if this transaction has no debit leg. |
-| `Debit Currency` | string or empty | ISO currency code (`CAD`, `BTC`, `ETH`) or empty. |
+| `Asset Debited` | string or empty | ISO currency code (`CAD`, `BTC`, `ETH`) or empty. |
 | `Amount Credited` | decimal or empty | Positive number. Empty if this transaction has no credit leg. |
-| `Credit Currency` | string or empty | ISO currency code or empty. |
+| `Asset Credited` | string or empty | ISO currency code or empty. |
+| `Market Value` | decimal or empty | Shakepay's computed market value at trade time. **Do not use for ACB.** Not a Bank of Canada rate. |
+| `Market Value Currency` | string or empty | Currency of `Market Value` (e.g. `CAD`). |
+| `Book Cost` | decimal or empty | Shakepay's computed book cost. **Do not use for ACB.** |
+| `Book Cost Currency` | string or empty | Currency of `Book Cost`. |
+| `Type` | string | See transaction type taxonomy below. |
 | `Buy / Sell Rate` | decimal or empty | Shakepay's internal rate at time of trade. **Do not use for ACB.** Not a Bank of Canada rate. |
-| `Direction` | string | `"purchase"`, `"debit"`, `"credit"` |
 | `Spot Rate` | decimal or empty | Shakepay's spot rate in CAD. **Do not use for ACB.** |
-| `Source / Destination` | string or empty | For crypto withdrawals: the destination Bitcoin address. For fiat deposits: the source identifier (e.g. email). |
-| `Blockchain Transaction ID` | string or empty | On-chain txid for crypto cashouts and deposits. Empty for fiat and internal transactions. Use for node verification cross-reference. |
+| `Description` | string or empty | Free-text description. May contain a counterparty identifier (e.g. email for peer transfers) or a transaction reference. Not a structured blockchain txid — do not rely on for transfer matching. |
 
 ### Transaction Type Taxonomy
 
-| `Transaction Type` | Description | Tax Relevance |
+| `Type` | Description | Tax Relevance |
 |--------------------|-------------|---------------|
 | `purchase/sale` | CAD ↔ BTC or ETH trade | **Disposition event.** Buying BTC increases ACB. Selling BTC triggers capital gain/loss calculation. |
 | `crypto cashout` | BTC withdrawal to external wallet | **Potential disposition.** Treat as a transfer unless the destination is your own wallet (verify via node/Sparrow match). Does not trigger gain/loss if self-transfer. |
@@ -77,11 +83,11 @@ BTC amounts are expressed as decimal values (e.g. `0.00405049`). Parse as Python
 ### Sample Records
 
 ```csv
-"Transaction Type","Date","Amount Debited","Debit Currency","Amount Credited","Credit Currency","Buy / Sell Rate","Direction","Spot Rate","Source / Destination","Blockchain Transaction ID"
-"fiat funding","2022-09-10T00:36:12+00",,,500,"CAD",,"credit",,"myemail@example.com",
-"purchase/sale","2022-09-10T00:56:41+00",250,"CAD",0.00405049,"BTC","61720.8993","purchase",,,
-"crypto cashout","2022-09-10T00:58:55+00",0.00405049,"BTC",,,,"debit","61027.7612","bc1q6f5b95fe8cc165adad7bb399dd7416f25f08348dc0f7cdbdbca6b01ca9","887534e0dbe0af1c77ea5b7e45876dd40b5e9664f1bce7384071023406e2729d"
-"shakingsats","2022-09-11T14:00:00+00",,,0.00001500,"BTC",,"credit",,,
+Date,Amount Debited,Asset Debited,Amount Credited,Asset Credited,Market Value,Market Value Currency,Book Cost,Book Cost Currency,Type,Spot Rate,Buy / Sell Rate,Description
+2022-09-10T00:36:12+00,,,500,CAD,500,CAD,500,CAD,fiat funding,,,myemail@example.com
+2022-09-10T00:56:41+00,250,CAD,0.00405049,BTC,250,CAD,250,CAD,purchase/sale,,61720.8993,
+2022-09-10T00:58:55+00,0.00405049,BTC,,,,,,,crypto cashout,61027.7612,,
+2022-09-11T14:00:00+00,,,0.00001500,BTC,,,,,shakingsats,,,
 ```
 
 ---
@@ -204,8 +210,10 @@ outgoing on-chain transfers:
 
 | Row type | Column with txid |
 |---|---|
-| `crypto cashout` (outgoing) | `Blockchain Transaction ID` |
-| `crypto purchase` (incoming) | `Blockchain Transaction ID` |
+| `crypto cashout` (outgoing) | `Description` (2025 format) |
+| `crypto purchase` (incoming) | `Description` (2025 format) |
+
+> **Note:** In the 2025 Shakepay export format the `Blockchain Transaction ID` column was removed. The `Description` column may contain a txid, a counterparty identifier, or a free-text description depending on transaction type. Txid-based transfer matching against Shakepay records is not reliable in the 2025 format — fall back to amount + timestamp proximity matching.
 
 These are real 64-character hex on-chain txids. The Sparrow `Txid` column
 contains the same value for the matching row on the other side of the transfer.
@@ -351,19 +359,21 @@ encoding: utf-8
 has_header: true
 
 columns:
-  transaction_type: "Transaction Type"
+  transaction_type: "Type"
   timestamp: "Date"
   amount_debited: "Amount Debited"
-  debit_currency: "Debit Currency"
+  debit_currency: "Asset Debited"
   amount_credited: "Amount Credited"
-  credit_currency: "Credit Currency"
-  direction: "Direction"
-  source_destination: "Source / Destination"
-  txid: "Blockchain Transaction ID"
+  credit_currency: "Asset Credited"
+  txid: "Description"
 
 ignored_columns:
-  - "Buy / Sell Rate"   # Shakepay internal rate — not BoC, never use for ACB
-  - "Spot Rate"          # Same
+  - "Buy / Sell Rate"        # Shakepay internal rate — not BoC, never use for ACB
+  - "Spot Rate"              # Same
+  - "Market Value"           # Shakepay computed value — not BoC, never use for ACB
+  - "Market Value Currency"  # Currency of Market Value
+  - "Book Cost"              # Shakepay computed book cost — never use for ACB
+  - "Book Cost Currency"     # Currency of Book Cost
 
 timestamp_format: "%Y-%m-%dT%H:%M:%S%z"
 timestamp_timezone: UTC

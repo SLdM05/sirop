@@ -837,7 +837,7 @@ def _cmd_transfer(  # noqa: PLR0911 PLR0912 PLR0915 PLR0913
     exact implied fee when sent > received.
     """
     if len(parts) != _ONE_ARG_PARTS:
-        print("Usage: transfer <id>")
+        print("Usage: transfer <id> [<id> ...]")
         return None
     try:
         tx_id = int(parts[1])
@@ -1018,7 +1018,7 @@ def _cmd_transfer(  # noqa: PLR0911 PLR0912 PLR0915 PLR0913
     return overrides, state
 
 
-def _interactive_loop(  # noqa: PLR0912 PLR0913
+def _interactive_loop(  # noqa: PLR0912 PLR0913 PLR0915
     conn: sqlite3.Connection,
     txs: list[Transaction],
     wallets: list[Wallet],
@@ -1061,9 +1061,19 @@ def _interactive_loop(  # noqa: PLR0912 PLR0913
             continue
 
         if cmd == "transfer":
-            result = _cmd_transfer(conn, parts, tx_ids, batch_name, txs, wallets)
-            if result is not None:
-                overrides, state = result
+            ids = parts[1:]
+            if not ids:
+                print("Usage: transfer <id> [<id> ...]")
+            else:
+                total = len(ids)
+                for idx, raw_id in enumerate(ids, 1):
+                    if total > 1:
+                        print(f"\n  — Transfer {idx} of {total} (id: {raw_id}) —")
+                    result = _cmd_transfer(
+                        conn, ["transfer", raw_id], tx_ids, batch_name, txs, wallets
+                    )
+                    if result is not None:
+                        overrides, state = result
             continue
 
         if cmd == "external":
