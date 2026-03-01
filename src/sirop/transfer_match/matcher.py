@@ -86,6 +86,7 @@ _INCOME_TYPES = frozenset({TransactionType.INCOME})
 def match_transfers(  # noqa: PLR0912 PLR0915
     txs: list[Transaction],
     overrides: list[TransferOverride] | None = None,
+    tax_year: int | None = None,
 ) -> tuple[list[ClassifiedEvent], list[IncomeEvent]]:
     """Classify *txs* into taxable events and income sub-records.
 
@@ -304,7 +305,7 @@ def match_transfers(  # noqa: PLR0912 PLR0915
             )
             continue
 
-        evt, income = _classify(tx)
+        evt, income = _classify(tx, tax_year)
         if evt is not None:
             events.append(evt)
         if income is not None:
@@ -409,7 +410,9 @@ def _find_match(
     return None
 
 
-def _classify(tx: Transaction) -> tuple[ClassifiedEvent | None, IncomeEvent | None]:
+def _classify(
+    tx: Transaction, tax_year: int | None = None
+) -> tuple[ClassifiedEvent | None, IncomeEvent | None]:
     """Convert a single ``Transaction`` to a ``ClassifiedEvent`` (and optionally
     an ``IncomeEvent`` for income transactions).
 
@@ -423,11 +426,11 @@ def _classify(tx: Transaction) -> tuple[ClassifiedEvent | None, IncomeEvent | No
 
     # Acquisition types: buy, trade, and unmatched deposit.
     if tx_type in {TransactionType.BUY, TransactionType.TRADE, TransactionType.DEPOSIT}:
-        return _classify_acquisition(tx), None
+        return _classify_acquisition(tx, tax_year), None
 
     # Disposal types: sell, spend, and unmatched withdrawal.
     if tx_type in {TransactionType.SELL, TransactionType.SPEND, TransactionType.WITHDRAWAL}:
-        return _classify_disposal(tx), None
+        return _classify_disposal(tx, tax_year), None
 
     # Fiat and everything else — non-taxable placeholder.
     if tx_type not in _FIAT:
@@ -454,13 +457,17 @@ def _classify(tx: Transaction) -> tuple[ClassifiedEvent | None, IncomeEvent | No
     )
 
 
-def _classify_acquisition(tx: Transaction) -> ClassifiedEvent:
+def _classify_acquisition(tx: Transaction, tax_year: int | None = None) -> ClassifiedEvent:
     """Build a buy ClassifiedEvent for acquisition transactions.
 
     Emits a warning for unmatched deposits so the user knows to check
     whether the deposit is actually a wallet-to-wallet transfer.
+    Future-year deposits are silently classified — they won't generate a
+    disposition but may be needed for superficial-loss detection.
     """
-    if tx.tx_type == TransactionType.DEPOSIT:
+    if tx.tx_type == TransactionType.DEPOSIT and (
+        tax_year is None or tx.timestamp.year <= tax_year
+    ):
         emit(
             MessageCode.BOIL_TRANSFER_MATCH_UNMATCHED_DEPOSIT,
             amount=tx.amount,
@@ -483,13 +490,17 @@ def _classify_acquisition(tx: Transaction) -> ClassifiedEvent:
     )
 
 
-def _classify_disposal(tx: Transaction) -> ClassifiedEvent:
+def _classify_disposal(tx: Transaction, tax_year: int | None = None) -> ClassifiedEvent:
     """Build a sell ClassifiedEvent for disposal transactions.
 
     Emits a warning for unmatched withdrawals so the user knows to tap
     the receiving wallet if this is actually a transfer.
+    Future-year withdrawals are silently classified — a consolidated W004
+    is emitted by the caller instead.
     """
-    if tx.tx_type == TransactionType.WITHDRAWAL:
+    if tx.tx_type == TransactionType.WITHDRAWAL and (
+        tax_year is None or tx.timestamp.year <= tax_year
+    ):
         emit(
             MessageCode.BOIL_TRANSFER_MATCH_UNMATCHED_WITHDRAWAL,
             amount=tx.amount,

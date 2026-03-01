@@ -118,8 +118,6 @@ class ShakepayImporter(BaseImporter):
                 cols["debit_currency"],
                 cols["amount_credited"],
                 cols["credit_currency"],
-                cols["direction"],
-                cols["source_destination"],
                 cols["txid"],
             },
         )

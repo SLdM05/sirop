@@ -77,7 +77,7 @@ def test_registry_factory_loads(source: str, factory: object) -> None:
 # ---------------------------------------------------------------------------
 
 # Synthetic header rows containing the fingerprint columns for each format.
-_SHAKEPAY_HEADER = "Transaction Type,Amount Debited,Debit Currency,Buy / Sell Rate,Spot Rate"
+_SHAKEPAY_HEADER = "Amount Debited,Asset Debited,Buy / Sell Rate,Spot Rate,Market Value Currency"
 _SPARROW_HEADER = "Date (UTC),Value,Balance,Fee,Txid"
 
 

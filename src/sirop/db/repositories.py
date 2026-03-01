@@ -104,6 +104,12 @@ def clear_stages_output(conn: sqlite3.Connection, stages: tuple[str, ...]) -> No
     to satisfy FK constraints.  Call this before a ``--from`` re-run to
     prevent rows from the previous run stacking on top of fresh output.
 
+    Foreign key enforcement is suspended for the duration of the delete so
+    that ``transfer_overrides`` (which references ``transactions``) does not
+    block clearing the ``transactions`` table.  The overrides survive and
+    remain valid because normalize assigns the same IDs after the
+    ``sqlite_sequence`` high-water mark is reset.
+
     Parameters
     ----------
     stages:
@@ -111,12 +117,30 @@ def clear_stages_output(conn: sqlite3.Connection, stages: tuple[str, ...]) -> No
         "transfer_match", "boil", "superficial_loss")``.
     """
     stages_set = set(stages)
-    with conn:
-        for stage in _BOIL_CLEAR_ORDER:
-            if stage not in stages_set:
-                continue
-            for table in _CLEAR_TABLES_BY_STAGE[stage]:
-                conn.execute(f"DELETE FROM {table}")  # noqa: S608
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        with conn:
+            for stage in _BOIL_CLEAR_ORDER:
+                if stage not in stages_set:
+                    continue
+                for table in _CLEAR_TABLES_BY_STAGE[stage]:
+                    conn.execute(f"DELETE FROM {table}")  # noqa: S608
+                    conn.execute("DELETE FROM sqlite_sequence WHERE name = ?", (table,))
+    finally:
+        conn.execute("PRAGMA foreign_keys=ON")
+
+
+# ---------------------------------------------------------------------------
+# Batch metadata
+# ---------------------------------------------------------------------------
+
+
+def read_tax_year(conn: sqlite3.Connection) -> int:
+    """Return the tax year stored in batch_meta."""
+    row = conn.execute("SELECT tax_year FROM batch_meta").fetchone()
+    if row is None:
+        raise RuntimeError("batch_meta is missing — was this batch created with 'sirop create'?")
+    return int(row["tax_year"])
 
 
 # ---------------------------------------------------------------------------

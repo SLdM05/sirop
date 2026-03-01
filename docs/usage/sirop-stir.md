@@ -86,6 +86,7 @@ stir> _
 
 | Command | Effect |
 |---------|--------|
+| `transfer <id> [<id> ...]` | Guided wizard: link a withdrawal to its matching deposit (or vice versa). Accepts one or more IDs — runs the wizard for each in sequence. |
 | `link <id1> <id2>` | Force-link two transactions as a transfer pair. Prompts for implied fee. |
 | `unlink <id1> <id2>` | Block the auto-matcher from pairing these two. |
 | `external <id>` | Guided wizard: mark as external-out or external-in with wallet label. |
@@ -130,6 +131,38 @@ external. These will be treated as **sells** at boil time unless you:
 ---
 
 ## Override actions in detail
+
+### `transfer` — guided wizard for unmatched transactions
+
+Use in the REPL to interactively pair an unmatched withdrawal or deposit with
+its counterpart in another source. The wizard walks you through picking the
+counterpart wallet and transaction, validates that no asset units are created
+from nothing, and records the implied on-chain fee if sent > received.
+
+```
+stir> transfer 41
+```
+
+You can pass multiple IDs to process a queue in one go. The wizard runs
+sequentially for each ID, printing a progress header between runs:
+
+```
+stir> transfer 7 12 15 16
+
+  — Transfer 1 of 4 (id: 7) —
+  Transfer wizard — transaction 7:
+  ...
+
+  — Transfer 2 of 4 (id: 12) —
+  Transfer wizard — transaction 12:
+  ...
+```
+
+If validation fails for one ID (wrong type, already handled, etc.) the error is
+printed and the wizard moves on to the next ID without stopping the queue.
+
+`transfer` only works in the interactive REPL. For non-interactive scripting use
+`sirop stir --link <id1> <id2>` instead.
 
 ### `link` — force a transfer pair
 

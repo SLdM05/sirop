@@ -53,6 +53,7 @@ from sirop.utils.logging import get_logger
 
 if TYPE_CHECKING:
     import sqlite3
+    from collections.abc import Callable
 
 logger = get_logger(__name__)
 
@@ -62,6 +63,7 @@ logger = get_logger(__name__)
 
 _MEMPOOL_URL = "https://mempool.space/api/v1/historical-price"
 _COINGECKO_URL = "https://api.coingecko.com/api/v3/coins/{coin_id}/history"
+_COINGECKO_CHART_URL = "https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart/range"
 
 # HTTP timeout for all requests.
 _TIMEOUT = 15
@@ -294,6 +296,76 @@ def _fetch_usd_coingecko(coin_id: str, price_date: date) -> Decimal | None:
         return None
 
 
+def _fetch_coingecko_range(
+    coin_id: str,
+    start_date: date,
+    end_date: date,
+) -> dict[date, Decimal]:
+    """Fetch daily USD prices for *coin_id* over a date range using CoinGecko.
+
+    Uses the ``/market_chart/range`` endpoint which returns all prices in the
+    range in a single HTTP call — far more efficient than one call per date.
+
+    For ranges > 90 days CoinGecko returns daily granularity (one price per
+    day).  For shorter ranges it returns hourly data; in that case this
+    function takes the last price observed on each calendar day (UTC).
+
+    Parameters
+    ----------
+    coin_id:
+        CoinGecko coin identifier, e.g. ``"bitcoin"``.
+    start_date:
+        First date of the range (inclusive, UTC).
+    end_date:
+        Last date of the range (inclusive, UTC).
+
+    Returns
+    -------
+    dict[date, Decimal]
+        Mapping of UTC date → USD price.  Dates with no data are absent.
+
+    Raises
+    ------
+    CryptoPriceError
+        On network errors or unrecoverable HTTP failures after retries.
+    """
+    start_ts = int(
+        datetime(start_date.year, start_date.month, start_date.day, tzinfo=UTC).timestamp()
+    )
+    # Use end of day so the end_date itself is included in the response.
+    end_ts = int(
+        datetime(end_date.year, end_date.month, end_date.day, 23, 59, 59, tzinfo=UTC).timestamp()
+    )
+
+    url = (
+        f"{_COINGECKO_CHART_URL.format(coin_id=coin_id)}"
+        f"?vs_currency=usd&from={start_ts}&to={end_ts}"
+    )
+    api_key = get_settings().coingecko_api_key
+
+    try:
+        raw = _fetch_with_backoff(url, api_key=api_key)
+    except CryptoPriceError as exc:
+        raise CryptoPriceError(
+            f"CoinGecko range fetch failed for {coin_id} " f"({start_date} to {end_date}): {exc}"
+        ) from exc
+
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except Exception as exc:
+        raise CryptoPriceError(
+            f"CoinGecko range response parse error for {coin_id}: {exc}"
+        ) from exc
+
+    # For each calendar day (UTC) take the last price point observed that day.
+    daily: dict[date, Decimal] = {}
+    for ts_ms, price_float in payload.get("prices", []):
+        d = datetime.fromtimestamp(ts_ms / 1000, tz=UTC).date()
+        daily[d] = Decimal(str(price_float))
+
+    return daily
+
+
 def _fetch_with_backoff(url: str, api_key: str = "") -> bytes:
     """Fetch *url*, retrying on HTTP 429 with exponential back-off.
 
@@ -401,9 +473,113 @@ def _read_cached(
     return Decimal(row[0])
 
 
+def prefetch_crypto_prices_by_range(
+    conn: sqlite3.Connection,
+    asset_dates: dict[str, list[date]],
+) -> tuple[int, int]:
+    """Prefetch crypto CAD prices using one CoinGecko range call per asset.
+
+    More efficient than :func:`prefetch_crypto_prices` for large date sets —
+    O(N_assets) HTTP calls instead of O(N_dates x N_assets).
+
+    Assets with ``mempool_supported: true`` in ``currencies.yaml`` (currently
+    only BTC) are **skipped** here.  Mempool.space is preferred for those assets
+    because it has no documented rate limit.  They are handled by the per-date
+    fallback in :func:`prefetch_crypto_prices` where mempool is tried first.
+
+    For each eligible asset, one ``/market_chart/range`` call covers the full
+    span of requested dates.  Results are written to the ``crypto_prices`` cache
+    with ``source="coingecko"``; subsequent ``prefetch_crypto_prices`` or
+    ``get_crypto_price_cad`` calls will hit the cache for those dates.
+
+    Requires the BoC USDCAD rates for the date range to already be cached
+    (call ``prefetch_rates`` first).  Dates where the BoC rate is still missing
+    are skipped silently — the per-date fallback handles them.
+
+    On failure for any asset, logs a warning and continues; the per-date
+    fallback in :func:`prefetch_crypto_prices` will fill remaining gaps.
+
+    Parameters
+    ----------
+    conn:
+        Open SQLite connection to the active ``.sirop`` batch file.
+    asset_dates:
+        Mapping of uppercase asset symbol to the list of required dates.
+
+    Returns
+    -------
+    tuple[int, int]
+        ``(total_written, coingecko_count)`` — total prices written to cache
+        and how many came from CoinGecko (always equal; mempool not used here).
+    """
+    total_written = 0
+    coingecko_count = 0
+
+    for asset, dates in asset_dates.items():
+        if not dates:
+            continue
+        try:
+            cfg = _load_asset_config(asset)
+        except CryptoPriceError:
+            logger.debug("crypto_prices: no config for %s — skipping range prefetch", asset)
+            continue
+        if cfg.get("mempool_supported", False):
+            logger.debug(
+                "crypto_prices: skipping range prefetch for %s — mempool preferred",
+                asset,
+            )
+            continue
+
+        coin_id = str(cfg["coingecko_id"])
+        start_date = min(dates)
+        end_date = max(dates)
+        date_set = frozenset(dates)
+
+        try:
+            usd_prices = _fetch_coingecko_range(coin_id, start_date, end_date)
+        except CryptoPriceError as exc:
+            logger.warning(
+                "crypto_prices: range prefetch failed for %s (%s to %s) — %s. "
+                "Per-date fallback will handle remaining gaps.",
+                asset,
+                start_date,
+                end_date,
+                exc,
+            )
+            continue
+
+        for d, usd_price in usd_prices.items():
+            if d not in date_set:
+                continue
+            if _read_cached(conn, asset, d) is not None:
+                continue
+            try:
+                usd_cad = get_rate(conn, "USDCAD", d)
+            except BoCRateError:
+                logger.debug(
+                    "crypto_prices: no BoC USDCAD rate for %s — skipping range cache write",
+                    d,
+                )
+                continue
+            _write_cache(conn, asset, d, usd_price, usd_price * usd_cad, "coingecko")
+            total_written += 1
+            coingecko_count += 1
+
+        logger.debug(
+            "crypto_prices: range prefetch wrote %d price(s) for %s (%s to %s)",
+            coingecko_count,
+            asset,
+            start_date,
+            end_date,
+        )
+
+    return total_written, coingecko_count
+
+
 def prefetch_crypto_prices(
     conn: sqlite3.Connection,
     requests: list[tuple[str, date]],
+    progress_cb: Callable[[int, int], None] | None = None,
 ) -> tuple[int, int, int]:
     """Fetch and cache CAD prices for all *(asset, date)* pairs in *requests*.
 
@@ -412,12 +588,19 @@ def prefetch_crypto_prices(
     and use the existing back-off on HTTP 429.  Mempool.space calls for BTC
     have no documented rate limit and are interleaved naturally.
 
+    Typically called after :func:`prefetch_crypto_prices_by_range` to fill
+    any gaps the range call did not cover.
+
     Parameters
     ----------
     conn:
         Open SQLite connection to the active ``.sirop`` batch file.
     requests:
         List of ``(asset_upper, price_date)`` pairs to warm.
+    progress_cb:
+        Optional callable invoked after each unique pair is processed
+        (whether fetched or a cache hit).  Receives ``(processed, total)``
+        where ``total = len(requests)``.  Used for live progress display.
 
     Returns
     -------
@@ -429,6 +612,8 @@ def prefetch_crypto_prices(
     fetched = 0
     coingecko_fetched = 0
     mempool_fetched = 0
+    total = len(requests)
+    processed = 0
     seen: set[tuple[str, date]] = set()
     for asset, price_date in requests:
         asset_upper = asset.upper()
@@ -436,7 +621,10 @@ def prefetch_crypto_prices(
         if key in seen:
             continue
         seen.add(key)
+        processed += 1
         if _read_cached(conn, asset_upper, price_date) is not None:
+            if progress_cb is not None:
+                progress_cb(processed, total)
             continue
         try:
             get_crypto_price_cad(conn, asset_upper, price_date)
@@ -456,6 +644,8 @@ def prefetch_crypto_prices(
                 price_date,
                 exc,
             )
+        if progress_cb is not None:
+            progress_cb(processed, total)
     return fetched, coingecko_fetched, mempool_fetched
 
 

@@ -45,7 +45,7 @@ from sirop.importers.sparrow import SparrowImporter
 from sirop.models.messages import MessageCode
 from sirop.models.raw import RawTransaction
 from sirop.utils.logging import get_logger
-from sirop.utils.messages import emit
+from sirop.utils.messages import emit, spinner
 
 logger = get_logger(__name__)
 
@@ -229,7 +229,8 @@ def _run_tap(file_path: Path, source: str | None, wallet: str | None, settings: 
     yaml_path = _BUILTIN_CONFIG_DIR / f"{detected_source}.yaml"
     try:
         importer = factory(yaml_path)
-        txs = importer.parse(file_path)
+        with spinner(f"Reading {file_path.name}…"):
+            txs = importer.parse(file_path)
     except ImporterError as exc:
         raise _TapError(
             MessageCode.TAP_ERROR_PARSE_FAILED,
