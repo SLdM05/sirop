@@ -61,8 +61,10 @@ class MessageCode(StrEnum):
     BOIL_NORMALIZE_ZERO_CAD_WARNING = "boil.normalize.zero_cad_warning"
     BOIL_TRANSFER_MATCH_UNMATCHED_WITHDRAWAL = "boil.transfer_match.unmatched_withdrawal"
     BOIL_TRANSFER_MATCH_UNMATCHED_DEPOSIT = "boil.transfer_match.unmatched_deposit"
+    BOIL_WARNING_FUTURE_YEAR_DISPOSITIONS = "boil.warning.future_year_dispositions"
     BOIL_SUMMARY_COMPLETE = "boil.summary.complete"
     BOIL_SUMMARY_HOLDINGS_HEADER = "boil.summary.holdings_header"
+    BOIL_SUMMARY_STIR_HINT = "boil.summary.stir_hint"
 
     # ── stir ──────────────────────────────────────────────────────────────────
     STIR_ERROR_NOT_NORMALIZED = "stir.error.not_normalized"
