@@ -29,6 +29,11 @@ optional_columns:
 # column is present.
 ignored_columns:
   - fiat_value_pattern
+# Regex patterns for optional columns that may appear in the CSV without being
+# part of the fingerprint. Headers matching any pattern are NOT flagged as
+# unknown by the format detector.
+known_column_patterns:
+  - "Value \\(.+\\)"  # optional fiat column, e.g. "Value (CAD)", "Value (EUR)"
 # --- CRITICAL: Unit Detection ---
 # Sparrow writes Value, Balance, and Fee in either BTC (decimal) or satoshis
 # (integer) depending on the user's Preferences > Bitcoin Unit setting.

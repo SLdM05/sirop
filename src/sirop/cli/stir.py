@@ -52,6 +52,7 @@ Non-interactive flags
 
 from __future__ import annotations
 
+import re
 from datetime import timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING
@@ -103,6 +104,29 @@ _NEEDS_MATCH_IN = frozenset({TransactionType.DEPOSIT})
 _TWO_ARG_PARTS = 3
 # Expected part count for one-argument commands (cmd + id).
 _ONE_ARG_PARTS = 2
+
+# Wallet names: alphanumeric, hyphens, underscores; 1-64 chars; starts with alnum.
+# Same character-set rules as batch names (security-input-hardening.md §2).
+_WALLET_NAME_RE: re.Pattern[str] = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
+
+
+def _validate_wallet_name(name: str) -> str | None:
+    """Return an error message if *name* is not a valid wallet identifier, else ``None``.
+
+    An empty string is accepted (wallet name is optional -- the user may leave it blank).
+    Non-empty names must be 1-64 characters, start with a letter or digit, and contain
+    only letters, digits, hyphens, and underscores.  Spaces and special characters are
+    rejected to prevent display corruption and to satisfy the identifier-hardening policy.
+    """
+    if not name:
+        return None
+    if not _WALLET_NAME_RE.fullmatch(name):
+        return (
+            "Wallet name must be 1-64 characters, start with a letter or digit, "
+            "and contain only letters, digits, hyphens (-), and underscores (_). "
+            "No spaces or special characters."
+        )
+    return None
 
 
 class _StirError(Exception):
@@ -731,6 +755,36 @@ def _print_unmatched(
         out.print("  [dim](none — all deposits resolved)[/dim]")
     out.print()
 
+    # User overrides — forced links, external markers, forced unlinks.
+    has_overrides = state.forced_link_pairs or state.external_markers or state.forced_unlink_pairs
+    if has_overrides:
+        out.rule("Your overrides", style="dim")
+
+        if state.external_markers:
+            out.print(f"  [dim]External transfers ({len(state.external_markers)})[/dim]")
+            for tx, action, ext_wallet in state.external_markers:
+                direction = "-> external" if action == "external-out" else "<- external"
+                wallet_label = f"  [{ext_wallet}]" if ext_wallet else ""
+                row = Text("  ")
+                row.append_text(_fmt_tx(tx, _wallets))
+                row.append(f"  {direction}{wallet_label}", style="dim")
+                out.print(row)
+            out.print()
+
+        if state.forced_link_pairs:
+            out.print(f"  [dim]Forced links ({len(state.forced_link_pairs)})[/dim]")
+            for tx_a, tx_b, implied_fee in state.forced_link_pairs:
+                _print_pair(tx_a, tx_b, _wallets)
+                if implied_fee > Decimal("0"):
+                    out.print(f"       [dim]Implied fee: {implied_fee:.8f} {tx_a.asset}[/dim]")
+            out.print()
+
+        if state.forced_unlink_pairs:
+            out.print(f"  [dim]Forced unlinks ({len(state.forced_unlink_pairs)})[/dim]")
+            for tx_a, tx_b in state.forced_unlink_pairs:
+                _print_pair(tx_a, tx_b, _wallets, connector="✗")
+            out.print()
+
 
 def _print_help() -> None:
     out.print()
@@ -870,7 +924,7 @@ def _cmd_clear(  # noqa: PLR0913
     return overrides, state
 
 
-def _cmd_external(  # noqa: PLR0913
+def _cmd_external(  # noqa: PLR0911 PLR0912 PLR0913 PLR0915
     conn: sqlite3.Connection,
     parts: list[str],
     tx_ids: set[int],
@@ -879,31 +933,47 @@ def _cmd_external(  # noqa: PLR0913
     wallets: list[Wallet],
     tax_year: int | None = None,
 ) -> tuple[list[TransferOverride], _MatchState] | None:
-    """Handle the ``external <id>`` sub-command.
+    """Handle the ``external <id> [id2 …] [wallet_name]`` sub-command.
 
-    Marks a withdrawal as ``external-out`` or a deposit as ``external-in``.
-    Prompts for a wallet name to label the external destination/source.
+    Marks one or more withdrawals/deposits as ``external-out``/``external-in``
+    and associates them all with the same named external wallet.
+
+    Argument parsing
+    ----------------
+    After the first ``<id>``, each subsequent token is examined left-to-right:
+
+    - A token that parses as an integer AND is a known transaction ID is added
+      to the batch of transactions to mark.
+    - A token that parses as an integer but is *not* a known transaction ID
+      triggers an error ("Transaction id X not found") — the user almost
+      certainly mis-typed a tx_id rather than intending a purely numeric wallet
+      name.
+    - The first non-integer token ends the ID list; everything from that token
+      to the end of the command is treated as the wallet name (joined with
+      spaces, then validated — spaces will be rejected by ``_validate_wallet_name``).
+    - If all tokens after the first ID were integers (no wallet name in the
+      command), the user is prompted interactively.
     """
     if len(parts) < _ONE_ARG_PARTS:
-        out.print("Usage: external <id>  [optional wallet name]")
+        out.print("Usage: external <id> [id2 …] [wallet_name]")
         return None
     try:
         tx_id = int(parts[1])
     except ValueError:
-        out.print("Transaction id must be an integer.")
+        out.print("  Transaction id must be an integer.")
         return None
     if tx_id not in tx_ids:
-        out.print(f"Transaction id {tx_id} not found.")
+        out.print(f"  Transaction id {tx_id} not found.")
         return None
 
     tx_by_id = {t.id: t for t in txs}
     tx = tx_by_id[tx_id]
 
+    # Determine prompt direction from the first transaction's type (used only
+    # when we need to prompt for the wallet name interactively).
     if tx.tx_type in _OUTGOING:
-        action = "external-out"
         direction_msg = "sent to"
     elif tx.tx_type in _INCOMING:
-        action = "external-in"
         direction_msg = "received from"
     else:
         out.print(
@@ -912,18 +982,54 @@ def _cmd_external(  # noqa: PLR0913
         )
         return None
 
-    # Wallet name: from command args or prompt.
-    if len(parts) >= _TWO_ARG_PARTS:
-        ext_wallet = " ".join(parts[2:])
+    # Build the list of all transaction IDs to mark, and isolate wallet tokens.
+    all_tx_ids: list[int] = [tx_id]
+    wallet_parts: list[str] = []
+    for i, part in enumerate(parts[2:], start=2):
+        try:
+            candidate = int(part)
+        except ValueError:
+            # First non-integer token → wallet name starts here.
+            wallet_parts = parts[i:]
+            break
+        else:
+            if candidate in tx_ids:
+                all_tx_ids.append(candidate)
+            else:
+                out.print(f"  Transaction id {candidate} not found.")
+                return None
+
+    # Resolve wallet name from remaining tokens or interactive prompt.
+    if wallet_parts:
+        ext_wallet = " ".join(wallet_parts)
     else:
         ext_wallet = input(f"  Wallet name ({direction_msg} which external wallet)? ").strip()
 
-    # Clear any conflicting override for this tx.
-    repo.clear_transfer_overrides_for_tx(conn, tx_id)
-    repo.write_transfer_override(conn, tx_id, None, action, external_wallet=ext_wallet)
-    verb = "out to" if action == "external-out" else "in from"
+    err = _validate_wallet_name(ext_wallet)
+    if err:
+        out.print(f"  {err}")
+        return None
+
+    # Write an override for every transaction in the batch.
     wallet_label = f" '{ext_wallet}'" if ext_wallet else ""
-    out.print(f"  Marked id:{tx_id} as external transfer {verb}{wallet_label}.")
+    for tid in all_tx_ids:
+        t = tx_by_id[tid]
+        if t.tx_type in _OUTGOING:
+            act: str = "external-out"
+            verb = "out to"
+        elif t.tx_type in _INCOMING:
+            act = "external-in"
+            verb = "in from"
+        else:
+            out.print(
+                f"  Transaction {tid} is type '{t.tx_type.value}' — "
+                "only withdrawals and deposits can be marked as external transfers."
+            )
+            return None
+        repo.clear_transfer_overrides_for_tx(conn, tid)
+        repo.write_transfer_override(conn, tid, None, act, external_wallet=ext_wallet)
+        out.print(f"  Marked id:{tid} as external transfer {verb}{wallet_label}.")
+
     out.print("  Run 'boil --from transfer_match' to apply.")
     overrides = repo.read_transfer_overrides(conn)
     state = _build_state(txs, overrides)
@@ -1013,6 +1119,10 @@ def _cmd_transfer(  # noqa: PLR0911 PLR0912 PLR0915 PLR0913
     # Step 2: external path.
     if is_external:
         ext_label = input("  Label for this external wallet (optional): ").strip()
+        wallet_err = _validate_wallet_name(ext_label)
+        if wallet_err:
+            out.print(f"  {wallet_err}")
+            return None
         action = "external-out" if is_out else "external-in"
         repo.clear_transfer_overrides_for_tx(conn, tx_id)
         repo.write_transfer_override(conn, tx_id, None, action, external_wallet=ext_label)

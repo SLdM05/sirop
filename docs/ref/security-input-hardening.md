@@ -254,12 +254,40 @@ appear in test fixtures, test parametrize lists, or comments.
 
 ---
 
+## 10. Wallet Names — Same Rules as Batch Names
+
+**Rule:** External wallet names (from `stir external` and the `transfer`
+wizard) are validated by `_validate_wallet_name()` in
+`src/sirop/cli/stir.py` before any override is written.
+
+Allowed pattern: `^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$`
+
+| Input | Status |
+|-------|--------|
+| `cold-vault` | allowed |
+| `ledger_2025` | allowed |
+| `cold storage` | rejected (space) |
+| `vault!` | rejected (special char) |
+| `` (empty) | allowed (name is optional) |
+
+Empty string is accepted — the user is not required to name an external wallet.
+Non-empty names follow the same character set as batch names so that wallet
+labels are safe for display, filenames, and future CLI use without shell
+quoting.
+
+The same `_validate_wallet_name()` function is called by:
+- `_cmd_external()` (interactive `external` command)
+- `_cmd_transfer()` wizard (external path)
+
+---
+
 ## Summary Checklist
 
 Use this when reviewing any new pipeline module:
 
 - [ ] All SQL uses `?` placeholders — no f-strings, `.format()`, or `%` in queries
 - [ ] Batch names pass through `_validate_batch_name()` before filesystem use
+- [ ] Wallet names pass through `_validate_wallet_name()` before any override is written
 - [ ] YAML loaded with `yaml.safe_load()` and parsed through a pydantic schema
 - [x] `date_format` validated against the strptime allowlist before use
 - [ ] Node API responses validated for shape, types, and txid match
