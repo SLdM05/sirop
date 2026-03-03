@@ -21,6 +21,8 @@ YAML config files, and no parsing of CSV data rows.
 
 from __future__ import annotations
 
+import contextlib
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
@@ -47,6 +49,10 @@ class FormatCandidate:
     display_name: str  # human label from config, e.g. "NDAX"
     fingerprint: frozenset[str]  # required CSV column names (subset of all_columns)
     all_columns: frozenset[str]  # every column name declared in the YAML (for drift detection)
+    # Compiled regex patterns from ``known_column_patterns`` in the YAML.
+    # Headers matching any pattern are excluded from unknown_headers even when
+    # they are absent from all_columns (e.g. Sparrow's optional "Value (CAD)").
+    column_patterns: tuple[re.Pattern[str], ...]
 
 
 @dataclass(frozen=True)
@@ -170,7 +176,10 @@ class FormatDetector:
                 partial.append((source_name, ratio))
 
         partial.sort(key=lambda x: x[1], reverse=True)
-        unknown = frozenset(headers - all_known)
+        all_patterns = [p for c in self._candidates.values() for p in c.column_patterns]
+        unknown = frozenset(
+            h for h in (headers - all_known) if not any(p.fullmatch(h) for p in all_patterns)
+        )
         return DetectionResult(matched=matched, partial=partial, unknown_headers=unknown)
 
     def validate(self, headers: set[str], source_name: str) -> ValidationResult:
@@ -192,11 +201,15 @@ class FormatDetector:
             )
 
         all_known: set[str] = set()
+        all_patterns: list[re.Pattern[str]] = []
         for c in self._candidates.values():
             all_known |= c.all_columns
+            all_patterns.extend(c.column_patterns)
 
         missing = candidate.fingerprint - headers
-        unknown = frozenset(headers - all_known)
+        unknown = frozenset(
+            h for h in (headers - all_known) if not any(p.fullmatch(h) for p in all_patterns)
+        )
 
         # When validation fails, find a better-fitting source to suggest.
         suggested: str | None = None
@@ -241,10 +254,16 @@ class FormatDetector:
             for col in raw.get("ignored_columns", []):
                 all_cols.add(str(col))
 
+            patterns: list[re.Pattern[str]] = []
+            for pattern_str in raw.get("known_column_patterns", []):
+                with contextlib.suppress(re.error):
+                    patterns.append(re.compile(str(pattern_str)))
+
             source_name = yaml_path.stem
             self._candidates[source_name] = FormatCandidate(
                 source_name=source_name,
                 display_name=str(raw.get("name", source_name)),
                 fingerprint=frozenset(str(c) for c in fingerprint_list),
                 all_columns=frozenset(all_cols),
+                column_patterns=tuple(patterns),
             )

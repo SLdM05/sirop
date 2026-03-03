@@ -133,9 +133,15 @@ Sparrow writes `Value`, `Balance`, and `Fee` in either BTC (decimal) or satoshis
 **The importer must detect the unit from the data, not assume it:**
 
 1. Inspect the `Value` column across all rows in the file.
-2. If any row contains a decimal point in the `Value` field → unit is BTC. Parse all `Value`, `Balance`, and `Fee` fields as BTC and convert to satoshis by multiplying by `100_000_000`.
-3. If no row contains a decimal point → unit is satoshis. Parse as integer.
-4. Use Python `Decimal` for all BTC parsing. Never use `float`.
+2. If any row contains a decimal point (`.`) **or a locale decimal comma (`,`)** in the
+   `Value` field → unit is BTC. Parse all `Value`, `Balance`, and `Fee` fields as BTC
+   decimals. (French/European Sparrow installations use `,` as the decimal separator —
+   e.g. `"0,00005123"` instead of `"0.00005123"`. Satoshi-mode values are always plain
+   integers and never contain either separator.)
+3. If no row contains either separator → unit is satoshis. Parse as integer.
+4. Use Python `Decimal` for all BTC parsing. Never use `float`. When comma-decimal
+   format is detected, normalise each field by replacing `,` with `.` before passing
+   to `Decimal()`.
 5. After normalization, all internal values must be stored as integer satoshis.
 
 ### Fiat Column Detection
@@ -404,11 +410,20 @@ optional_columns:
 ignored_columns:
   - fiat_value_pattern   # CoinGecko daily rate — not BoC, never use for ACB
 
+# Regex patterns for optional headers that may appear in some Sparrow exports.
+# The format detector matches incoming CSV headers against these patterns and
+# suppresses the "unknown column" drift-detection warning for any match.
+# This prevents false-positive warnings for the optional fiat column
+# (e.g. "Value (CAD)", "Value (EUR)") which Sparrow appends when an exchange
+# rate source is configured.
+known_column_patterns:
+  - "Value \\(.+\\)"   # optional fiat column — currency code varies by locale
+
 timestamp_format: "%Y-%m-%d %H:%M:%S"
 timestamp_timezone: UTC
 unconfirmed_sentinel: "Unconfirmed"
 
-amount_unit: auto_detect   # Detect BTC vs sats from presence of decimal point
+amount_unit: auto_detect   # Detect BTC vs sats from presence of '.' or ',' separator
 amount_type: signed        # Positive = receive, negative = send
 fee_nullable: true         # Empty fee field = None, not zero
 ```

@@ -1,0 +1,5 @@
+Date (UTC),Label,Value,Balance,Fee,Value (CAD),Txid
+2025-04-12 00:00:00,receive,"0,00005123","0,00005123",,"5,86",eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+2025-04-13 00:00:00,send,"-0,00002662","0,00002461","0,00000141","-3,14",ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+
+# Historical CAD values are taken from daily rates and should only be considered as approximate.

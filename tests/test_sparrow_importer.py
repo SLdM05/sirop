@@ -25,18 +25,22 @@ SPARROW_YAML = Path("config/importers/sparrow.yaml")
 SPARROW_BTC_CSV = Path("tests/fixtures/sparrow_btc.csv")
 SPARROW_SATS_CSV = Path("tests/fixtures/sparrow_sats.csv")
 SPARROW_FIAT_CSV = Path("tests/fixtures/sparrow_fiat.csv")
+SPARROW_LOCALE_CSV = Path("tests/fixtures/sparrow_locale.csv")
 
 # Synthetic txids used in fixtures — exactly 64 hex characters each.
 TXID_A = "a" * 64  # unconfirmed row (must NOT appear in results)
 TXID_B = "b" * 64  # deposit row 1
 TXID_C = "c" * 64  # withdrawal row
 TXID_D = "d" * 64  # deposit row 2
+TXID_E = "e" * 64  # locale fixture: deposit
+TXID_F = "f" * 64  # locale fixture: withdrawal
 
 # Named counts matching the synthetic fixture content.
 _BTC_CONFIRMED_COUNT = 3
 _BTC_DEPOSIT_COUNT = 2
 _BTC_WITHDRAWAL_COUNT = 1
 _FIAT_ROW_COUNT = 2
+_LOCALE_ROW_COUNT = 2
 _TXID_LENGTH = 64
 
 
@@ -63,6 +67,11 @@ def sats_txs(importer: SparrowImporter) -> list[RawTransaction]:
 @pytest.fixture(scope="module")
 def fiat_txs(importer: SparrowImporter) -> list[RawTransaction]:
     return importer.parse(SPARROW_FIAT_CSV)
+
+
+@pytest.fixture(scope="module")
+def locale_txs(importer: SparrowImporter) -> list[RawTransaction]:
+    return importer.parse(SPARROW_LOCALE_CSV)
 
 
 # ---------------------------------------------------------------------------
@@ -330,3 +339,51 @@ def test_unparseable_value_skipped(importer: SparrowImporter, tmp_path: Path) ->
     result = importer.parse(csv_path)
     assert len(result) == 1
     assert result[0].amount == Decimal("0.00050000")
+
+
+# ---------------------------------------------------------------------------
+# French/European locale — comma decimal separator
+# ---------------------------------------------------------------------------
+
+
+def test_locale_no_crash(locale_txs: list[RawTransaction]) -> None:
+    """Comma-decimal CSV with trailing comment must parse without TypeError."""
+    assert len(locale_txs) == _LOCALE_ROW_COUNT
+
+
+def test_locale_btc_unit_detected(locale_txs: list[RawTransaction]) -> None:
+    """Comma decimal in Value column must trigger BTC mode, not sats mode."""
+    # If sats mode were detected, amounts would be ~5123 / 1e8 ≈ 0.00000005123 BTC.
+    # Correct BTC mode gives 0.00005123 BTC.
+    deposit = next(tx for tx in locale_txs if tx.txid == TXID_E)
+    assert deposit.amount == Decimal("0.00005123")
+
+
+def test_locale_deposit_amount(locale_txs: list[RawTransaction]) -> None:
+    deposit = next(tx for tx in locale_txs if tx.txid == TXID_E)
+    assert deposit.amount == Decimal("0.00005123")
+    assert deposit.transaction_type == "deposit"
+
+
+def test_locale_withdrawal_amount(locale_txs: list[RawTransaction]) -> None:
+    withdrawal = next(tx for tx in locale_txs if tx.txid == TXID_F)
+    assert withdrawal.amount == Decimal("0.00002662")
+    assert withdrawal.transaction_type == "withdrawal"
+
+
+def test_locale_fee(locale_txs: list[RawTransaction]) -> None:
+    withdrawal = next(tx for tx in locale_txs if tx.txid == TXID_F)
+    assert withdrawal.fee_amount == Decimal("0.00000141")
+    assert withdrawal.fee_currency == "BTC"
+
+
+def test_locale_fiat_value_none(locale_txs: list[RawTransaction]) -> None:
+    """CoinGecko fiat values from the locale fixture must never reach ACB engine."""
+    for tx in locale_txs:
+        assert tx.fiat_value is None
+        assert tx.fiat_currency is None
+
+
+def test_locale_footer_comment_tolerated(locale_txs: list[RawTransaction]) -> None:
+    """Trailing comment line must not produce a spurious transaction."""
+    assert len(locale_txs) == _LOCALE_ROW_COUNT

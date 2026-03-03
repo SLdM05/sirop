@@ -46,7 +46,7 @@ sirop stir --clear <id>
 | `--unlink <id1> <id2>` | Prevent the auto-matcher from pairing these two transactions |
 | `--external-out <id>` | Mark a withdrawal as going to an untracked external wallet |
 | `--external-in <id>` | Mark a deposit as arriving from an untracked external wallet |
-| `--wallet NAME` | With `--external-*`: label for the external wallet (e.g. `"cold-storage"`) |
+| `--wallet NAME` | With `--external-*`: label for the external wallet (e.g. `"cold-storage"`). Must be 1–64 characters, start with a letter or digit, and contain only letters, digits, hyphens, and underscores. No spaces. |
 | `--clear <id>` | Remove all overrides that involve this transaction ID |
 
 Transaction IDs (`id1`, `id2`, `id`) are the `id` values from the `transactions`
@@ -89,7 +89,7 @@ stir> _
 | `transfer <id> [<id> ...]` | Guided wizard: link a withdrawal to its matching deposit (or vice versa). Accepts one or more IDs — runs the wizard for each in sequence. |
 | `link <id1> <id2>` | Force-link two transactions as a transfer pair. Prompts for implied fee. |
 | `unlink <id1> <id2>` | Block the auto-matcher from pairing these two. |
-| `external <id>` | Guided wizard: mark as external-out or external-in with wallet label. |
+| `external <id> [<id2> …] [wallet_name]` | Mark one or more withdrawals/deposits as going to or coming from an untracked external wallet. Accepts any number of transaction IDs followed by an optional wallet name. Each transaction's direction (out/in) is resolved independently. |
 | `clear <id>` | Remove all overrides that involve this transaction. |
 | `help` | Show command reference. |
 | `quit` | Exit. Overrides already written are saved. |

@@ -14,7 +14,7 @@ from decimal import Decimal
 
 import pytest
 
-from sirop.cli.stir import _compute_implied_fee
+from sirop.cli.stir import _cmd_external, _compute_implied_fee, _validate_wallet_name
 from sirop.db import repositories as repo
 from sirop.db.schema import create_tables, migrate_to_v5
 from sirop.models.enums import TransactionType
@@ -568,3 +568,185 @@ class TestComputeImpliedFee:
         fee, err = _compute_implied_fee(out_tx, in_tx)
         assert fee == Decimal("0.005")
         assert err == ""
+
+
+# ---------------------------------------------------------------------------
+# Wallet name validation
+# ---------------------------------------------------------------------------
+
+
+class TestValidateWalletName:
+    def test_empty_string_accepted(self) -> None:
+        assert _validate_wallet_name("") is None
+
+    def test_valid_alphanumeric(self) -> None:
+        assert _validate_wallet_name("ledger1") is None
+
+    def test_valid_with_hyphens_and_underscores(self) -> None:
+        assert _validate_wallet_name("cold-wallet_2025") is None
+
+    def test_starts_with_digit(self) -> None:
+        assert _validate_wallet_name("2025wallet") is None
+
+    def test_space_rejected(self) -> None:
+        assert _validate_wallet_name("cold wallet") is not None
+
+    def test_special_char_rejected(self) -> None:
+        assert _validate_wallet_name("wallet!") is not None
+
+    def test_slash_rejected(self) -> None:
+        assert _validate_wallet_name("cold/vault") is not None
+
+    def test_max_length_accepted(self) -> None:
+        # 64-char name: 1 leading + 63 trailing alnum chars
+        assert _validate_wallet_name("a" * 64) is None
+
+    def test_over_max_length_rejected(self) -> None:
+        assert _validate_wallet_name("a" * 65) is not None
+
+
+# ---------------------------------------------------------------------------
+# _cmd_external — wallet name validation + multi-ID batch assignment
+# ---------------------------------------------------------------------------
+
+
+def _external_call(
+    conn: sqlite3.Connection,
+    txs: list[Transaction],
+    parts: list[str],
+    batch_name: str = "testbatch",
+) -> object:
+    """Helper: invoke _cmd_external with a pre-built conn and tx list."""
+    tx_ids = {t.id for t in txs}
+    return _cmd_external(conn, parts, tx_ids, batch_name, txs, wallets=[], tax_year=None)
+
+
+class TestCmdExternal:
+    def test_valid_single_id_marks_override(self) -> None:
+        conn = _make_conn()
+        txs = [_tx(1, TransactionType.WITHDRAWAL)]
+        _seed_transactions(conn, txs)
+
+        result = _external_call(conn, txs, ["external", "1", "cold-vault"])
+
+        assert result is not None
+        overrides = repo.read_transfer_overrides(conn)
+        assert len(overrides) == 1
+        assert overrides[0].tx_id_a == 1
+        assert overrides[0].action == "external-out"
+        assert overrides[0].external_wallet == "cold-vault"
+
+    def test_single_deposit_becomes_external_in(self) -> None:
+        conn = _make_conn()
+        txs = [_tx(2, TransactionType.DEPOSIT)]
+        _seed_transactions(conn, txs)
+
+        result = _external_call(conn, txs, ["external", "2", "exchange-old"])
+
+        assert result is not None
+        overrides = repo.read_transfer_overrides(conn)
+        assert overrides[0].action == "external-in"
+        assert overrides[0].external_wallet == "exchange-old"
+
+    def test_two_ids_both_marked(self) -> None:
+        conn = _make_conn()
+        txs = [
+            _tx(10, TransactionType.WITHDRAWAL),
+            _tx(20, TransactionType.DEPOSIT),
+        ]
+        _seed_transactions(conn, txs)
+
+        result = _external_call(conn, txs, ["external", "10", "20", "legacy-cold"])
+
+        assert result is not None
+        overrides = repo.read_transfer_overrides(conn)
+        assert len(overrides) == 2  # noqa: PLR2004
+        by_tx = {ov.tx_id_a: ov for ov in overrides}
+        assert by_tx[10].action == "external-out"
+        assert by_tx[20].action == "external-in"
+        assert by_tx[10].external_wallet == "legacy-cold"
+        assert by_tx[20].external_wallet == "legacy-cold"
+
+    def test_three_ids_all_marked_same_wallet(self) -> None:
+        conn = _make_conn()
+        txs = [
+            _tx(1, TransactionType.WITHDRAWAL),
+            _tx(2, TransactionType.DEPOSIT),
+            _tx(3, TransactionType.WITHDRAWAL),
+        ]
+        _seed_transactions(conn, txs)
+
+        result = _external_call(conn, txs, ["external", "1", "2", "3", "multi-wallet"])
+
+        assert result is not None
+        overrides = repo.read_transfer_overrides(conn)
+        assert len(overrides) == 3  # noqa: PLR2004
+        wallet_names = {ov.external_wallet for ov in overrides}
+        assert wallet_names == {"multi-wallet"}
+
+    def test_wallet_name_with_space_rejected(self) -> None:
+        """Spaces in wallet name must be rejected; no override written."""
+        conn = _make_conn()
+        txs = [_tx(1, TransactionType.WITHDRAWAL)]
+        _seed_transactions(conn, txs)
+
+        result = _external_call(conn, txs, ["external", "1", "bad", "name"])
+
+        assert result is None
+        assert repo.read_transfer_overrides(conn) == []
+
+    def test_wallet_name_with_special_char_rejected(self) -> None:
+        conn = _make_conn()
+        txs = [_tx(1, TransactionType.WITHDRAWAL)]
+        _seed_transactions(conn, txs)
+
+        result = _external_call(conn, txs, ["external", "1", "bad!name"])
+
+        assert result is None
+        assert repo.read_transfer_overrides(conn) == []
+
+    def test_empty_wallet_name_accepted(self) -> None:
+        """An empty wallet name (user opted out of naming) is allowed."""
+        conn = _make_conn()
+        txs = [_tx(1, TransactionType.WITHDRAWAL)]
+        _seed_transactions(conn, txs)
+
+        result = _external_call(conn, txs, ["external", "1", ""])
+
+        # Empty string token: not an integer, so wallet_parts = [""]
+        # " ".join([""]) = "" → passes validation (empty string OK)
+        assert result is not None
+        overrides = repo.read_transfer_overrides(conn)
+        assert overrides[0].external_wallet == ""
+
+    def test_unknown_integer_second_arg_errors(self) -> None:
+        """An integer that is not a known tx_id triggers an error, not a wallet name."""
+        conn = _make_conn()
+        txs = [_tx(1, TransactionType.WITHDRAWAL)]
+        _seed_transactions(conn, txs)
+
+        result = _external_call(conn, txs, ["external", "1", "9999", "cold"])
+
+        assert result is None
+        assert repo.read_transfer_overrides(conn) == []
+
+    def test_first_id_not_found_errors(self) -> None:
+        conn = _make_conn()
+        txs = [_tx(1, TransactionType.WITHDRAWAL)]
+        _seed_transactions(conn, txs)
+
+        result = _external_call(conn, txs, ["external", "99", "cold"])
+
+        assert result is None
+        assert repo.read_transfer_overrides(conn) == []
+
+    def test_unsupported_tx_type_errors(self) -> None:
+        """BUY/SELL/TRADE types cannot be marked as external."""
+        conn = _make_conn()
+        txs = [_tx(1, TransactionType.BUY)]
+        _seed_transactions(conn, txs)
+
+        result = _external_call(conn, txs, ["external", "1", "cold"])
+
+        assert result is None
+        assert repo.read_transfer_overrides(conn) == []

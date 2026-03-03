@@ -34,6 +34,8 @@ SHAKEPAY_HEADERS: set[str] = {
     "Buy / Sell Rate",
     "Description",
 }
+SPARROW_HEADERS: set[str] = {"Date (UTC)", "Label", "Value", "Balance", "Fee", "Txid"}
+SPARROW_FIAT_HEADERS: set[str] = SPARROW_HEADERS | {"Value (CAD)"}
 UNKNOWN_HEADERS: set[str] = {"OrderID", "Quantity", "Symbol", "Side", "Price", "Timestamp"}
 
 
@@ -112,6 +114,26 @@ def test_detect_extra_column_flagged(detector: FormatDetector) -> None:
     assert "MYSTERY_COLUMN" in result.unknown_headers
     # Should still match NDAX (all fingerprint cols present)
     assert "ndax" in result.matched
+
+
+def test_sparrow_fiat_column_not_unknown(detector: FormatDetector) -> None:
+    """'Value (CAD)' matches Sparrow's known_column_patterns — must not be flagged."""
+    result = detector.detect(SPARROW_FIAT_HEADERS)
+    assert "sparrow" in result.matched
+    assert "Value (CAD)" not in result.unknown_headers
+
+
+def test_sparrow_other_fiat_currency_not_unknown(detector: FormatDetector) -> None:
+    """'Value (EUR)' also matches the pattern — must not be flagged as unknown."""
+    result = detector.detect(SPARROW_HEADERS | {"Value (EUR)"})
+    assert "Value (EUR)" not in result.unknown_headers
+
+
+def test_sparrow_validate_fiat_column_not_unknown(detector: FormatDetector) -> None:
+    """validate() must also suppress known-pattern columns from unknown_headers."""
+    result = detector.validate(SPARROW_FIAT_HEADERS, "sparrow")
+    assert result.ok is True
+    assert "Value (CAD)" not in result.unknown_headers
 
 
 # ---------------------------------------------------------------------------

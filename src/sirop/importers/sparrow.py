@@ -245,7 +245,7 @@ class SparrowImporter(BaseImporter):
             return None
 
         try:
-            signed_value = Decimal(value_str)
+            signed_value = self._parse_btc_decimal(value_str)
         except InvalidOperation:
             logger.warning(
                 "sparrow: cannot parse Value %r at row %d — skipping",
@@ -269,7 +269,7 @@ class SparrowImporter(BaseImporter):
         fee_btc: Decimal | None = None
         if fee_str:
             try:
-                fee_btc = self._to_btc(Decimal(fee_str), unit)
+                fee_btc = self._to_btc(self._parse_btc_decimal(fee_str), unit)
             except InvalidOperation:
                 logger.warning(
                     "sparrow: cannot parse Fee %r at row %d — treating as None",
@@ -310,23 +310,39 @@ class SparrowImporter(BaseImporter):
     # ------------------------------------------------------------------
 
     def _detect_unit(self, rows: list[dict[str, str]]) -> str:
-        """Return ``"BTC"`` if any Value contains a decimal point, else ``"sats"``.
+        """Return ``"BTC"`` if any Value contains a decimal separator, else ``"sats"``.
 
         Scans all rows before parsing any of them so that receives with
         round BTC amounts (e.g. ``"1.00000000"``) are not misclassified
         as satoshis when they happen to appear before the first non-round row.
 
-        A decimal point can only appear in BTC-mode exports (Sparrow writes
-        exactly 8 decimal places in BTC mode; satoshi mode is always integer).
+        Detects both ``.`` (English locale) and ``,`` (French/European locale)
+        as decimal separators.  Satoshi-mode exports always produce plain
+        integers (e.g. ``"150000"``), so neither separator ever appears there.
+
+        Rows with ``None`` values (e.g. the trailing comment line that Sparrow
+        appends when a fiat column is enabled) are safely skipped via ``or ""``.
         """
         if self._amount_unit != "auto_detect":
             return self._amount_unit
 
         value_col = self._config.columns["value"]
         for row in rows:
-            if "." in row.get(value_col, ""):
+            val = row.get(value_col) or ""
+            if "." in val or "," in val:
                 return "BTC"
         return "sats"
+
+    @staticmethod
+    def _parse_btc_decimal(value: str) -> Decimal:
+        """Parse a numeric string that may use ``,`` as locale decimal separator.
+
+        Sparrow exports from French/European locale use ``"0,00005123"`` instead
+        of ``"0.00005123"``.  Replacing ``,`` with ``.`` before parsing is safe
+        because satoshi-mode values are plain integers (no comma ever appears),
+        and BTC-mode values contain exactly one comma acting as the decimal point.
+        """
+        return Decimal(value.replace(",", "."))
 
     def _detect_fiat_column(self, first_row: dict[str, str]) -> str | None:
         """Return the fiat column header name if present, else ``None``.
