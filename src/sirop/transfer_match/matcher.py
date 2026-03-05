@@ -216,6 +216,7 @@ def match_transfers(  # noqa: PLR0912 PLR0915
                     txid=outgoing.txid,
                     source=outgoing.source,
                     is_taxable=True,
+                    wallet_id=outgoing.wallet_id,
                 )
             )
         else:
@@ -238,6 +239,7 @@ def match_transfers(  # noqa: PLR0912 PLR0915
                         txid=outgoing.txid,
                         source=outgoing.source,
                         is_taxable=True,
+                        wallet_id=outgoing.wallet_id,
                     )
                 )
 
@@ -251,6 +253,20 @@ def match_transfers(  # noqa: PLR0912 PLR0915
         match = _find_match(tx, sorted_txs, paired_ids, forced_unlink_pairs)
         if match is None:
             continue
+
+        # Warn if both legs share the same wallet — likely coin consolidation,
+        # not a true inter-wallet transfer. Still treated as a transfer.
+        if (
+            tx.wallet_id is not None
+            and match.wallet_id is not None
+            and tx.wallet_id == match.wallet_id
+        ):
+            logger.warning(
+                "transfer_match: same-wallet transfer in '%s' (wallet_id=%d) —"
+                " possible coin consolidation; treating as transfer",
+                tx.source,
+                tx.wallet_id,
+            )
 
         # Mark both legs as paired.
         paired_ids.add(tx.id)
@@ -274,6 +290,7 @@ def match_transfers(  # noqa: PLR0912 PLR0915
                     txid=tx.txid,
                     source=tx.source,
                     is_taxable=True,
+                    wallet_id=tx.wallet_id,
                 )
             )
 
@@ -301,6 +318,7 @@ def match_transfers(  # noqa: PLR0912 PLR0915
                     txid=tx.txid,
                     source=tx.source,
                     is_taxable=False,
+                    wallet_id=tx.wallet_id,
                 )
             )
             continue
@@ -452,6 +470,7 @@ def _classify(
             txid=tx.txid,
             source=tx.source,
             is_taxable=False,
+            wallet_id=tx.wallet_id,
         ),
         None,
     )
@@ -487,6 +506,7 @@ def _classify_acquisition(tx: Transaction, tax_year: int | None = None) -> Class
         txid=tx.txid,
         source=tx.source,
         is_taxable=tx.cad_value > Decimal("0"),
+        wallet_id=tx.wallet_id,
     )
 
 
@@ -520,6 +540,7 @@ def _classify_disposal(tx: Transaction, tax_year: int | None = None) -> Classifi
         txid=tx.txid,
         source=tx.source,
         is_taxable=tx.cad_value > Decimal("0"),
+        wallet_id=tx.wallet_id,
     )
 
 
@@ -539,6 +560,7 @@ def _classify_income(tx: Transaction) -> tuple[ClassifiedEvent, IncomeEvent]:
         txid=tx.txid,
         source=tx.source,
         is_taxable=True,
+        wallet_id=tx.wallet_id,
     )
     income = IncomeEvent(
         id=0,

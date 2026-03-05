@@ -230,6 +230,10 @@ messages:
     category: output
     text: "\n  Year-end holdings (cost basis):"
 
+  boil.summary.wallet_header:
+    category: output
+    text: "\n  {name}"
+
   boil.summary.stir_hint:
     category: output
     text: "  Use 'sirop stir' to link wallet transfers — {w} unmatched withdrawal(s) and {d} unmatched deposit(s)."

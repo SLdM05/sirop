@@ -27,3 +27,4 @@ class ClassifiedEvent:
     txid: str | None
     source: str  # origin exchange / wallet
     is_taxable: bool  # False for transfer legs excluded from ACB engine
+    wallet_id: int | None = None  # FK → wallets.id; None for pre-v7 rows

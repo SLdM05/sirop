@@ -21,7 +21,7 @@ import dataclasses
 import sqlite3
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
@@ -379,10 +379,22 @@ def _run_acb(conn: object, tax_rules: TaxRules) -> None:
     )
 
     with spinner("Running ACB engine…"):
-        disps, states = acb_engine.run(events, tax_rules)
+        disps, states, final_pools, last_events = acb_engine.run(events, tax_rules)
 
     disps = repo.write_dispositions(conn, disps, states)
     logger.debug("wrote %d disposition(s)", len(disps))
+
+    # Write year-end snapshots for assets acquired but never sold in this tax year.
+    # Without these, the holdings query finds nothing for those assets.
+    assets_with_disposal = {s.asset for s in states}
+    holdovers = [
+        (pool, last_events[asset].id)
+        for asset, pool in final_pools.items()
+        if asset not in assets_with_disposal and pool.total_units > Decimal("0")
+    ]
+    if holdovers:
+        repo.write_holdover_acb_states(conn, holdovers)
+        logger.debug("wrote %d holdover acb_state snapshot(s)", len(holdovers))
 
 
 def _run_superficial_loss(conn: object, tax_rules: TaxRules) -> None:
@@ -458,6 +470,106 @@ def _stages_from(from_stage: str) -> tuple[str, ...]:
     return _BOIL_STAGES[idx:]
 
 
+def _print_income_and_costs(conn: sqlite3.Connection) -> None:
+    """Print income and costs & expenses sections of the boil summary."""
+    income_rows = conn.execute(
+        """
+        SELECT income_type, SUM(CAST(fmv_cad AS REAL)) AS total
+        FROM income_events
+        GROUP BY income_type
+        ORDER BY income_type
+        """
+    ).fetchall()
+    if income_rows:
+        total_income = sum(float(r["total"]) for r in income_rows)
+        print(f"  Income:                {total_income:>12,.2f} CAD")
+        for r in income_rows:
+            print(f"    {r['income_type']:<20} {float(r['total']):>10,.2f} CAD")
+
+    costs_row = conn.execute(
+        "SELECT COALESCE(SUM(CAST(cad_fee AS REAL)), 0) "
+        "FROM classified_events "
+        "WHERE is_taxable = 1 AND cad_fee IS NOT NULL"
+    ).fetchone()
+    if costs_row and costs_row[0]:
+        print(f"  Costs & expenses:      {float(costs_row[0]):>12,.2f} CAD")
+
+
+def _print_wallet_holdings(conn: sqlite3.Connection, per_unit_acb: dict[str, float]) -> None:
+    """Print year-end holdings broken down by wallet."""
+    wallet_rows = conn.execute(
+        """
+        SELECT
+            COALESCE(w.name, t.source) AS wallet_name,
+            t.asset,
+            SUM(CASE
+                WHEN t.transaction_type IN ('buy','transfer_in','deposit','income')
+                    THEN CAST(t.amount AS REAL)
+                WHEN t.transaction_type IN ('sell','transfer_out','withdrawal','spend','fee')
+                    THEN -CAST(t.amount AS REAL)
+                ELSE 0
+            END) AS net_units
+        FROM transactions t
+        LEFT JOIN wallets w ON t.wallet_id = w.id
+        WHERE t.asset IN (
+            SELECT asset FROM acb_state
+            WHERE id IN (SELECT MAX(id) FROM acb_state GROUP BY asset)
+              AND CAST(units AS REAL) > 0
+        )
+        GROUP BY wallet_name, t.asset
+        HAVING net_units > 0.00000001
+        ORDER BY wallet_name, t.asset
+        """
+    ).fetchall()
+
+    wallet_assets: dict[str, list[Any]] = {}
+    for r in wallet_rows:
+        wallet_assets.setdefault(r["wallet_name"], []).append(r)
+
+    # External wallets — net units held in wallets flagged via `stir external`.
+    # external-out: units left a tracked wallet → positive for the external wallet
+    # external-in:  units returned to a tracked wallet → negative for the external wallet
+    ext_rows = conn.execute(
+        """
+        SELECT
+            tor.external_wallet AS wallet_name,
+            t.asset,
+            SUM(CASE
+                WHEN tor.action = 'external-out' THEN  CAST(t.amount AS REAL)
+                WHEN tor.action = 'external-in'  THEN -CAST(t.amount AS REAL)
+                ELSE 0
+            END) AS net_units
+        FROM transfer_overrides tor
+        JOIN transactions t ON tor.tx_id_a = t.id
+        WHERE tor.action IN ('external-out', 'external-in')
+          AND tor.external_wallet != ''
+          AND t.asset IN (
+              SELECT asset FROM acb_state
+              WHERE id IN (SELECT MAX(id) FROM acb_state GROUP BY asset)
+                AND CAST(units AS REAL) > 0
+          )
+        GROUP BY tor.external_wallet, t.asset
+        HAVING net_units > 0.00000001
+        ORDER BY tor.external_wallet, t.asset
+        """
+    ).fetchall()
+    for r in ext_rows:
+        wallet_assets.setdefault(r["wallet_name"], []).append(r)
+
+    for wallet_name, rows in wallet_assets.items():
+        emit(MessageCode.BOIL_SUMMARY_WALLET_HEADER, name=wallet_name)
+        emit(MessageCode.BOIL_SUMMARY_HOLDINGS_HEADER)
+        for r in rows:
+            u = float(r["net_units"])
+            acb_pu = per_unit_acb.get(r["asset"], 0.0)
+            wallet_acb = u * acb_pu
+            print(
+                f"    {r['asset']:<6} {u:>14.8f} units"
+                f"   ACB: {wallet_acb:>12,.2f} CAD"
+                f"   ({acb_pu:>12,.2f} CAD/unit)"
+            )
+
+
 def _print_summary(conn: object, batch_name: str) -> None:
     """Print a summary of row counts written to the batch."""
     assert isinstance(conn, sqlite3.Connection)
@@ -482,6 +594,8 @@ def _print_summary(conn: object, batch_name: str) -> None:
         sign = "+" if net >= 0 else ""
         print(f"\n  Realised gain/loss:    {sign}{net:,.2f} CAD (before inclusion rate)")
 
+    _print_income_and_costs(conn)
+
     # Year-end holdings — cost basis for open positions.
     holdings = conn.execute(
         """
@@ -494,15 +608,19 @@ def _print_summary(conn: object, batch_name: str) -> None:
     ).fetchall()
     if holdings:
         emit(MessageCode.BOIL_SUMMARY_HOLDINGS_HEADER)
+        per_unit_acb: dict[str, float] = {}
         for h in holdings:
             units_val = float(h["units"])
             cost_val = float(h["pool_cost"])
             per_unit = cost_val / units_val if units_val else 0.0
+            per_unit_acb[h["asset"]] = per_unit
             print(
                 f"    {h['asset']:<6} {units_val:>14.8f} units"
                 f"   ACB: {cost_val:>12,.2f} CAD"
                 f"   ({per_unit:>12,.2f} CAD/unit)"
             )
+
+        _print_wallet_holdings(conn, per_unit_acb)
 
     # Superficial losses — show details if any were found.
     sld_rows = conn.execute(

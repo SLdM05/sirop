@@ -14,7 +14,7 @@ from typing import Final
 
 # Bump this when the schema changes. The migration guard reads this value
 # and refuses to open a file whose schema_version doesn't match.
-SCHEMA_VERSION: Final[int] = 6
+SCHEMA_VERSION: Final[int] = 7
 
 # All pipeline stage names in execution order.
 PIPELINE_STAGES: Final[tuple[str, ...]] = (
@@ -182,7 +182,8 @@ CREATE TABLE IF NOT EXISTS verified_transactions (
     counterpart_id      INTEGER REFERENCES verified_transactions(id),
     node_verified       INTEGER NOT NULL DEFAULT 0,  -- 0=false, 1=true
     block_height        INTEGER,            -- NULL unless node_verified=1
-    confirmations       INTEGER             -- NULL unless node_verified=1
+    confirmations       INTEGER,            -- NULL unless node_verified=1
+    wallet_id           INTEGER REFERENCES wallets(id)  -- v7: source wallet
 )
 """
 
@@ -200,7 +201,8 @@ CREATE TABLE IF NOT EXISTS classified_events (
     cad_fee         TEXT,               -- Decimal string or NULL
     txid            TEXT,
     source          TEXT    NOT NULL,   -- origin exchange/wallet for traceability
-    is_taxable      INTEGER NOT NULL DEFAULT 1  -- 0=transfer, excluded from ACB engine
+    is_taxable      INTEGER NOT NULL DEFAULT 1,  -- 0=transfer, excluded from ACB engine
+    wallet_id       INTEGER REFERENCES wallets(id)  -- v7: source wallet FK
 )
 """
 
@@ -423,3 +425,27 @@ def migrate_to_v6(conn: sqlite3.Connection) -> None:
     and no column-level ALTER TABLE statements are required.
     """
     create_tables(conn)
+
+
+def migrate_to_v7(conn: sqlite3.Connection) -> None:
+    """Apply v7 schema migrations to an existing batch file.
+
+    Idempotent — safe to call on fresh databases and already-migrated ones.
+    v7 adds ``wallet_id`` (FK → wallets) to ``verified_transactions`` and
+    ``classified_events`` so wallet identity is preserved all the way to the
+    ACB-engine inputs instead of being dropped at the verify stage.
+    """
+    with conn:
+        vtx_cols = {r[1] for r in conn.execute("PRAGMA table_info(verified_transactions)")}
+        if "wallet_id" not in vtx_cols:
+            conn.execute(
+                "ALTER TABLE verified_transactions"
+                " ADD COLUMN wallet_id INTEGER REFERENCES wallets(id)"
+            )
+
+        ce_cols = {r[1] for r in conn.execute("PRAGMA table_info(classified_events)")}
+        if "wallet_id" not in ce_cols:
+            conn.execute(
+                "ALTER TABLE classified_events"
+                " ADD COLUMN wallet_id INTEGER REFERENCES wallets(id)"
+            )

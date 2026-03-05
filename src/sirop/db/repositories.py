@@ -312,12 +312,12 @@ def promote_to_verified(conn: sqlite3.Connection) -> int:
                 (tx_id, timestamp, transaction_type, asset, amount,
                  fee_crypto, fee_currency, cad_amount, cad_fee, cad_rate,
                  txid, source, is_transfer, counterpart_id,
-                 node_verified, block_height, confirmations)
+                 node_verified, block_height, confirmations, wallet_id)
             SELECT
                 id, timestamp, transaction_type, asset, amount,
                 fee_crypto, fee_currency, cad_amount, cad_fee, cad_rate,
                 txid, source, is_transfer, counterpart_id,
-                0, NULL, NULL
+                0, NULL, NULL, wallet_id
             FROM transactions
             """
         )
@@ -356,8 +356,9 @@ def write_classified_events(
                 """
                 INSERT INTO classified_events
                     (vtx_id, timestamp, event_type, asset, amount,
-                     cad_proceeds, cad_cost, cad_fee, txid, source, is_taxable)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     cad_proceeds, cad_cost, cad_fee, txid, source, is_taxable,
+                     wallet_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     evt.vtx_id,
@@ -371,6 +372,7 @@ def write_classified_events(
                     evt.txid,
                     evt.source,
                     1 if evt.is_taxable else 0,
+                    evt.wallet_id,
                 ),
             )
             updated.append(
@@ -387,6 +389,7 @@ def write_classified_events(
                     txid=evt.txid,
                     source=evt.source,
                     is_taxable=evt.is_taxable,
+                    wallet_id=evt.wallet_id,
                 )
             )
     return updated
@@ -437,7 +440,7 @@ def read_classified_events(conn: sqlite3.Connection) -> list[ClassifiedEvent]:
     rows = conn.execute(
         """
         SELECT id, vtx_id, timestamp, event_type, asset, amount,
-               cad_proceeds, cad_cost, cad_fee, txid, source, is_taxable
+               cad_proceeds, cad_cost, cad_fee, txid, source, is_taxable, wallet_id
         FROM classified_events
         WHERE is_taxable = 1
         ORDER BY timestamp
@@ -460,6 +463,7 @@ def read_classified_events(conn: sqlite3.Connection) -> list[ClassifiedEvent]:
                 txid=row["txid"],
                 source=row["source"],
                 is_taxable=bool(row["is_taxable"]),
+                wallet_id=row["wallet_id"],
             )
         )
     return result
@@ -474,7 +478,7 @@ def read_all_classified_events(conn: sqlite3.Connection) -> list[ClassifiedEvent
     rows = conn.execute(
         """
         SELECT id, vtx_id, timestamp, event_type, asset, amount,
-               cad_proceeds, cad_cost, cad_fee, txid, source, is_taxable
+               cad_proceeds, cad_cost, cad_fee, txid, source, is_taxable, wallet_id
         FROM classified_events
         ORDER BY timestamp
         """
@@ -496,6 +500,7 @@ def read_all_classified_events(conn: sqlite3.Connection) -> list[ClassifiedEvent
                 txid=row["txid"],
                 source=row["source"],
                 is_taxable=bool(row["is_taxable"]),
+                wallet_id=row["wallet_id"],
             )
         )
     return result
@@ -591,6 +596,45 @@ def write_dispositions(
                 )
             )
     return updated
+
+
+def write_holdover_acb_states(
+    conn: sqlite3.Connection,
+    holdovers: list[tuple[ACBState, int]],
+) -> None:
+    """Write year-end acb_state snapshots for assets with no disposals.
+
+    Called after write_dispositions() to record the final pool balance for
+    assets that were only acquired (never sold) in the tax year.  Without
+    these rows the year-end holdings query in _print_summary finds nothing
+    for those assets.
+
+    Parameters
+    ----------
+    holdovers:
+        List of (ACBState, classified_event_id) pairs — one per acquisition-
+        only asset.  The event_id is the last classified event processed for
+        that asset.
+    """
+    with conn:
+        for pool, event_id in holdovers:
+            row = conn.execute(
+                "SELECT timestamp FROM classified_events WHERE id = ?", (event_id,)
+            ).fetchone()
+            snapshot_date = row["timestamp"][:10] if row else "unknown"
+            conn.execute(
+                """
+                INSERT INTO acb_state (event_id, asset, pool_cost, units, snapshot_date)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    event_id,
+                    pool.asset,
+                    format(pool.total_acb_cad, "f"),
+                    format(pool.total_units, "f"),
+                    snapshot_date,
+                ),
+            )
 
 
 def read_dispositions(conn: sqlite3.Connection) -> list[Disposition]:

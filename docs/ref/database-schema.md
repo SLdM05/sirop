@@ -45,7 +45,7 @@ open and refuses to process a file whose version does not match the current
 `SCHEMA_VERSION` constant in `db/schema.py`. Bump `SCHEMA_VERSION` whenever
 the schema changes.
 
-Current version: **6**
+Current version: **7**
 
 ---
 
@@ -334,7 +334,8 @@ verified_transactions (
     counterpart_id      INTEGER REFERENCES verified_transactions(id),
     node_verified       INTEGER NOT NULL DEFAULT 0,  -- 0=false, 1=true
     block_height        INTEGER,            -- NULL unless node_verified=1
-    confirmations       INTEGER             -- NULL unless node_verified=1
+    confirmations       INTEGER,            -- NULL unless node_verified=1
+    wallet_id           INTEGER REFERENCES wallets(id)  -- v7: propagated from transactions
 )
 ```
 
@@ -365,7 +366,8 @@ classified_events (
     cad_fee         TEXT,               -- Decimal string or NULL
     txid            TEXT,
     source          TEXT    NOT NULL,   -- origin exchange/wallet for traceability
-    is_taxable      INTEGER NOT NULL DEFAULT 1  -- 0=transfer excluded from ACB engine
+    is_taxable      INTEGER NOT NULL DEFAULT 1,  -- 0=transfer excluded from ACB engine
+    wallet_id       INTEGER REFERENCES wallets(id)  -- v7: source wallet FK
 )
 ```
 
@@ -604,3 +606,4 @@ that need a batch (and weren't given one explicitly) read this file first.
 | 4 | New table: `transfer_overrides` (initial version — `link` and `unlink` actions only, `tx_id_b` NOT NULL). Written by `sirop stir`; consumed by the `transfer_match` stage. |
 | 5 | New table: `wallets`. `wallet_id` FK added to `raw_transactions` and `transactions` — traces each transaction to its originating wallet. `transfer_overrides` recreated with nullable `tx_id_b` (supports external-leg overrides), new columns `implied_fee_crypto` and `external_wallet`, and `external-out` / `external-in` added to `action` CHECK constraint. |
 | 6 | New table: `crypto_prices` — caches historical cryptocurrency prices (USD and CAD) fetched from Mempool.space (BTC) and CoinGecko. Used by the normalizer as a fallback when no exchange-provided fiat value is present. |
+| 7 | `wallet_id` FK added to `verified_transactions` and `classified_events` — propagates wallet origin through the full pipeline so every classified event is traceable to its source wallet. `migrate_to_v7()` adds the columns idempotently to existing files. |

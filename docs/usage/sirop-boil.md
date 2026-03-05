@@ -182,6 +182,50 @@ All writes are atomic: if a stage fails, nothing from that stage is committed.
 
 ---
 
+## Summary fields explained
+
+### Realised gain/loss
+
+Sum of `adjusted_gain_loss` from `dispositions_adjusted` — the net capital gain or loss
+across all disposals for the tax year, after superficial loss adjustments. This is the
+figure that flows to Schedule 3 and TP-21.4.39-V. The display shows the **pre-inclusion**
+amount; multiply by the 50% inclusion rate to get taxable capital gains.
+
+### Income
+
+Sum of `fmv_cad` from `income_events`, broken down by type:
+
+| Type | What it covers |
+|------|----------------|
+| `staking` | Proof-of-stake rewards |
+| `airdrop` | Token distributions from projects |
+| `mining` | Block rewards or pool payouts |
+| `other` | Any income-type transaction not matching the above |
+
+Income is taxed as **regular income** in the year received (not capital gains), at the
+fair market value on the day received. It is reported separately from capital gains on
+TP-21.4.39-V Part 6. The same FMV also becomes the ACB of the received units.
+
+Only shown when at least one income event exists in the batch.
+
+### Costs & expenses
+
+Sum of `cad_fee` across all taxable `classified_events` — the total exchange and network
+fees paid in CAD-equivalent terms:
+
+- **Buying fees** — exchange commissions on purchases. These are folded into ACB and
+  reduce your capital gain when the asset is eventually sold.
+- **Selling fees** — exchange commissions on sales. These are deducted from proceeds and
+  directly reduce the gain/loss on each disposal.
+
+**Not included here:** on-chain crypto network fees (e.g. BTC miner fees paid on a send)
+are recorded as `fee_disposal` capital events — a small taxable disposal of crypto — and
+are already reflected in the Realised gain/loss total.
+
+Only shown when the total is greater than zero.
+
+---
+
 ## Stage state after a successful `boil`
 
 ```
@@ -234,7 +278,10 @@ Batch 'my2025tax' pipeline complete.
   dispositions:               12
   dispositions_adjusted:      12
 
-  Net capital gain/loss: +4,209.35 CAD (before inclusion rate)
+  Realised gain/loss:      +4,209.35 CAD (before inclusion rate)
+  Income:                     199.12 CAD   # only shown when non-zero
+    staking                   199.12 CAD
+  Costs & expenses:            15.03 CAD   # only shown when non-zero
 
   [       done]  tap
   [       done]  normalize    2025-04-15

@@ -64,6 +64,7 @@ class MessageCode(StrEnum):
     BOIL_WARNING_FUTURE_YEAR_DISPOSITIONS = "boil.warning.future_year_dispositions"
     BOIL_SUMMARY_COMPLETE = "boil.summary.complete"
     BOIL_SUMMARY_HOLDINGS_HEADER = "boil.summary.holdings_header"
+    BOIL_SUMMARY_WALLET_HEADER = "boil.summary.wallet_header"
     BOIL_SUMMARY_STIR_HINT = "boil.summary.stir_hint"
 
     # ── stir ──────────────────────────────────────────────────────────────────

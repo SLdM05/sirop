@@ -55,7 +55,7 @@ class TaxRules:
 def run(
     events: list[ClassifiedEvent],
     tax_rules: TaxRules,
-) -> tuple[list[Disposition], list[ACBState]]:
+) -> tuple[list[Disposition], list[ACBState], dict[str, ACBState], dict[str, ClassifiedEvent]]:
     """Compute ACB and capital gains for all *events*.
 
     Parameters
@@ -69,10 +69,13 @@ def run(
 
     Returns
     -------
-    tuple[list[Disposition], list[ACBState]]
+    tuple[list[Disposition], list[ACBState], dict[str, ACBState], dict[str, ClassifiedEvent]]
         - First element: one ``Disposition`` per disposal event.
         - Second element: ACB pool snapshots — one per disposal event,
           in the same order.  The repository writes these to ``acb_state``.
+        - Third element: final pool state per asset after all events.
+        - Fourth element: last processed event per asset (used to record
+          year-end holdover snapshots for assets with no disposals).
 
     Raises
     ------
@@ -84,6 +87,9 @@ def run(
 
     # Track acquisition years per asset so we can report "Various" when needed.
     acquisition_years: dict[str, set[int]] = {}
+
+    # Track the last event processed per asset for holdover snapshot event_id.
+    last_event: dict[str, ClassifiedEvent] = {}
 
     dispositions: list[Disposition] = []
     acb_states: list[ACBState] = []
@@ -100,12 +106,14 @@ def run(
         if event.event_type in {"buy", "income"}:
             pool = _process_acquisition(event, pool, acquisition_years[asset])
             pools[asset] = pool
+            last_event[asset] = event
 
         elif event.event_type in {"sell", "fee_disposal", "spend"}:
             disp, new_pool = _process_disposal(event, pool, acquisition_years[asset])
             pools[asset] = new_pool
             dispositions.append(disp)
             acb_states.append(new_pool)
+            last_event[asset] = event
 
         else:
             # Non-taxable events (transfers, fiat, other) are silently skipped.
@@ -117,7 +125,7 @@ def run(
         len(dispositions),
         len(pools),
     )
-    return dispositions, acb_states
+    return dispositions, acb_states, pools, last_event
 
 
 # ---------------------------------------------------------------------------
