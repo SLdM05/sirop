@@ -48,6 +48,10 @@ class Settings(BaseSettings):
 
     coingecko_api_key: str = ""
 
+    # ── Price cache ───────────────────────────────────────────────────────────
+
+    asset_price_cache: bool = False
+
 
 def get_settings() -> Settings:
     """Return a Settings instance loaded from the environment / .env file."""
