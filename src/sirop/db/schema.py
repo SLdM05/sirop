@@ -446,6 +446,5 @@ def migrate_to_v7(conn: sqlite3.Connection) -> None:
         ce_cols = {r[1] for r in conn.execute("PRAGMA table_info(classified_events)")}
         if "wallet_id" not in ce_cols:
             conn.execute(
-                "ALTER TABLE classified_events"
-                " ADD COLUMN wallet_id INTEGER REFERENCES wallets(id)"
+                "ALTER TABLE classified_events ADD COLUMN wallet_id INTEGER REFERENCES wallets(id)"
             )

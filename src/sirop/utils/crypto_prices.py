@@ -375,7 +375,7 @@ def _fetch_coingecko_range(
         raw = _fetch_with_backoff(url, api_key=api_key)
     except CryptoPriceError as exc:
         raise CryptoPriceError(
-            f"CoinGecko range fetch failed for {coin_id} " f"({start_date} to {end_date}): {exc}"
+            f"CoinGecko range fetch failed for {coin_id} ({start_date} to {end_date}): {exc}"
         ) from exc
 
     try:

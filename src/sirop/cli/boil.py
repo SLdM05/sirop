@@ -39,6 +39,7 @@ from sirop.utils.boc import BoCRateError, fill_rate_gaps, prefetch_rates
 from sirop.utils.crypto_prices import prefetch_crypto_prices, prefetch_crypto_prices_by_range
 from sirop.utils.logging import StageContext, get_logger
 from sirop.utils.messages import emit, spinner
+from sirop.utils.price_cache import copy_prices_into_batch, open_price_cache, sync_prices_to_cache
 
 if TYPE_CHECKING:
     from datetime import date
@@ -103,6 +104,9 @@ def _run_boil(from_stage: str | None, settings: Settings) -> int:
         raise _BoilError(MessageCode.BATCH_ERROR_NO_ACTIVE)
 
     conn = open_batch(batch_name, settings)
+    cache_conn: sqlite3.Connection | None = None
+    if settings.asset_price_cache:
+        cache_conn = open_price_cache(settings.data_dir)
     try:
         # Ensure tap has been run.
         tap_status = repo.get_stage_status(conn, "tap")
@@ -127,13 +131,15 @@ def _run_boil(from_stage: str | None, settings: Settings) -> int:
                 continue
 
             _check_not_running(conn, stage, batch_name)
-            _execute_stage(conn, stage, batch_name, tax_rules)
+            _execute_stage(conn, stage, batch_name, tax_rules, cache_conn=cache_conn)
 
         _print_summary(conn, batch_name)
         return 0
 
     finally:
         conn.close()
+        if cache_conn is not None:
+            cache_conn.close()
 
 
 def _execute_stage(
@@ -141,6 +147,7 @@ def _execute_stage(
     stage: str,
     batch_name: str,
     tax_rules: TaxRules,
+    cache_conn: sqlite3.Connection | None = None,
 ) -> None:
     """Execute a single pipeline stage wrapped in StageContext."""
     assert isinstance(conn, sqlite3.Connection)
@@ -149,7 +156,7 @@ def _execute_stage(
         repo.set_stage_running(conn, stage)
 
         if stage == "normalize":
-            _run_normalize(conn)
+            _run_normalize(conn, cache_conn=cache_conn)
 
         elif stage == "verify":
             _run_verify(conn)
@@ -166,13 +173,27 @@ def _execute_stage(
         repo.set_stage_done(conn, stage)
 
 
-def _run_normalize(conn: object) -> None:
+def _run_normalize(
+    conn: object,
+    *,
+    cache_conn: sqlite3.Connection | None = None,
+) -> None:
     assert isinstance(conn, sqlite3.Connection)
 
     logger.debug("Checking sap levels...")
     raw_txs = repo.read_raw_transactions(conn)
     if not raw_txs:
         raise _BoilError(MessageCode.BOIL_ERROR_NO_RAW_TRANSACTIONS)
+
+    if cache_conn is not None:
+        min_date = min(r.timestamp.date() for r in raw_txs)
+        max_date = max(r.timestamp.date() for r in raw_txs)
+        boc_hit, crypto_hit = copy_prices_into_batch(cache_conn, conn, min_date, max_date)
+        logger.debug(
+            "price cache: pre-loaded %d BoC rate(s), %d crypto price(s)",
+            boc_hit,
+            crypto_hit,
+        )
 
     boc_attributed = _prefetch_boc_rates(conn, raw_txs)
     _prefetch_crypto_prices_bulk(conn, raw_txs, boc_already_attributed=boc_attributed)
@@ -182,6 +203,14 @@ def _run_normalize(conn: object) -> None:
         txs = normalizer.normalize(raw_txs, conn)
     txs = repo.write_transactions(conn, txs)
     logger.debug("wrote %d normalized transaction(s)", len(txs))
+
+    if cache_conn is not None:
+        boc_synced, crypto_synced = sync_prices_to_cache(conn, cache_conn)
+        logger.debug(
+            "price cache: synced %d BoC rate(s), %d crypto price(s)",
+            boc_synced,
+            crypto_synced,
+        )
 
     zero_count = sum(
         1
