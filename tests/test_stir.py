@@ -14,7 +14,7 @@ from decimal import Decimal
 
 import pytest
 
-from sirop.cli.stir import _cmd_external, _compute_implied_fee, _validate_wallet_name
+from sirop.cli.stir import _compute_implied_fee, _parse_fee_amount, _validate_wallet_name
 from sirop.db import repositories as repo
 from sirop.db.schema import create_tables, migrate_to_v5
 from sirop.models.enums import TransactionType
@@ -606,147 +606,95 @@ class TestValidateWalletName:
 
 
 # ---------------------------------------------------------------------------
-# _cmd_external — wallet name validation + multi-ID batch assignment
+# _parse_fee_amount — validation for the untracked-wallet fee prompt
 # ---------------------------------------------------------------------------
 
 
-def _external_call(
-    conn: sqlite3.Connection,
-    txs: list[Transaction],
-    parts: list[str],
-    batch_name: str = "testbatch",
-) -> object:
-    """Helper: invoke _cmd_external with a pre-built conn and tx list."""
-    tx_ids = {t.id for t in txs}
-    return _cmd_external(conn, parts, tx_ids, batch_name, txs, wallets=[], tax_year=None)
+class TestParseFeeAmount:
+    def test_valid_fee(self) -> None:
+        fee, err = _parse_fee_amount("0.00005", "BTC", Decimal("0.01"))
+        assert fee == Decimal("0.00005")
+        assert err == ""
+
+    def test_non_numeric_rejected(self) -> None:
+        fee, err = _parse_fee_amount("abc", "BTC", Decimal("0.01"))
+        assert err != ""
+        assert fee == Decimal("0")
+
+    def test_zero_rejected(self) -> None:
+        fee, err = _parse_fee_amount("0", "BTC", Decimal("0.01"))
+        assert err != ""
+
+    def test_negative_rejected(self) -> None:
+        fee, err = _parse_fee_amount("-0.001", "BTC", Decimal("0.01"))
+        assert err != ""
+
+    def test_fee_equal_to_amount_rejected(self) -> None:
+        fee, err = _parse_fee_amount("0.01", "BTC", Decimal("0.01"))
+        assert err != ""
+
+    def test_fee_greater_than_amount_rejected(self) -> None:
+        fee, err = _parse_fee_amount("0.02", "BTC", Decimal("0.01"))
+        assert err != ""
+
+    def test_fee_just_below_amount_accepted(self) -> None:
+        fee, err = _parse_fee_amount("0.00999999", "BTC", Decimal("0.01"))
+        assert err == ""
+        assert fee == Decimal("0.00999999")
 
 
-class TestCmdExternal:
-    def test_valid_single_id_marks_override(self) -> None:
-        conn = _make_conn()
-        txs = [_tx(1, TransactionType.WITHDRAWAL)]
-        _seed_transactions(conn, txs)
+# ---------------------------------------------------------------------------
+# Matcher — fee micro-disposal from external overrides
+# ---------------------------------------------------------------------------
 
-        result = _external_call(conn, txs, ["external", "1", "cold-vault"])
 
-        assert result is not None
-        overrides = repo.read_transfer_overrides(conn)
-        assert len(overrides) == 1
-        assert overrides[0].tx_id_a == 1
-        assert overrides[0].action == "external-out"
-        assert overrides[0].external_wallet == "cold-vault"
+class TestMatcherExternalFeeDisposal:
+    def test_external_out_with_fee_emits_fee_disposal(self) -> None:
+        """external-out with implied_fee_crypto > 0 emits a taxable fee_disposal."""
+        out_tx = _tx(1, TransactionType.WITHDRAWAL, amount="0.01", cad_value="500")
+        ov = _make_override(1, None, action="external-out", implied_fee="0.00005")
+        events, _ = match_transfers([out_tx], overrides=[ov])
 
-    def test_single_deposit_becomes_external_in(self) -> None:
-        conn = _make_conn()
-        txs = [_tx(2, TransactionType.DEPOSIT)]
-        _seed_transactions(conn, txs)
+        fee_events = [e for e in events if e.event_type == "fee_disposal"]
+        assert len(fee_events) == 1
+        assert fee_events[0].amount == Decimal("0.00005")
+        assert fee_events[0].is_taxable is True
 
-        result = _external_call(conn, txs, ["external", "2", "exchange-old"])
+    def test_external_in_with_fee_emits_fee_disposal(self) -> None:
+        """external-in with implied_fee_crypto > 0 also emits a fee_disposal."""
+        in_tx = _tx(2, TransactionType.DEPOSIT, amount="0.01", cad_value="500")
+        ov = _make_override(2, None, action="external-in", implied_fee="0.0001")
+        events, _ = match_transfers([in_tx], overrides=[ov])
 
-        assert result is not None
-        overrides = repo.read_transfer_overrides(conn)
-        assert overrides[0].action == "external-in"
-        assert overrides[0].external_wallet == "exchange-old"
+        fee_events = [e for e in events if e.event_type == "fee_disposal"]
+        assert len(fee_events) == 1
+        assert fee_events[0].amount == Decimal("0.0001")
 
-    def test_two_ids_both_marked(self) -> None:
-        conn = _make_conn()
-        txs = [
-            _tx(10, TransactionType.WITHDRAWAL),
-            _tx(20, TransactionType.DEPOSIT),
-        ]
-        _seed_transactions(conn, txs)
+    def test_external_out_without_fee_no_fee_disposal(self) -> None:
+        """external-out with zero implied_fee_crypto emits no fee_disposal."""
+        out_tx = _tx(1, TransactionType.WITHDRAWAL, amount="0.01", cad_value="500")
+        ov = _make_override(1, None, action="external-out", implied_fee="0")
+        events, _ = match_transfers([out_tx], overrides=[ov])
 
-        result = _external_call(conn, txs, ["external", "10", "20", "legacy-cold"])
+        fee_events = [e for e in events if e.event_type == "fee_disposal"]
+        assert fee_events == []
 
-        assert result is not None
-        overrides = repo.read_transfer_overrides(conn)
-        assert len(overrides) == 2  # noqa: PLR2004
-        by_tx = {ov.tx_id_a: ov for ov in overrides}
-        assert by_tx[10].action == "external-out"
-        assert by_tx[20].action == "external-in"
-        assert by_tx[10].external_wallet == "legacy-cold"
-        assert by_tx[20].external_wallet == "legacy-cold"
+    def test_external_fee_disposal_cad_proceeds_computed(self) -> None:
+        """CAD proceeds on the fee disposal = fee_amount * (cad_value / amount)."""
+        out_tx = _tx(1, TransactionType.WITHDRAWAL, amount="0.01", cad_value="500")
+        # rate = 500 / 0.01 = 50000 CAD/BTC; fee = 0.0001; proceeds = 5 CAD
+        ov = _make_override(1, None, action="external-out", implied_fee="0.0001")
+        events, _ = match_transfers([out_tx], overrides=[ov])
 
-    def test_three_ids_all_marked_same_wallet(self) -> None:
-        conn = _make_conn()
-        txs = [
-            _tx(1, TransactionType.WITHDRAWAL),
-            _tx(2, TransactionType.DEPOSIT),
-            _tx(3, TransactionType.WITHDRAWAL),
-        ]
-        _seed_transactions(conn, txs)
+        fee_evt = next(e for e in events if e.event_type == "fee_disposal")
+        assert fee_evt.cad_proceeds == Decimal("5")
 
-        result = _external_call(conn, txs, ["external", "1", "2", "3", "multi-wallet"])
+    def test_external_event_itself_is_non_taxable(self) -> None:
+        """The external marker event remains non-taxable even when a fee is present."""
+        out_tx = _tx(1, TransactionType.WITHDRAWAL, amount="0.01", cad_value="500")
+        ov = _make_override(1, None, action="external-out", implied_fee="0.00005")
+        events, _ = match_transfers([out_tx], overrides=[ov])
 
-        assert result is not None
-        overrides = repo.read_transfer_overrides(conn)
-        assert len(overrides) == 3  # noqa: PLR2004
-        wallet_names = {ov.external_wallet for ov in overrides}
-        assert wallet_names == {"multi-wallet"}
-
-    def test_wallet_name_with_space_rejected(self) -> None:
-        """Spaces in wallet name must be rejected; no override written."""
-        conn = _make_conn()
-        txs = [_tx(1, TransactionType.WITHDRAWAL)]
-        _seed_transactions(conn, txs)
-
-        result = _external_call(conn, txs, ["external", "1", "bad", "name"])
-
-        assert result is None
-        assert repo.read_transfer_overrides(conn) == []
-
-    def test_wallet_name_with_special_char_rejected(self) -> None:
-        conn = _make_conn()
-        txs = [_tx(1, TransactionType.WITHDRAWAL)]
-        _seed_transactions(conn, txs)
-
-        result = _external_call(conn, txs, ["external", "1", "bad!name"])
-
-        assert result is None
-        assert repo.read_transfer_overrides(conn) == []
-
-    def test_empty_wallet_name_accepted(self) -> None:
-        """An empty wallet name (user opted out of naming) is allowed."""
-        conn = _make_conn()
-        txs = [_tx(1, TransactionType.WITHDRAWAL)]
-        _seed_transactions(conn, txs)
-
-        result = _external_call(conn, txs, ["external", "1", ""])
-
-        # Empty string token: not an integer, so wallet_parts = [""]
-        # " ".join([""]) = "" → passes validation (empty string OK)
-        assert result is not None
-        overrides = repo.read_transfer_overrides(conn)
-        assert overrides[0].external_wallet == ""
-
-    def test_unknown_integer_second_arg_errors(self) -> None:
-        """An integer that is not a known tx_id triggers an error, not a wallet name."""
-        conn = _make_conn()
-        txs = [_tx(1, TransactionType.WITHDRAWAL)]
-        _seed_transactions(conn, txs)
-
-        result = _external_call(conn, txs, ["external", "1", "9999", "cold"])
-
-        assert result is None
-        assert repo.read_transfer_overrides(conn) == []
-
-    def test_first_id_not_found_errors(self) -> None:
-        conn = _make_conn()
-        txs = [_tx(1, TransactionType.WITHDRAWAL)]
-        _seed_transactions(conn, txs)
-
-        result = _external_call(conn, txs, ["external", "99", "cold"])
-
-        assert result is None
-        assert repo.read_transfer_overrides(conn) == []
-
-    def test_unsupported_tx_type_errors(self) -> None:
-        """BUY/SELL/TRADE types cannot be marked as external."""
-        conn = _make_conn()
-        txs = [_tx(1, TransactionType.BUY)]
-        _seed_transactions(conn, txs)
-
-        result = _external_call(conn, txs, ["external", "1", "cold"])
-
-        assert result is None
-        assert repo.read_transfer_overrides(conn) == []
+        ext_events = [e for e in events if e.event_type == "external"]
+        assert len(ext_events) == 1
+        assert ext_events[0].is_taxable is False

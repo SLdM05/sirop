@@ -12,11 +12,11 @@ alongside auto-matches.
 
 The user can then:
 
-- **transfer <id>** — guided wizard: pick the counterpart transaction or mark
-  the movement as going to/from an external wallet.  Validates that no asset
+- **transfer <id>** — guided wizard: pick the counterpart transaction (tracked
+  wallet with CSV) or mark the movement as going to/from an untracked wallet
+  (no CSV available).  For untracked wallets the user can optionally record
+  a network fee so boil emits a fee micro-disposal.  Validates that no asset
   units are created from nothing.
-- **external <id>** — quick shortcut to mark a withdrawal or deposit as
-  going to / coming from an untracked external wallet without a wizard.
 - **link <id1> <id2>** — force-link two transactions as a transfer pair.
   Validates amounts: received must not exceed sent.  The exact difference is
   stored as ``implied_fee_crypto`` and becomes a fee micro-disposition at
@@ -227,6 +227,26 @@ def _run_stir(
 # ---------------------------------------------------------------------------
 # Amount validation helpers
 # ---------------------------------------------------------------------------
+
+
+def _parse_fee_amount(raw: str, asset: str, tx_amount: Decimal) -> tuple[Decimal, str]:
+    """Parse a user-supplied fee string.  Return ``(fee, error)``.
+
+    *error* is an empty string on success, a human-readable message on failure.
+    The fee must be a positive number strictly less than *tx_amount*.
+    """
+    try:
+        fee = Decimal(raw)
+    except Exception:
+        return Decimal("0"), "Fee must be a number."
+    if fee <= Decimal("0"):
+        return Decimal("0"), "Fee must be greater than zero."
+    if fee >= tx_amount:
+        return Decimal("0"), (
+            f"Fee ({fee:.8f} {asset}) cannot equal or exceed "
+            f"the transaction amount ({tx_amount:.8f} {asset})."
+        )
+    return fee, ""
 
 
 def _compute_implied_fee(
@@ -789,8 +809,9 @@ def _print_unmatched(
 def _print_help() -> None:
     out.print()
     out.print("Commands:")
-    out.print("  transfer <id>       Guided wizard: link or mark a withdrawal/deposit as transfer.")
-    out.print("  external <id>       Quick mark: flag a tx as going to/from an untracked wallet.")
+    out.print("  transfer <id>       Link or mark a withdrawal/deposit as a transfer.")
+    out.print("                      Tracked wallet (CSV available): select the counterpart tx.")
+    out.print("                      Untracked wallet (no CSV): records an optional network fee.")
     out.print(
         "  link <id1> <id2>    Force two transactions to be a transfer pair (validates amounts)."
     )
@@ -924,119 +945,6 @@ def _cmd_clear(  # noqa: PLR0913
     return overrides, state
 
 
-def _cmd_external(  # noqa: PLR0911 PLR0912 PLR0913 PLR0915
-    conn: sqlite3.Connection,
-    parts: list[str],
-    tx_ids: set[int],
-    batch_name: str,
-    txs: list[Transaction],
-    wallets: list[Wallet],
-    tax_year: int | None = None,
-) -> tuple[list[TransferOverride], _MatchState] | None:
-    """Handle the ``external <id> [id2 …] [wallet_name]`` sub-command.
-
-    Marks one or more withdrawals/deposits as ``external-out``/``external-in``
-    and associates them all with the same named external wallet.
-
-    Argument parsing
-    ----------------
-    After the first ``<id>``, each subsequent token is examined left-to-right:
-
-    - A token that parses as an integer AND is a known transaction ID is added
-      to the batch of transactions to mark.
-    - A token that parses as an integer but is *not* a known transaction ID
-      triggers an error ("Transaction id X not found") — the user almost
-      certainly mis-typed a tx_id rather than intending a purely numeric wallet
-      name.
-    - The first non-integer token ends the ID list; everything from that token
-      to the end of the command is treated as the wallet name (joined with
-      spaces, then validated — spaces will be rejected by ``_validate_wallet_name``).
-    - If all tokens after the first ID were integers (no wallet name in the
-      command), the user is prompted interactively.
-    """
-    if len(parts) < _ONE_ARG_PARTS:
-        out.print("Usage: external <id> [id2 …] [wallet_name]")
-        return None
-    try:
-        tx_id = int(parts[1])
-    except ValueError:
-        out.print("  Transaction id must be an integer.")
-        return None
-    if tx_id not in tx_ids:
-        out.print(f"  Transaction id {tx_id} not found.")
-        return None
-
-    tx_by_id = {t.id: t for t in txs}
-    tx = tx_by_id[tx_id]
-
-    # Determine prompt direction from the first transaction's type (used only
-    # when we need to prompt for the wallet name interactively).
-    if tx.tx_type in _OUTGOING:
-        direction_msg = "sent to"
-    elif tx.tx_type in _INCOMING:
-        direction_msg = "received from"
-    else:
-        out.print(
-            f"  Transaction {tx_id} is type '{tx.tx_type.value}' — "
-            "only withdrawals and deposits can be marked as external transfers."
-        )
-        return None
-
-    # Build the list of all transaction IDs to mark, and isolate wallet tokens.
-    all_tx_ids: list[int] = [tx_id]
-    wallet_parts: list[str] = []
-    for i, part in enumerate(parts[2:], start=2):
-        try:
-            candidate = int(part)
-        except ValueError:
-            # First non-integer token → wallet name starts here.
-            wallet_parts = parts[i:]
-            break
-        else:
-            if candidate in tx_ids:
-                all_tx_ids.append(candidate)
-            else:
-                out.print(f"  Transaction id {candidate} not found.")
-                return None
-
-    # Resolve wallet name from remaining tokens or interactive prompt.
-    if wallet_parts:
-        ext_wallet = " ".join(wallet_parts)
-    else:
-        ext_wallet = input(f"  Wallet name ({direction_msg} which external wallet)? ").strip()
-
-    err = _validate_wallet_name(ext_wallet)
-    if err:
-        out.print(f"  {err}")
-        return None
-
-    # Write an override for every transaction in the batch.
-    wallet_label = f" '{ext_wallet}'" if ext_wallet else ""
-    for tid in all_tx_ids:
-        t = tx_by_id[tid]
-        if t.tx_type in _OUTGOING:
-            act: str = "external-out"
-            verb = "out to"
-        elif t.tx_type in _INCOMING:
-            act = "external-in"
-            verb = "in from"
-        else:
-            out.print(
-                f"  Transaction {tid} is type '{t.tx_type.value}' — "
-                "only withdrawals and deposits can be marked as external transfers."
-            )
-            return None
-        repo.clear_transfer_overrides_for_tx(conn, tid)
-        repo.write_transfer_override(conn, tid, None, act, external_wallet=ext_wallet)
-        out.print(f"  Marked id:{tid} as external transfer {verb}{wallet_label}.")
-
-    out.print("  Run 'boil --from transfer_match' to apply.")
-    overrides = repo.read_transfer_overrides(conn)
-    state = _build_state(txs, overrides)
-    _print_unmatched(batch_name, txs, state, wallets, tax_year)
-    return overrides, state
-
-
 def _cmd_transfer(  # noqa: PLR0911 PLR0912 PLR0915 PLR0913
     conn: sqlite3.Connection,
     parts: list[str],
@@ -1092,7 +1000,7 @@ def _cmd_transfer(  # noqa: PLR0911 PLR0912 PLR0915 PLR0913
         tag = "" if w.auto_created else "*"
         options.append((f"{w.name}{tag}", w.name))
     options.append(("[enter a different wallet name]", "__new__"))
-    options.append(("[external / untracked wallet]", "__external__"))
+    options.append(("[untracked wallet — no CSV available]", "__external__"))
 
     for i, (label, _) in enumerate(options, 1):
         out.print(f"    [{i}] {label}")
@@ -1116,19 +1024,37 @@ def _cmd_transfer(  # noqa: PLR0911 PLR0912 PLR0915 PLR0913
         # User typed a wallet name directly.
         wallet_name = choice_raw if choice_raw else None
 
-    # Step 2: external path.
+    # Step 2: untracked wallet path.
     if is_external:
         ext_label = input("  Label for this external wallet (optional): ").strip()
         wallet_err = _validate_wallet_name(ext_label)
         if wallet_err:
             out.print(f"  {wallet_err}")
             return None
+
+        # Ask whether a network fee should be recorded.
+        out.print()
+        out.print("  Was there a network fee for this transfer?")
+        out.print("    [N] No fee to record (exchange covered it, or already embedded)")
+        out.print("    [F] Enter fee amount manually")
+        fee_choice = input("  Choice [N/F]: ").strip().upper()
+        implied_fee = Decimal("0")
+        if fee_choice == "F":
+            fee_raw = input(f"  Fee amount (in {tx.asset}): ").strip()
+            implied_fee, fee_err = _parse_fee_amount(fee_raw, tx.asset, tx.amount)
+            if fee_err:
+                out.print(f"  {fee_err}")
+                return None
+
         action = "external-out" if is_out else "external-in"
         repo.clear_transfer_overrides_for_tx(conn, tx_id)
-        repo.write_transfer_override(conn, tx_id, None, action, external_wallet=ext_label)
+        repo.write_transfer_override(
+            conn, tx_id, None, action, external_wallet=ext_label, implied_fee_crypto=implied_fee
+        )
         verb = "out to" if action == "external-out" else "in from"
         ext_display = f" '{ext_label}'" if ext_label else ""
-        out.print(f"  Marked id:{tx_id} as external transfer {verb}{ext_display}.")
+        fee_display = f" (fee: {implied_fee:.8f} {tx.asset})" if implied_fee > Decimal("0") else ""
+        out.print(f"  Marked id:{tx_id} as external transfer {verb}{ext_display}{fee_display}.")
         out.print("  Run 'boil --from transfer_match' to apply.")
         overrides = repo.read_transfer_overrides(conn)
         state = _build_state(txs, overrides)
@@ -1306,12 +1232,6 @@ def _interactive_loop(  # noqa: PLR0912 PLR0913 PLR0915
                     )
                     if result is not None:
                         overrides, state = result
-            continue
-
-        if cmd == "external":
-            result = _cmd_external(conn, parts, tx_ids, batch_name, txs, wallets, tax_year)
-            if result is not None:
-                overrides, state = result
             continue
 
         if cmd == "link":

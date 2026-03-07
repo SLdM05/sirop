@@ -166,6 +166,28 @@ def match_transfers(  # noqa: PLR0912 PLR0915
             wallet_label,
         )
 
+        # Emit a fee micro-disposal when the user recorded an explicit fee.
+        if ov.implied_fee_crypto > Decimal("0"):
+            cad_rate = tx.cad_value / tx.amount if tx.amount else Decimal("0")
+            fee_proceeds = ov.implied_fee_crypto * cad_rate
+            fee_disposals.append(
+                ClassifiedEvent(
+                    id=0,
+                    vtx_id=tx.id,
+                    timestamp=tx.timestamp,
+                    event_type="fee_disposal",
+                    asset=tx.asset,
+                    amount=ov.implied_fee_crypto,
+                    cad_proceeds=fee_proceeds,
+                    cad_cost=None,
+                    cad_fee=None,
+                    txid=tx.txid,
+                    source=tx.source,
+                    is_taxable=True,
+                    wallet_id=tx.wallet_id,
+                )
+            )
+
     # --- Pass 0b: apply forced links ---
     for ov in overrides or []:
         if ov.action != "link":
