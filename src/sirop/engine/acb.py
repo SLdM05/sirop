@@ -201,7 +201,8 @@ def _process_disposal(
         raise InsufficientUnitsError(
             f"Cannot dispose of {units} {event.asset}: "
             f"pool only holds {pool.total_units} units. "
-            "Check that all buy transactions have been imported."
+            "Check that all buy transactions have been imported and that "
+            "wallet-to-wallet transfers are correctly matched in 'sirop stir'."
         )
 
     # Clamp to pool size to handle dust-level rounding.

@@ -20,11 +20,12 @@ These tests catch that in two complementary ways:
    mistake: registering a source whose YAML was deleted or renamed.
 """
 
+import sqlite3
 from pathlib import Path
 
 import pytest
 
-from sirop.cli.tap import _IMPORTER_REGISTRY, _handle_tap_folder
+from sirop.cli.tap import _IMPORTER_REGISTRY, _confirm_wallet_append, _handle_tap_folder
 from sirop.config.settings import Settings
 
 CONFIG_DIR = Path(__file__).parent.parent / "config" / "importers"
@@ -210,3 +211,85 @@ class TestHandleTapFolderConfirmation:
         tapped_names = {p.name for p in tapped}
         assert tapped_names == {"shk.csv", "spw.csv"}
         assert "random.csv" not in tapped_names
+
+
+# ---------------------------------------------------------------------------
+# Wallet conflict prompt: _confirm_wallet_append
+# ---------------------------------------------------------------------------
+
+
+def _make_wallet_conn(wallet_name: str | None = None) -> sqlite3.Connection:
+    """Return an in-memory SQLite connection with the wallets table.
+
+    If *wallet_name* is given, a pre-existing wallet row is inserted so that
+    ``wallet_exists()`` returns True for that name.
+    """
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE wallets (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            name        TEXT NOT NULL UNIQUE,
+            source      TEXT NOT NULL DEFAULT '',
+            auto_created INTEGER NOT NULL DEFAULT 1,
+            created_at  TEXT NOT NULL,
+            note        TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+    if wallet_name is not None:
+        conn.execute(
+            "INSERT INTO wallets (name, source, auto_created, created_at) VALUES (?, '', 1, ?)",
+            (wallet_name, "2025-01-01T00:00:00+00:00"),
+        )
+    conn.commit()
+    return conn
+
+
+class TestConfirmWalletAppend:
+    def test_returns_true_when_wallet_is_new(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No prompt and returns True when the wallet name has never been used."""
+        monkeypatch.setattr("sirop.cli.tap.open_batch", lambda *_: _make_wallet_conn())
+        result = _confirm_wallet_append("test", _make_settings(tmp_path), "sparrow")
+        assert result is True
+
+    def test_prompts_and_returns_true_on_yes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When wallet exists and user answers 'y', returns True."""
+        monkeypatch.setattr("sirop.cli.tap.open_batch", lambda *_: _make_wallet_conn("sparrow"))
+        monkeypatch.setattr("builtins.input", lambda _: "y")
+        result = _confirm_wallet_append("test", _make_settings(tmp_path), "sparrow")
+        assert result is True
+
+    def test_prompts_and_returns_false_on_no(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When wallet exists and user answers 'n', returns False."""
+        monkeypatch.setattr("sirop.cli.tap.open_batch", lambda *_: _make_wallet_conn("sparrow"))
+        monkeypatch.setattr("builtins.input", lambda _: "n")
+        result = _confirm_wallet_append("test", _make_settings(tmp_path), "sparrow")
+        assert result is False
+
+    def test_eof_treated_as_yes(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Non-interactive stdin (EOFError) is treated as yes (preserves scripted behaviour)."""
+
+        def _raise_eof(_: str) -> str:
+            raise EOFError
+
+        monkeypatch.setattr("sirop.cli.tap.open_batch", lambda *_: _make_wallet_conn("sparrow"))
+        monkeypatch.setattr("builtins.input", _raise_eof)
+        result = _confirm_wallet_append("test", _make_settings(tmp_path), "sparrow")
+        assert result is True
+
+    def test_no_prompt_for_empty_answer_defaults_to_yes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pressing Enter (empty string) accepts the default [Y]."""
+        monkeypatch.setattr("sirop.cli.tap.open_batch", lambda *_: _make_wallet_conn("sparrow"))
+        monkeypatch.setattr("builtins.input", lambda _: "")
+        result = _confirm_wallet_append("test", _make_settings(tmp_path), "sparrow")
+        assert result is True

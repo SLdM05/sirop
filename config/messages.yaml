@@ -155,6 +155,10 @@ messages:
     category: output
     text: "Tap cancelled."
 
+  tap.wallet.conflict_aborted:
+    category: output
+    text: "Tap cancelled. Use --wallet NAME to import into a new wallet."
+
   # ── boil ──────────────────────────────────────────────────────────────────
 
   boil.error.not_tapped:
