@@ -166,10 +166,16 @@ def match_transfers(  # noqa: PLR0912 PLR0915
             wallet_label,
         )
 
-        # Emit a fee micro-disposal when the user recorded an explicit fee.
-        if ov.implied_fee_crypto > Decimal("0"):
+        # Emit a fee micro-disposal.  Prefer the user-recorded implied fee; fall
+        # back to the exchange-reported fee_crypto (same pattern as Pass 0b).
+        _ext_fee = (
+            ov.implied_fee_crypto
+            if ov.implied_fee_crypto > Decimal("0")
+            else (tx.fee_crypto if tx.fee_crypto and tx.fee_crypto > Decimal("0") else None)
+        )
+        if _ext_fee and tx.cad_value > Decimal("0"):
             cad_rate = tx.cad_value / tx.amount if tx.amount else Decimal("0")
-            fee_proceeds = ov.implied_fee_crypto * cad_rate
+            fee_proceeds = _ext_fee * cad_rate
             fee_disposals.append(
                 ClassifiedEvent(
                     id=0,
@@ -177,7 +183,7 @@ def match_transfers(  # noqa: PLR0912 PLR0915
                     timestamp=tx.timestamp,
                     event_type="fee_disposal",
                     asset=tx.asset,
-                    amount=ov.implied_fee_crypto,
+                    amount=_ext_fee,
                     cad_proceeds=fee_proceeds,
                     cad_cost=None,
                     cad_fee=None,
@@ -549,6 +555,17 @@ def _classify_disposal(tx: Transaction, tax_year: int | None = None) -> Classifi
             asset=tx.asset,
             date=tx.timestamp.date(),
         )
+    # Prefer exchange-reported fiat fee; derive from fee_crypto when absent so
+    # on-chain fees are never silently dropped from the disposition calculation.
+    fee_cad = tx.fee_cad or None
+    if (
+        fee_cad is None
+        and tx.fee_crypto
+        and tx.fee_crypto > Decimal("0")
+        and tx.amount > Decimal("0")
+    ):  # noqa: E501
+        fee_cad = (tx.fee_crypto * tx.cad_value / tx.amount).quantize(Decimal("0.0001"))
+
     return ClassifiedEvent(
         id=0,
         vtx_id=tx.id,
@@ -558,7 +575,7 @@ def _classify_disposal(tx: Transaction, tax_year: int | None = None) -> Classifi
         amount=tx.amount,
         cad_proceeds=tx.cad_value,
         cad_cost=None,
-        cad_fee=tx.fee_cad if tx.fee_cad else None,
+        cad_fee=fee_cad,
         txid=tx.txid,
         source=tx.source,
         is_taxable=tx.cad_value > Decimal("0"),

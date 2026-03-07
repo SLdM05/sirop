@@ -38,6 +38,8 @@ def _tx(  # noqa: PLR0913
     offset_hours: int = 0,
     source: str = "test",
     cad_value: str = "500",
+    fee_crypto: str = "0",
+    fee_cad: str = "0",
 ) -> Transaction:
     return Transaction(
         id=tx_id,
@@ -47,8 +49,8 @@ def _tx(  # noqa: PLR0913
         asset=asset,
         amount=Decimal(amount),
         cad_value=Decimal(cad_value),
-        fee_cad=Decimal("0"),
-        fee_crypto=Decimal("0"),
+        fee_cad=Decimal(fee_cad),
+        fee_crypto=Decimal(fee_crypto),
         txid=txid,
         is_transfer=False,
         counterpart_id=None,
@@ -698,3 +700,79 @@ class TestMatcherExternalFeeDisposal:
         ext_events = [e for e in events if e.event_type == "external"]
         assert len(ext_events) == 1
         assert ext_events[0].is_taxable is False
+
+    def test_external_out_no_implied_fee_falls_back_to_fee_crypto(self) -> None:
+        """When implied_fee_crypto=0 but tx.fee_crypto > 0, fee_crypto is used."""
+        # Simulate a Sparrow withdrawal marked external-out where user chose [N]
+        # in the transfer wizard but the transaction already carries a fee.
+        out_tx = _tx(
+            1,
+            TransactionType.WITHDRAWAL,
+            amount="0.5005",
+            cad_value="30030",
+            fee_crypto="0.0005",
+        )
+        ov = _make_override(1, None, action="external-out", implied_fee="0")
+        events, _ = match_transfers([out_tx], overrides=[ov])
+
+        fee_events = [e for e in events if e.event_type == "fee_disposal"]
+        assert len(fee_events) == 1
+        assert fee_events[0].amount == Decimal("0.0005")
+        assert fee_events[0].is_taxable is True
+        # cad_proceeds = 0.0005 * (30030 / 0.5005) ≈ 30
+        assert fee_events[0].cad_proceeds == pytest.approx(Decimal("30"), rel=Decimal("0.01"))
+
+    def test_external_out_no_implied_fee_no_fee_crypto_no_disposal(self) -> None:
+        """When both implied_fee_crypto and tx.fee_crypto are zero, no fee_disposal emitted."""
+        out_tx = _tx(1, TransactionType.WITHDRAWAL, amount="0.01", cad_value="500")
+        ov = _make_override(1, None, action="external-out", implied_fee="0")
+        events, _ = match_transfers([out_tx], overrides=[ov])
+
+        assert [e for e in events if e.event_type == "fee_disposal"] == []
+
+
+class TestClassifyDisposalFeeCadDerivation:
+    """Unmatched withdrawal: cad_fee derived from fee_crypto when fee_cad is absent."""
+
+    def test_unmatched_withdrawal_fee_crypto_sets_cad_fee(self) -> None:
+        """Sparrow-style: fee_cad=0 but fee_crypto > 0 → cad_fee derived on sell event."""
+        # rate = 30030 / 0.5005 ≈ 60000 CAD/BTC; fee = 0.0005 BTC → cad_fee ≈ 30
+        out_tx = _tx(
+            1,
+            TransactionType.WITHDRAWAL,
+            amount="0.5005",
+            cad_value="30030",
+            fee_crypto="0.0005",
+            fee_cad="0",
+        )
+        events, _ = match_transfers([out_tx])
+
+        sell_events = [e for e in events if e.event_type == "sell"]
+        assert len(sell_events) == 1
+        assert sell_events[0].cad_fee is not None
+        assert sell_events[0].cad_fee > Decimal("0")
+
+    def test_unmatched_withdrawal_fee_cad_takes_precedence(self) -> None:
+        """When fee_cad is provided it is used verbatim; fee_crypto is ignored."""
+        out_tx = _tx(
+            1,
+            TransactionType.WITHDRAWAL,
+            amount="0.5005",
+            cad_value="30030",
+            fee_crypto="0.0005",
+            fee_cad="25",
+        )
+        events, _ = match_transfers([out_tx])
+
+        sell_events = [e for e in events if e.event_type == "sell"]
+        assert len(sell_events) == 1
+        assert sell_events[0].cad_fee == Decimal("25")
+
+    def test_unmatched_withdrawal_no_fee_no_cad_fee(self) -> None:
+        """When both fee_crypto and fee_cad are zero, cad_fee on sell is None."""
+        out_tx = _tx(1, TransactionType.WITHDRAWAL, amount="0.01", cad_value="500")
+        events, _ = match_transfers([out_tx])
+
+        sell_events = [e for e in events if e.event_type == "sell"]
+        assert len(sell_events) == 1
+        assert sell_events[0].cad_fee is None
