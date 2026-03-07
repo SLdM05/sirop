@@ -396,7 +396,9 @@ class _MatchState:
         # forced_unlink_pairs: pairs blocked by 'unlink' overrides
         self.forced_unlink_pairs: list[tuple[Transaction, Transaction]] = []
         # external_markers: txs marked as external-out or external-in
-        self.external_markers: list[tuple[Transaction, str, str]] = []  # (tx, action, wallet)
+        self.external_markers: list[
+            tuple[Transaction, str, str, Decimal]
+        ] = []  # (tx, action, wallet, fee)
         # unmatched_out: outgoing txs that had no match
         self.unmatched_out: list[Transaction] = []
         # unmatched_in: incoming txs that had no match
@@ -470,7 +472,7 @@ def _build_state(  # noqa: PLR0912 PLR0915
         if tx is None or tx.id in paired_ids:
             continue
         paired_ids.add(tx.id)
-        state.external_markers.append((tx, ov.action, ov.external_wallet))
+        state.external_markers.append((tx, ov.action, ov.external_wallet, ov.implied_fee_crypto))
 
     # Pass 0b: apply forced links.
     _apply_forced_links(overrides, tx_by_id, paired_ids, state)
@@ -653,12 +655,13 @@ def _print_state(  # noqa: PLR0912 PLR0915
         # External markers.
         if state.external_markers:
             out.rule(f"External transfers ({len(state.external_markers)})", style="dim")
-            for tx, action, ext_wallet in state.external_markers:
+            for tx, action, ext_wallet, fee in state.external_markers:
                 direction = "→ external" if action == "external-out" else "← external"
                 wallet_label = f"  [{ext_wallet}]" if ext_wallet else ""
+                fee_label = f"  fee: {fee:.8f} {tx.asset}" if fee > Decimal("0") else ""
                 row = Text("  ")
                 row.append_text(_fmt_tx(tx, _wallets))
-                row.append(f"  {direction}{wallet_label}", style="dim")
+                row.append(f"  {direction}{wallet_label}{fee_label}", style="dim")
                 out.print(row)
             out.print()
 
@@ -782,12 +785,13 @@ def _print_unmatched(
 
         if state.external_markers:
             out.print(f"  [dim]External transfers ({len(state.external_markers)})[/dim]")
-            for tx, action, ext_wallet in state.external_markers:
+            for tx, action, ext_wallet, fee in state.external_markers:
                 direction = "-> external" if action == "external-out" else "<- external"
                 wallet_label = f"  [{ext_wallet}]" if ext_wallet else ""
+                fee_label = f"  fee: {fee:.8f} {tx.asset}" if fee > Decimal("0") else ""
                 row = Text("  ")
                 row.append_text(_fmt_tx(tx, _wallets))
-                row.append(f"  {direction}{wallet_label}", style="dim")
+                row.append(f"  {direction}{wallet_label}{fee_label}", style="dim")
                 out.print(row)
             out.print()
 
@@ -999,8 +1003,8 @@ def _cmd_transfer(  # noqa: PLR0911 PLR0912 PLR0915 PLR0913
     for w in wallets:
         tag = "" if w.auto_created else "*"
         options.append((f"{w.name}{tag}", w.name))
-    options.append(("[enter a different wallet name]", "__new__"))
-    options.append(("[untracked wallet — no CSV available]", "__external__"))
+    options.append(("(enter a different wallet name)", "__new__"))
+    options.append(("(untracked wallet — no CSV available)", "__external__"))
 
     for i, (label, _) in enumerate(options, 1):
         out.print(f"    [{i}] {label}")
