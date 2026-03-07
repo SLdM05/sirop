@@ -823,6 +823,12 @@ def find_or_create_wallet(
     )
 
 
+def wallet_exists(conn: sqlite3.Connection, name: str) -> bool:
+    """Return True if a wallet row with *name* already exists."""
+    row = conn.execute("SELECT 1 FROM wallets WHERE name = ?", (name,)).fetchone()
+    return row is not None
+
+
 def read_wallets(conn: sqlite3.Connection) -> list[Wallet]:
     """Return all wallets ordered by name."""
     rows = conn.execute(

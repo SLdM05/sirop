@@ -563,7 +563,7 @@ def _classify_disposal(tx: Transaction, tax_year: int | None = None) -> Classifi
         and tx.fee_crypto
         and tx.fee_crypto > Decimal("0")
         and tx.amount > Decimal("0")
-    ):  # noqa: E501
+    ):
         fee_cad = (tx.fee_crypto * tx.cad_value / tx.amount).quantize(Decimal("0.0001"))
 
     return ClassifiedEvent(

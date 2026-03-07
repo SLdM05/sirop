@@ -46,6 +46,7 @@ class MessageCode(StrEnum):
     TAP_FOLDER_FILE_UNKNOWN = "tap.folder.file_unknown"
     TAP_FOLDER_ALL_UNKNOWN = "tap.folder.all_unknown"
     TAP_FOLDER_ABORTED = "tap.folder.aborted"
+    TAP_WALLET_CONFLICT_ABORTED = "tap.wallet.conflict_aborted"
 
     # ── boil ──────────────────────────────────────────────────────────────────
     BOIL_ERROR_NOT_TAPPED = "boil.error.not_tapped"

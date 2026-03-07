@@ -244,6 +244,14 @@ def _run_tap(file_path: Path, source: str | None, wallet: str | None, settings: 
     wallet_name = wallet if wallet is not None else detected_source
     auto_created = wallet is None
 
+    # ── 5b. Conflict check — prompt before appending to an existing auto-named wallet ──
+    # Only triggered when the user didn't supply --wallet.  If the derived wallet
+    # name already exists they may have two different physical wallets of the same
+    # format (e.g. two Sparrow wallets).  Ask before silently merging.
+    if auto_created and not _confirm_wallet_append(batch_name, settings, wallet_name):
+        emit(MessageCode.TAP_WALLET_CONFLICT_ABORTED, wallet=wallet_name)
+        return 0
+
     # ── 6. Write to DB ────────────────────────────────────────────────────────
     inserted, skipped = _write_to_batch(
         batch_name, settings, txs, wallet_name, auto_created, detected_source
@@ -284,6 +292,39 @@ def _run_tap(file_path: Path, source: str | None, wallet: str | None, settings: 
         skipped,
     )
     return 0
+
+
+def _confirm_wallet_append(batch_name: str, settings: Settings, wallet_name: str) -> bool:
+    """Return True if it is OK to append rows to *wallet_name*.
+
+    When the wallet does not yet exist, returns True immediately (no prompt).
+    When it already exists, asks the user interactively.
+
+    EOFError (non-interactive stdin) is treated as yes so that scripted pipelines
+    that omit ``--wallet`` preserve the pre-prompt append behaviour.
+    """
+    conn = open_batch(batch_name, settings)
+    try:
+        exists = repo.wallet_exists(conn, wallet_name)
+    finally:
+        conn.close()
+
+    if not exists:
+        return True
+
+    try:
+        answer = (
+            input(
+                f'\nWallet "{wallet_name}" already exists. Append to it? [Y/n]'
+                " (use --wallet NAME to create a new wallet) "
+            )
+            .strip()
+            .lower()
+        )
+    except EOFError:
+        return True
+
+    return answer not in {"n", "no"}
 
 
 def _write_to_batch(  # noqa: PLR0913
