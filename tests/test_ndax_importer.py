@@ -28,6 +28,7 @@ from sirop.models.raw import RawTransaction
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 NDAX_CSV = FIXTURES_DIR / "ndax_synthetic_ledger_v1.csv"
 DIRECTION_CSV = FIXTURES_DIR / "ndax_buy_sell_direction.csv"
+NON_FIAT_CSV = FIXTURES_DIR / "ndax_non_fiat_trade.csv"
 NDAX_YAML = Path(__file__).parent.parent / "config" / "importers" / "ndax.yaml"
 
 
@@ -45,6 +46,12 @@ def transactions(importer: NDAXImporter) -> list[RawTransaction]:
 def direction_txs(importer: NDAXImporter) -> list[RawTransaction]:
     """Minimal fixture: one buy trade, one sell trade, one fiat deposit."""
     return importer.parse(DIRECTION_CSV)
+
+
+@pytest.fixture(scope="module")
+def non_fiat_txs(importer: NDAXImporter) -> list[RawTransaction]:
+    """Minimal fixture: one SOL→ETH non-fiat-to-non-fiat trade."""
+    return importer.parse(NON_FIAT_CSV)
 
 
 # ---------------------------------------------------------------------------
@@ -357,6 +364,158 @@ def test_dust_received_asset_is_positive(transactions: list[RawTransaction]) -> 
         assert tx.amount > Decimal("0")
 
 
+def test_dust_group_emits_two_transactions(transactions: list[RawTransaction]) -> None:
+    """DUST conversion must emit both the received-asset acquisition and the
+    sent-asset disposal.
+
+    Fixture TX 10010:
+      BTC  DUST / IN   +0.00000010  (buying BTC)
+      ETH  DUST / OUT  -0.00000043  (disposing ETH)
+
+    Previously only the BTC buy was emitted; the ETH disposal was silently
+    discarded, leaving ETH in the ACB pool forever.
+    """
+    dust_ts = datetime(2025, 4, 15, 16, 45, 0, tzinfo=UTC)
+    dust_txs = [t for t in transactions if t.timestamp.replace(microsecond=0) == dust_ts]
+    expected_count = 2
+    assert (
+        len(dust_txs) == expected_count
+    ), f"Expected {expected_count} transactions for DUST group at {dust_ts}, got {len(dust_txs)}"
+
+    btc_buy = next((t for t in dust_txs if t.asset == "BTC"), None)
+    eth_sell = next((t for t in dust_txs if t.asset == "ETH"), None)
+
+    assert btc_buy is not None, "BTC acquisition not emitted from DUST group"
+    assert eth_sell is not None, "ETH disposal not emitted from DUST group"
+
+    assert btc_buy.amount == Decimal("0.00000010")
+    assert eth_sell.transaction_type == "sell"
+    assert eth_sell.amount == Decimal("0.00000043")  # sign stripped
+
+
+def test_dust_group_with_fee_leg_emits_two_transactions(
+    transactions: list[RawTransaction],
+) -> None:
+    """3-leg DUST group (DUST/IN + DUST/OUT + DUST/FEE) must emit two transactions.
+
+    Fixture TX 10011:
+      BTC  DUST / IN   +0.00001691  (BTC received)
+      SOL  DUST / OUT  -0.011182    (SOL disposed)
+      BTC  DUST / FEE  -0.00000034  (fee on received leg)
+    """
+    dust_ts = datetime(2025, 5, 1, 10, 0, 0, tzinfo=UTC)
+    dust_txs = [t for t in transactions if t.timestamp.replace(microsecond=0) == dust_ts]
+    expected_count = 2
+    assert (
+        len(dust_txs) == expected_count
+    ), f"Expected {expected_count} transactions for 3-leg DUST group, got {len(dust_txs)}"
+
+
+def test_dust_group_with_fee_leg_fee_on_received_tx(
+    transactions: list[RawTransaction],
+) -> None:
+    """DUST/FEE row must be captured on the received-asset (BTC) transaction."""
+    dust_ts = datetime(2025, 5, 1, 10, 0, 0, tzinfo=UTC)
+    btc_tx = next(
+        (
+            t
+            for t in transactions
+            if t.timestamp.replace(microsecond=0) == dust_ts and t.asset == "BTC"
+        ),
+        None,
+    )
+    assert btc_tx is not None
+    assert btc_tx.fee_amount == Decimal("0.00000034")
+    assert btc_tx.fee_currency == "BTC"
+
+
+def test_dust_group_with_fee_leg_sent_tx_no_fee(transactions: list[RawTransaction]) -> None:
+    """The sent-asset (SOL) disposal from a DUST group carries no fee."""
+    dust_ts = datetime(2025, 5, 1, 10, 0, 0, tzinfo=UTC)
+    sol_tx = next(
+        (
+            t
+            for t in transactions
+            if t.timestamp.replace(microsecond=0) == dust_ts and t.asset == "SOL"
+        ),
+        None,
+    )
+    assert sol_tx is not None
+    assert sol_tx.transaction_type == "sell"
+    assert sol_tx.amount == Decimal("0.011182")
+    assert sol_tx.fee_amount is None
+
+
+# ---------------------------------------------------------------------------
+# SOL deposit
+# ---------------------------------------------------------------------------
+
+
+def test_sol_deposit_present(transactions: list[RawTransaction]) -> None:
+    """Fixture TX 10012: standalone SOL DEPOSIT row."""
+    assert len(_find(transactions, "deposit", "SOL")) > 0
+
+
+def test_sol_deposit_amount(transactions: list[RawTransaction]) -> None:
+    sol_deposits = _find(transactions, "deposit", "SOL")
+    assert len(sol_deposits) == 1
+    tx = sol_deposits[0]
+    assert tx.amount == Decimal("0.25")
+    assert tx.fiat_value is None  # non-fiat deposit, no CAD value at raw stage
+
+
+# ---------------------------------------------------------------------------
+# SOL withdrawal
+# ---------------------------------------------------------------------------
+
+
+def test_sol_withdrawal_present(transactions: list[RawTransaction]) -> None:
+    """Fixture TX 10013: SOL WITHDRAW with WITHDRAW/FEE."""
+    assert len(_find(transactions, "withdrawal", "SOL")) > 0
+
+
+def test_sol_withdrawal_has_fee(transactions: list[RawTransaction]) -> None:
+    """SOL WITHDRAW/FEE row is captured as fee_amount on the withdrawal."""
+    sol_withdrawals = _find(transactions, "withdrawal", "SOL")
+    assert len(sol_withdrawals) == 1
+    tx = sol_withdrawals[0]
+    assert tx.fee_amount == Decimal("0.001")
+    assert tx.fee_currency == "SOL"
+
+
+# ---------------------------------------------------------------------------
+# Staking subtypes
+# ---------------------------------------------------------------------------
+
+
+def test_staking_deposit_maps_to_transfer_out(transactions: list[RawTransaction]) -> None:
+    """STAKING / DEPOSIT → transaction_type == 'transfer_out' (ETH sent to staking contract)."""
+    transfer_outs = _find(transactions, "transfer_out", "ETH")
+    assert len(transfer_outs) > 0
+
+
+def test_staking_refund_maps_to_transfer_in(transactions: list[RawTransaction]) -> None:
+    """STAKING / REFUND → transaction_type == 'transfer_in' (ETH returned from staking)."""
+    transfer_ins = _find(transactions, "transfer_in", "ETH")
+    assert len(transfer_ins) > 0
+
+
+# ---------------------------------------------------------------------------
+# Zero-amount rows (skipped by importer)
+# ---------------------------------------------------------------------------
+
+
+def test_zero_amount_rows_not_emitted(transactions: list[RawTransaction]) -> None:
+    """Fixture TX 10016 is a SOL DEPOSIT with AMOUNT=0 — must be silently skipped.
+
+    The importer returns None for zero-amount rows in _parse_single().
+    """
+    zero_amount = [t for t in transactions if t.amount == Decimal("0")]
+    assert (
+        zero_amount == []
+    ), f"Found {len(zero_amount)} zero-amount transaction(s) — should be skipped"
+
+
 # ---------------------------------------------------------------------------
 # ETH withdrawals
 # ---------------------------------------------------------------------------
@@ -399,3 +558,55 @@ def test_empty_csv_returns_empty_list(importer: NDAXImporter, tmp_path: Path) ->
     empty_csv.write_text("ASSET,ASSET_CLASS,AMOUNT,BALANCE,TYPE,TX_ID,DATE\n")
     result = importer.parse(empty_csv)
     assert result == []
+
+
+# ---------------------------------------------------------------------------
+# Non-fiat-to-non-fiat trade (SOL → ETH direct swap)
+#
+# Fixture: ``tests/fixtures/ndax_non_fiat_trade.csv``
+# TX 20001: SOL -0.33 (sent) + ETH +0.11 (received) + ETH TRADE/FEE -0.00001
+#
+# This exercises _parse_non_fiat_trade(), which was previously completely
+# untested.  Both legs are needed so the ACB pool for the sent asset is
+# correctly reduced.
+# ---------------------------------------------------------------------------
+
+
+def test_non_fiat_trade_emits_two_transactions(non_fiat_txs: list[RawTransaction]) -> None:
+    """A non-fiat trade group must emit exactly two transactions."""
+    expected_count = 2
+    assert (
+        len(non_fiat_txs) == expected_count
+    ), f"Expected {expected_count} transactions, got {len(non_fiat_txs)}"
+
+
+def test_non_fiat_trade_received_is_acquisition(non_fiat_txs: list[RawTransaction]) -> None:
+    """The received leg (ETH) is an acquisition with no embedded fiat value."""
+    eth_tx = next((t for t in non_fiat_txs if t.asset == "ETH"), None)
+    assert eth_tx is not None, "ETH acquisition not found"
+    assert eth_tx.amount == Decimal("0.11")
+    assert eth_tx.fiat_value is None  # normalizer derives CAD value from BoC rate
+
+
+def test_non_fiat_trade_sent_is_disposal(non_fiat_txs: list[RawTransaction]) -> None:
+    """The sent leg (SOL) is a disposal with transaction_type == 'sell'."""
+    sol_tx = next((t for t in non_fiat_txs if t.asset == "SOL"), None)
+    assert sol_tx is not None, "SOL disposal not found"
+    assert sol_tx.transaction_type == "sell"
+    assert sol_tx.amount == Decimal("0.33")  # sign stripped
+    assert sol_tx.fiat_value is None
+
+
+def test_non_fiat_trade_fee_on_received_leg(non_fiat_txs: list[RawTransaction]) -> None:
+    """TRADE/FEE row is attached to the received-asset (ETH) transaction."""
+    eth_tx = next((t for t in non_fiat_txs if t.asset == "ETH"), None)
+    assert eth_tx is not None
+    assert eth_tx.fee_amount == Decimal("0.00001")
+    assert eth_tx.fee_currency == "ETH"
+
+
+def test_non_fiat_trade_sent_leg_no_fee(non_fiat_txs: list[RawTransaction]) -> None:
+    """The sent-asset (SOL) leg carries no fee — fee belongs to the received leg."""
+    sol_tx = next((t for t in non_fiat_txs if t.asset == "SOL"), None)
+    assert sol_tx is not None
+    assert sol_tx.fee_amount is None

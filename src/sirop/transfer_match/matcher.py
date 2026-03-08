@@ -364,6 +364,31 @@ def match_transfers(  # noqa: PLR0912 PLR0915
         if income is not None:
             income_events.append(income)
 
+        # Emit a fee micro-disposal for any crypto fee paid on this transaction.
+        # Matched transfer legs already get their fee_disposal in Pass 1.
+        # For buys, sells, and unmatched withdrawals/deposits the fee_crypto
+        # represents units of the asset that were spent (e.g. SOL paid as an
+        # NDAX TRADE/FEE or WITHDRAW/FEE row) and must be removed from the pool.
+        if tx.fee_crypto and tx.fee_crypto > Decimal("0") and tx.cad_value > Decimal("0"):
+            _cad_rate = tx.cad_value / tx.amount if tx.amount else Decimal("0")
+            fee_disposals.append(
+                ClassifiedEvent(
+                    id=0,
+                    vtx_id=tx.id,
+                    timestamp=tx.timestamp,
+                    event_type="fee_disposal",
+                    asset=tx.asset,
+                    amount=tx.fee_crypto,
+                    cad_proceeds=tx.fee_crypto * _cad_rate,
+                    cad_cost=None,
+                    cad_fee=None,
+                    txid=tx.txid,
+                    source=tx.source,
+                    is_taxable=True,
+                    wallet_id=tx.wallet_id,
+                )
+            )
+
     # Insert fee micro-disposals in chronological order.
     events.extend(fee_disposals)
     events.sort(key=lambda e: e.timestamp)
@@ -562,16 +587,11 @@ def _classify_disposal(tx: Transaction, tax_year: int | None = None) -> Classifi
             asset=tx.asset,
             date=tx.timestamp.date(),
         )
-    # Prefer exchange-reported fiat fee; derive from fee_crypto when absent so
-    # on-chain fees are never silently dropped from the disposition calculation.
+    # Use only the exchange-reported CAD fee.  Crypto fees (fee_crypto > 0) are
+    # emitted as separate fee_disposal events in the Pass 2 loop so that the ACB
+    # pool is correctly reduced by the fee units rather than just deriving a CAD
+    # deduction that leaves those units phantom in the pool.
     fee_cad = tx.fee_cad or None
-    if (
-        fee_cad is None
-        and tx.fee_crypto
-        and tx.fee_crypto > Decimal("0")
-        and tx.amount > Decimal("0")
-    ):
-        fee_cad = (tx.fee_crypto * tx.cad_value / tx.amount).quantize(Decimal("0.0001"))
 
     return ClassifiedEvent(
         id=0,

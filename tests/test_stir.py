@@ -787,11 +787,33 @@ class TestMatcherExternalFeeDisposal:
 
 
 class TestClassifyDisposalFeeCadDerivation:
-    """Unmatched withdrawal: cad_fee derived from fee_crypto when fee_cad is absent."""
+    """Unmatched withdrawal cad_fee behavior and fee_crypto → fee_disposal."""
 
-    def test_unmatched_withdrawal_fee_crypto_sets_cad_fee(self) -> None:
-        """Sparrow-style: fee_cad=0 but fee_crypto > 0 → cad_fee derived on sell event."""
-        # rate = 30030 / 0.5005 ≈ 60000 CAD/BTC; fee = 0.0005 BTC → cad_fee ≈ 30
+    def test_unmatched_withdrawal_fee_crypto_emits_fee_disposal(self) -> None:
+        """fee_crypto > 0 on an unmatched withdrawal must produce a fee_disposal event.
+
+        Previously fee_crypto set cad_fee on the sell event.  Now it generates a
+        separate fee_disposal so the ACB pool is correctly reduced by the fee units.
+        rate = 30030 / 0.5005 ≈ 60000 CAD/BTC; fee = 0.0005 BTC → ~30 CAD proceeds.
+        """
+        out_tx = _tx(
+            1,
+            TransactionType.WITHDRAWAL,
+            amount="0.5005",
+            cad_value="30030",
+            fee_crypto="0.0005",
+            fee_cad="0",
+        )
+        events, _ = match_transfers([out_tx])
+
+        fee_disposals = [e for e in events if e.event_type == "fee_disposal"]
+        assert len(fee_disposals) == 1
+        fd = fee_disposals[0]
+        assert fd.amount == Decimal("0.0005")
+        assert fd.cad_proceeds is not None and fd.cad_proceeds > Decimal("0")
+
+    def test_unmatched_withdrawal_fee_crypto_cad_fee_is_none(self) -> None:
+        """When fee is expressed in crypto (not CAD), the sell event's cad_fee is None."""
         out_tx = _tx(
             1,
             TransactionType.WITHDRAWAL,
@@ -804,17 +826,16 @@ class TestClassifyDisposalFeeCadDerivation:
 
         sell_events = [e for e in events if e.event_type == "sell"]
         assert len(sell_events) == 1
-        assert sell_events[0].cad_fee is not None
-        assert sell_events[0].cad_fee > Decimal("0")
+        assert sell_events[0].cad_fee is None
 
-    def test_unmatched_withdrawal_fee_cad_takes_precedence(self) -> None:
-        """When fee_cad is provided it is used verbatim; fee_crypto is ignored."""
+    def test_unmatched_withdrawal_fee_cad_preserved(self) -> None:
+        """When fee_cad is provided it is passed through on the sell event."""
         out_tx = _tx(
             1,
             TransactionType.WITHDRAWAL,
             amount="0.5005",
             cad_value="30030",
-            fee_crypto="0.0005",
+            fee_crypto="0",
             fee_cad="25",
         )
         events, _ = match_transfers([out_tx])
@@ -831,3 +852,32 @@ class TestClassifyDisposalFeeCadDerivation:
         sell_events = [e for e in events if e.event_type == "sell"]
         assert len(sell_events) == 1
         assert sell_events[0].cad_fee is None
+
+    def test_buy_with_fee_crypto_emits_fee_disposal(self) -> None:
+        """A buy transaction with fee_crypto > 0 must produce a fee_disposal event.
+
+        NDAX SOL buy: rate = 500 / 0.25 = 2000 CAD/SOL; fee = 0.0005 SOL → 1 CAD proceeds.
+        """
+        buy_tx = _tx(
+            1,
+            TransactionType.BUY,
+            asset="SOL",
+            amount="0.25",
+            cad_value="500",
+            fee_crypto="0.0005",
+        )
+        events, _ = match_transfers([buy_tx])
+
+        fee_disposals = [e for e in events if e.event_type == "fee_disposal"]
+        assert len(fee_disposals) == 1
+        fd = fee_disposals[0]
+        assert fd.asset == "SOL"
+        assert fd.amount == Decimal("0.0005")
+        assert fd.cad_proceeds is not None and fd.cad_proceeds > Decimal("0")
+
+    def test_buy_without_fee_crypto_no_fee_disposal(self) -> None:
+        """A buy with no crypto fee must not produce a spurious fee_disposal."""
+        buy_tx = _tx(1, TransactionType.BUY, asset="SOL", amount="0.25", cad_value="500")
+        events, _ = match_transfers([buy_tx])
+
+        assert [e for e in events if e.event_type == "fee_disposal"] == []
