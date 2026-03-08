@@ -523,6 +523,61 @@ class TestMatcherNoOverrides:
         events_empty, _ = match_transfers([out_tx, in_tx], overrides=[])
         assert len(events_none) == len(events_empty)
 
+    def test_txid_match_amount_diff_no_fee_crypto_creates_fee_disposal(self) -> None:
+        """txid match with amount diff and no fee_crypto → fee_disposal from diff."""
+        out_tx = _tx(1, TransactionType.WITHDRAWAL, txid="abc123", amount="0.01", cad_value="600")
+        in_tx = _tx(2, TransactionType.DEPOSIT, txid="abc123", amount="0.0099")
+
+        events, _ = match_transfers([out_tx, in_tx])
+        fee_events = [e for e in events if e.event_type == "fee_disposal"]
+        assert len(fee_events) == 1
+        assert fee_events[0].amount == Decimal("0.0001")
+        assert fee_events[0].is_taxable is True
+
+    def test_txid_match_equal_amounts_fee_crypto_creates_fee_disposal(self) -> None:
+        """txid match with equal amounts and fee_crypto set → fee_disposal from fee_crypto."""
+        out_tx = _tx(
+            1,
+            TransactionType.WITHDRAWAL,
+            txid="abc123",
+            amount="0.01",
+            cad_value="600",
+            fee_crypto="0.0001",
+        )
+        in_tx = _tx(2, TransactionType.DEPOSIT, txid="abc123", amount="0.01")
+
+        events, _ = match_transfers([out_tx, in_tx])
+        fee_events = [e for e in events if e.event_type == "fee_disposal"]
+        assert len(fee_events) == 1
+        assert fee_events[0].amount == Decimal("0.0001")
+
+    def test_txid_match_observed_diff_preferred_over_fee_crypto(self) -> None:
+        """txid match: observed amount diff is used instead of fee_crypto when diff > 0."""
+        # fee_crypto says 0.0001 but on-chain diff is 0.00015
+        out_tx = _tx(
+            1,
+            TransactionType.WITHDRAWAL,
+            txid="abc123",
+            amount="0.01",
+            cad_value="600",
+            fee_crypto="0.0001",
+        )
+        in_tx = _tx(2, TransactionType.DEPOSIT, txid="abc123", amount="0.00985")
+
+        events, _ = match_transfers([out_tx, in_tx])
+        fee_events = [e for e in events if e.event_type == "fee_disposal"]
+        assert len(fee_events) == 1
+        assert fee_events[0].amount == Decimal("0.00015")
+
+    def test_txid_match_equal_amounts_no_fee_no_disposal(self) -> None:
+        """txid match with equal amounts and no fee_crypto → no fee_disposal emitted."""
+        out_tx = _tx(1, TransactionType.WITHDRAWAL, txid="abc123", amount="0.01", cad_value="600")
+        in_tx = _tx(2, TransactionType.DEPOSIT, txid="abc123", amount="0.01")
+
+        events, _ = match_transfers([out_tx, in_tx])
+        fee_events = [e for e in events if e.event_type == "fee_disposal"]
+        assert len(fee_events) == 0
+
 
 # ---------------------------------------------------------------------------
 # Amount validation (_compute_implied_fee)

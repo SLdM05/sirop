@@ -635,6 +635,9 @@ def _print_state(  # noqa: PLR0912 PLR0915
             for out_tx, in_tx, reason in state.auto_pairs:
                 _print_pair(out_tx, in_tx, _wallets)
                 out.print(f"       [dim]Reason: {reason}[/dim]")
+                _fee, _ = _compute_implied_fee(out_tx, in_tx)
+                if _fee > Decimal("0"):
+                    out.print(f"       [dim]Fee disposal: {_fee:.8f} {out_tx.asset}[/dim]")
                 out.print()
         else:
             out.print("  [dim](none)[/dim]")
