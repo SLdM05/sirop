@@ -242,6 +242,15 @@ messages:
     category: output
     text: "  Use 'sirop stir' to link wallet transfers — {w} unmatched withdrawal(s) and {d} unmatched deposit(s)."
 
+  boil.audit.written:
+    category: output
+    text: "Audit CSV written → {path}  ({count} rows)"
+
+  boil.audit.error.not_ready:
+    category: error
+    code: E022
+    text: "Cannot write audit CSV: pipeline not complete. Run 'sirop boil' first."
+
   # ── stir ──────────────────────────────────────────────────────────────────
 
   stir.error.not_normalized:

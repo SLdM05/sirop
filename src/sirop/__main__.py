@@ -123,6 +123,15 @@ def _build_parser() -> argparse.ArgumentParser:
             "Choices: normalize, verify, transfer_match, boil, superficial_loss"
         ),
     )
+    boil_p.add_argument(
+        "--audit",
+        action="store_true",
+        default=False,
+        help=(
+            "After calculation, write a CSV ledger of all events and ACB math "
+            "to <DATA_DIR>/<batch>-audit.csv for manual verification in Excel."
+        ),
+    )
 
     return parser
 
@@ -158,7 +167,7 @@ def main() -> None:
         )
 
     elif args.command == "boil":
-        sys.exit(handle_boil(args.from_stage))
+        sys.exit(handle_boil(args.from_stage, audit=args.audit))
 
     else:
         parser.print_help()

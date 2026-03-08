@@ -17,6 +17,7 @@ Usage
 
 from __future__ import annotations
 
+import csv
 import dataclasses
 import sqlite3
 from decimal import Decimal
@@ -66,6 +67,7 @@ class _BoilError(Exception):
 
 def handle_boil(
     from_stage: str | None,
+    audit: bool = False,
     settings: Settings | None = None,
 ) -> int:
     """Run the pipeline from *from_stage* (or from the beginning if None).
@@ -75,6 +77,8 @@ def handle_boil(
     from_stage:
         When provided, all stages before this one are skipped even if they
         are pending.  Stages after it (and itself) are re-run even if done.
+    audit:
+        When True, write an ACB ledger CSV after the pipeline completes.
     settings:
         Application settings; resolved from the environment if omitted.
 
@@ -86,7 +90,7 @@ def handle_boil(
     if settings is None:
         settings = get_settings()
     try:
-        return _run_boil(from_stage, settings)
+        return _run_boil(from_stage, audit, settings)
     except _BoilError as exc:
         emit(exc.msg_code, **exc.msg_kwargs)
         return 1
@@ -97,7 +101,7 @@ def handle_boil(
 # ---------------------------------------------------------------------------
 
 
-def _run_boil(from_stage: str | None, settings: Settings) -> int:
+def _run_boil(from_stage: str | None, audit: bool, settings: Settings) -> int:
     """Core pipeline coordinator.  Raises ``_BoilError`` on any user-facing error."""
     batch_name = get_active_batch_name(settings)
     if batch_name is None:
@@ -134,6 +138,8 @@ def _run_boil(from_stage: str | None, settings: Settings) -> int:
             _execute_stage(conn, stage, batch_name, tax_rules, cache_conn=cache_conn)
 
         _print_summary(conn, batch_name)
+        if audit:
+            _run_audit(conn, batch_name, settings)
         return 0
 
     finally:
@@ -497,6 +503,185 @@ def _stages_from(from_stage: str) -> tuple[str, ...]:
     """Return the subset of _BOIL_STAGES starting from *from_stage*."""
     idx = _BOIL_STAGES.index(from_stage)
     return _BOIL_STAGES[idx:]
+
+
+_AUDIT_COLUMNS = [
+    "Date",
+    "Time (UTC)",
+    "Asset",
+    "Event Type",
+    "Source",
+    "Units",
+    "CAD Cost (ACQ)",
+    "Fees (CAD)",
+    "Pool Units Before",
+    "Pool Cost Before (CAD)",
+    "ACB/Unit Before (CAD)",
+    "Proceeds (CAD)",
+    "ACB of Disposed (CAD)",
+    "Selling Fees (CAD)",
+    "Gross Gain/Loss (CAD)",
+    "Superficial Loss",
+    "Denied Loss (CAD)",
+    "Allowable Loss (CAD)",
+    "Net Gain/Loss (CAD)",
+    "Pool Units After",
+    "Pool Cost After (CAD)",
+    "ACB/Unit After (CAD)",
+    "Year Acquired",
+]
+
+_ROUNDING = Decimal("0.00000001")
+
+
+def _run_audit(conn: sqlite3.Connection, batch_name: str, settings: Settings) -> None:
+    """Write a chronological ACB ledger CSV for manual verification.
+
+    One row per classified taxable event (acquisitions and disposals).
+    Acquisition rows show the running pool evolution computed by replaying
+    the same weighted-average math as the ACB engine.  Disposal rows pull
+    authoritative values from the database (``dispositions_adjusted``).
+    """
+    if repo.get_stage_status(conn, "superficial_loss") != "done":
+        raise _BoilError(MessageCode.BOIL_AUDIT_ERROR_NOT_READY)
+
+    # Load all taxable classified events sorted chronologically.
+    all_events = repo.read_classified_events(conn)
+    taxable = sorted(
+        (e for e in all_events if e.is_taxable),
+        key=lambda e: (e.timestamp, e.id),
+    )
+
+    # Pre-load disposal details keyed by classified_event id.
+    disposal_rows = conn.execute(
+        """
+        SELECT
+            d.event_id,
+            d.acb_per_unit_before,
+            d.pool_units_before,
+            d.pool_cost_before,
+            d.acb_per_unit_after,
+            d.pool_units_after,
+            d.pool_cost_after,
+            da.proceeds,
+            da.acb_of_disposed,
+            da.selling_fees,
+            da.gain_loss,
+            da.is_superficial_loss,
+            da.superficial_loss_denied,
+            da.allowable_loss,
+            da.adjusted_gain_loss,
+            da.year_acquired,
+            da.disposition_type
+        FROM dispositions_adjusted da
+        JOIN dispositions d ON da.disposition_id = d.id
+        """
+    ).fetchall()
+    disposal_map: dict[int, Any] = {r["event_id"]: r for r in disposal_rows}
+
+    # Per-asset running pool (total_units, total_acb_cad) — used for acquisition rows.
+    # Disposal after-states are taken from the DB and used to keep the running pool
+    # consistent for any acquisitions that follow a disposal.
+    pools: dict[str, tuple[Decimal, Decimal]] = {}
+
+    out_rows: list[dict[str, object]] = []
+
+    for event in taxable:
+        asset = event.asset
+        pool_units, pool_cost = pools.get(asset, (Decimal("0"), Decimal("0")))
+
+        if event.event_type in ("buy", "income", "other"):
+            acb_per_unit_before = (
+                (pool_cost / pool_units).quantize(_ROUNDING) if pool_units else Decimal("0")
+            )
+
+            cad_cost = event.cad_cost or Decimal("0")
+            cad_fee = event.cad_fee or Decimal("0")
+            pool_units_after = pool_units + event.amount
+            pool_cost_after = pool_cost + cad_cost + cad_fee
+            acb_per_unit_after = (
+                (pool_cost_after / pool_units_after).quantize(_ROUNDING)
+                if pool_units_after
+                else Decimal("0")
+            )
+            pools[asset] = (pool_units_after, pool_cost_after)
+
+            out_rows.append(
+                {
+                    "Date": event.timestamp.date().isoformat(),
+                    "Time (UTC)": event.timestamp.time().isoformat(timespec="seconds"),
+                    "Asset": asset,
+                    "Event Type": "Acquisition",
+                    "Source": event.source,
+                    "Units": format(event.amount, "f"),
+                    "CAD Cost (ACQ)": format(cad_cost, "f"),
+                    "Fees (CAD)": format(cad_fee, "f"),
+                    "Pool Units Before": format(pool_units, "f"),
+                    "Pool Cost Before (CAD)": format(pool_cost, "f"),
+                    "ACB/Unit Before (CAD)": format(acb_per_unit_before, "f"),
+                    "Proceeds (CAD)": "",
+                    "ACB of Disposed (CAD)": "",
+                    "Selling Fees (CAD)": "",
+                    "Gross Gain/Loss (CAD)": "",
+                    "Superficial Loss": "",
+                    "Denied Loss (CAD)": "",
+                    "Allowable Loss (CAD)": "",
+                    "Net Gain/Loss (CAD)": "",
+                    "Pool Units After": format(pool_units_after, "f"),
+                    "Pool Cost After (CAD)": format(pool_cost_after, "f"),
+                    "ACB/Unit After (CAD)": format(acb_per_unit_after, "f"),
+                    "Year Acquired": "",
+                }
+            )
+
+        elif event.event_type in ("sell", "fee_disposal", "spend"):
+            d = disposal_map.get(event.id)
+            if d is None:
+                logger.warning("audit: no disposal row found for event_id=%d, skipping", event.id)
+                continue
+
+            # Update running pool from DB's authoritative after-state so subsequent
+            # acquisition rows see the correct pool balance.
+            pools[asset] = (Decimal(d["pool_units_after"]), Decimal(d["pool_cost_after"]))
+
+            is_sl = bool(d["is_superficial_loss"])
+            out_rows.append(
+                {
+                    "Date": event.timestamp.date().isoformat(),
+                    "Time (UTC)": event.timestamp.time().isoformat(timespec="seconds"),
+                    "Asset": asset,
+                    "Event Type": "Disposal",
+                    "Source": event.source,
+                    "Units": format(
+                        Decimal(d["pool_units_before"]) - Decimal(d["pool_units_after"]), "f"
+                    ),
+                    "CAD Cost (ACQ)": "",
+                    "Fees (CAD)": "",
+                    "Pool Units Before": d["pool_units_before"],
+                    "Pool Cost Before (CAD)": d["pool_cost_before"],
+                    "ACB/Unit Before (CAD)": d["acb_per_unit_before"],
+                    "Proceeds (CAD)": d["proceeds"],
+                    "ACB of Disposed (CAD)": d["acb_of_disposed"],
+                    "Selling Fees (CAD)": d["selling_fees"],
+                    "Gross Gain/Loss (CAD)": d["gain_loss"],
+                    "Superficial Loss": "Yes" if is_sl else "No",
+                    "Denied Loss (CAD)": d["superficial_loss_denied"],
+                    "Allowable Loss (CAD)": d["allowable_loss"],
+                    "Net Gain/Loss (CAD)": d["adjusted_gain_loss"],
+                    "Pool Units After": d["pool_units_after"],
+                    "Pool Cost After (CAD)": d["pool_cost_after"],
+                    "ACB/Unit After (CAD)": d["acb_per_unit_after"],
+                    "Year Acquired": d["year_acquired"],
+                }
+            )
+
+    out_path = settings.data_dir / f"{batch_name}-audit.csv"
+    with out_path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=_AUDIT_COLUMNS)
+        writer.writeheader()
+        writer.writerows(out_rows)
+
+    emit(MessageCode.BOIL_AUDIT_WRITTEN, path=out_path, count=len(out_rows))
 
 
 def _print_income_and_costs(conn: sqlite3.Connection) -> None:
