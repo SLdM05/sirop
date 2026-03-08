@@ -129,7 +129,7 @@ messages:
 
   tap.success:
     category: output
-    text: "Tapped {count} transaction(s) from {filename} [{fmt}] into '{batch}'.{skip_note}"
+    text: "Tapped {count} transaction(s) from {filename} [{fmt}] into '{batch}'.{wallet_note}{skip_note}"
 
   tap.folder.no_files:
     category: output

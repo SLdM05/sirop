@@ -274,6 +274,7 @@ def _run_tap(file_path: Path, source: str | None, wallet: str | None, settings: 
         )
         return 0
 
+    wallet_note = f" (wallet: {wallet_name})" if not auto_created else ""
     skip_note = f" ({skipped} duplicate(s) skipped)" if skipped else ""
     emit(
         MessageCode.TAP_SUCCESS,
@@ -281,6 +282,7 @@ def _run_tap(file_path: Path, source: str | None, wallet: str | None, settings: 
         filename=file_path.name,
         fmt=disp,
         batch=batch_name,
+        wallet_note=wallet_note,
         skip_note=skip_note,
     )
     logger.debug(
