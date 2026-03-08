@@ -67,6 +67,8 @@ class MessageCode(StrEnum):
     BOIL_SUMMARY_HOLDINGS_HEADER = "boil.summary.holdings_header"
     BOIL_SUMMARY_WALLET_HEADER = "boil.summary.wallet_header"
     BOIL_SUMMARY_STIR_HINT = "boil.summary.stir_hint"
+    BOIL_AUDIT_WRITTEN = "boil.audit.written"
+    BOIL_AUDIT_ERROR_NOT_READY = "boil.audit.error.not_ready"
 
     # ── stir ──────────────────────────────────────────────────────────────────
     STIR_ERROR_NOT_NORMALIZED = "stir.error.not_normalized"
