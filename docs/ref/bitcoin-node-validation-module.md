@@ -1,10 +1,24 @@
 # Bitcoin Node Verification Module
 
-> **Status: Future Implementation**
-> This module is not yet wired into the active pipeline. The `verify` stage
-> currently promotes transactions to `verified_transactions` unchanged
-> (pass-through). This document is the design spec for when node verification
-> is built. See `src/sirop/cli/boil.py → _run_verify()` for current behaviour.
+> **Status: Partial Implementation**
+> The `verify` stage currently promotes transactions to `verified_transactions`
+> unchanged (pass-through). Full node verification (timestamp override, amount
+> cross-validation, audit trail) is the design spec below.
+>
+> **What IS implemented today:**
+> - `src/sirop/node/mempool_client.py` — lightweight Mempool REST client
+>   (`fetch_tx`, `fetch_outspends`) with 1-retry error handling.
+> - `src/sirop/node/graph.py` — pure BFS traversal (`backward_traverse`,
+>   `forward_traverse`) to link BTC transfers through the UTXO graph.
+> - `src/sirop/node/privacy.py` — `is_private_node_url()` classifies the
+>   configured Mempool URL as private (loopback, RFC 1918, mDNS) or public,
+>   triggering the privacy prompt before any txid is sent to a public endpoint.
+> - `src/sirop/transfer_match/graph_analysis.py` — orchestrates Pass 1b of the
+>   transfer matcher: backward + forward BFS for unmatched BTC transactions,
+>   with fee micro-disposal emission and deduplication.
+>
+> See `docs/usage/sirop-boil.md → BTC graph traversal` for configuration and
+> the privacy guard behaviour.
 
 ## Purpose
 
@@ -525,3 +539,100 @@ This module slots into the existing processing pipeline from the main spec:
 ```
 
 The module is **optional but strongly recommended**. If the node is unavailable, the pipeline falls back to exchange/wallet data only and logs a warning. All verification results are stored alongside the transaction data for the 6-year CRA record retention period.
+
+---
+
+## Implemented: UTXO Graph Traversal (Pass 1b)
+
+This section documents the subset of the node module that is **active today**
+in the transfer matching stage.
+
+### What it solves
+
+Pass 1 of the transfer matcher pairs a withdrawal with a deposit when both
+carry the same on-chain `txid`. This works for Shakepay ↔ Sparrow pairs where
+the exchange CSV exports the real blockchain txid.
+
+It fails when:
+- The exchange batches many withdrawals into a single on-chain transaction
+  (CPFP, fee-bumping, consolidation).
+- The deposit arrives via a change output of a multi-input transaction.
+- There is one or more intermediate self-transfer hops between withdrawal and
+  deposit.
+
+In all these cases the withdrawal and deposit txids differ, so Pass 1 leaves
+both as unmatched — treating the withdrawal as a sell and the deposit as a buy.
+Graph traversal (Pass 1b) recovers these pairs by following the UTXO graph.
+
+### Traversal algorithm
+
+**Backward pass** (for each unmatched deposit):
+
+```
+start at deposit txid
+  → fetch vin[] txids via GET /tx/{deposit_txid}
+  → if any vin txid matches a known withdrawal → pair found (hop 1)
+  → otherwise enqueue each vin txid for the next level
+repeat up to BTC_TRAVERSAL_MAX_HOPS levels
+```
+
+**Forward pass** (for remaining unmatched withdrawals):
+
+```
+start at withdrawal txid
+  → fetch output spend status via GET /tx/{withdrawal_txid}/outspends
+  → for each spent output: follow to the spending txid
+  → if any spending txid matches a known deposit → pair found (hop 1)
+  → otherwise enqueue each spending txid
+repeat up to BTC_TRAVERSAL_MAX_HOPS levels
+```
+
+Backward pass runs first. The forward pass skips deposits already paired by
+the backward pass. A pair can only be produced once.
+
+### Fee calculation
+
+When a pair is found:
+
+```
+fee_crypto = max(withdrawal_amount - deposit_amount, 0)
+```
+
+A `fee_disposal` ClassifiedEvent is emitted for `fee_crypto` at the CAD rate
+derived from the withdrawal's `cad_value / amount`. This is identical to the
+fee micro-disposal logic in Pass 1.
+
+### Source files
+
+| File | Purpose |
+|------|---------|
+| `src/sirop/node/mempool_client.py` | `fetch_tx()`, `fetch_outspends()` — HTTP client, 1 retry on 5xx |
+| `src/sirop/node/graph.py` | `backward_traverse()`, `forward_traverse()` — pure BFS, no HTTP |
+| `src/sirop/node/privacy.py` | `is_private_node_url()` — private/public URL classifier |
+| `src/sirop/transfer_match/graph_analysis.py` | `find_graph_matches()` — orchestrates both passes |
+| `tests/test_graph.py` | 17 BFS unit tests (pure stdlib, no network) |
+| `tests/test_privacy.py` | 54 URL classification tests |
+
+### Configuration
+
+```bash
+# .env
+BTC_TRAVERSAL_MAX_HOPS=0          # 0 = disabled. Recommended: 3–5.
+BTC_MEMPOOL_URL=http://localhost:3006/api
+BTC_TRAVERSAL_ALLOW_PUBLIC=false  # bypass interactive prompt in CI
+```
+
+Set `BTC_TRAVERSAL_MAX_HOPS=0` (the default) to disable graph traversal
+entirely. No Mempool API calls are made and the behaviour is identical to
+before this feature was added.
+
+### Privacy guard
+
+Before making any traversal calls, sirop checks whether `BTC_MEMPOOL_URL` is
+a private address using `is_private_node_url()`:
+
+- **Private URL** (RFC 1918, loopback, `.local`, etc.) → silent, no prompt.
+- **Public URL** → `[W007]` warning emitted; interactive Y/n required unless
+  `--allow-public-mempool` is passed or `BTC_TRAVERSAL_ALLOW_PUBLIC=true`
+  is set.
+- If the user declines → `[W008]` emitted, traversal skipped for the run.
