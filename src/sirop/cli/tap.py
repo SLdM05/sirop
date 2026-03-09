@@ -70,6 +70,76 @@ class _TapError(Exception):
         super().__init__(str(code))
 
 
+def handle_tap_walletfolder(
+    folder_path: Path,
+    source: str | None,
+    settings: Settings | None = None,
+) -> int:
+    """Scan *folder_path* for subfolders; tap CSVs in each as a wallet named after the subfolder.
+
+    Parameters
+    ----------
+    folder_path:
+        Root directory whose immediate subdirectories are treated as wallet names.
+    source:
+        Importer name override passed through to each file tap.  When ``None``,
+        format is auto-detected per file.
+    settings:
+        Application settings; resolved from the environment if omitted.
+
+    Returns
+    -------
+    int
+        Exit code: 0 on success, 1 on any error.
+    """
+    if settings is None:
+        settings = get_settings()
+
+    if not folder_path.is_dir():
+        emit(MessageCode.TAP_ERROR_FILE_NOT_FOUND, path=folder_path)
+        return 1
+
+    subfolders = sorted(p for p in folder_path.iterdir() if p.is_dir())
+    if not subfolders:
+        emit(MessageCode.TAP_WALLETFOLDER_NO_SUBFOLDERS, path=folder_path)
+        return 0
+
+    # ── Show listing ──────────────────────────────────────────────────────────
+    emit(MessageCode.TAP_WALLETFOLDER_HEADER, count=len(subfolders), path=folder_path)
+    tappable: list[tuple[Path, str]] = []
+    for sub in subfolders:
+        csv_files = sorted(sub.glob("*.csv"))
+        if csv_files:
+            emit(MessageCode.TAP_WALLETFOLDER_SUBFOLDER_ITEM, name=sub.name, count=len(csv_files))
+            tappable.append((sub, sub.name))
+        else:
+            emit(MessageCode.TAP_WALLETFOLDER_SUBFOLDER_EMPTY, name=sub.name)
+
+    if not tappable:
+        emit(MessageCode.TAP_WALLETFOLDER_NO_CSV_FOUND)
+        return 1
+
+    # ── Confirmation ──────────────────────────────────────────────────────────
+    try:
+        answer = input(f"\nTap {len(tappable)} wallet folder(s)? [y/N] ").strip().lower()
+    except EOFError:
+        answer = ""
+
+    if answer not in {"y", "yes"}:
+        emit(MessageCode.TAP_WALLETFOLDER_ABORTED)
+        return 0
+
+    # ── Tap each CSV, wallet name = subfolder name ────────────────────────────
+    # Pass wallet explicitly (not None) so auto-created=False — no conflict prompt.
+    overall_rc = 0
+    for sub, wallet_name in tappable:
+        for csv_path in sorted(sub.glob("*.csv")):
+            rc = handle_tap(csv_path, source, wallet_name, settings)
+            if rc != 0:
+                overall_rc = rc
+    return overall_rc
+
+
 def handle_tap(
     file_path: Path,
     source: str | None,
