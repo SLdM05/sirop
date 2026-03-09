@@ -144,6 +144,18 @@ def _build_parser() -> argparse.ArgumentParser:
             "to <DATA_DIR>/<batch>-audit.csv for manual verification in Excel."
         ),
     )
+    boil_p.add_argument(
+        "--allow-public-mempool",
+        dest="allow_public_mempool",
+        action="store_true",
+        default=False,
+        help=(
+            "Skip the interactive privacy prompt when BTC_MEMPOOL_URL points to a public "
+            "host. Use this in non-interactive environments after reviewing the privacy "
+            "implications (your txids will be sent to the public Mempool endpoint). "
+            "Equivalent to setting BTC_TRAVERSAL_ALLOW_PUBLIC=true in .env."
+        ),
+    )
 
     return parser
 
@@ -181,7 +193,13 @@ def main() -> None:
         )
 
     elif args.command == "boil":
-        sys.exit(handle_boil(args.from_stage, audit=args.audit))
+        sys.exit(
+            handle_boil(
+                args.from_stage,
+                audit=args.audit,
+                allow_public_mempool=args.allow_public_mempool,
+            )
+        )
 
     else:
         parser.print_help()

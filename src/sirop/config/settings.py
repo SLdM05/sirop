@@ -47,6 +47,10 @@ class Settings(BaseSettings):
     # searching for a matching deposit/withdrawal pair.  Set to 0 to disable
     # graph traversal entirely (pipeline behaviour is unchanged from Pass 1).
     btc_traversal_max_hops: int = 0
+    # Set to True to skip the interactive privacy prompt when BTC_MEMPOOL_URL
+    # points to a public host (e.g. mempool.space).  Only use in non-interactive
+    # environments where you have accepted the privacy implications.
+    btc_traversal_allow_public: bool = False
 
     # ── External APIs ─────────────────────────────────────────────────────────
 

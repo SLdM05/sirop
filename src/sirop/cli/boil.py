@@ -34,6 +34,7 @@ from sirop.engine import acb as acb_engine
 from sirop.engine import superficial_loss as sld_engine
 from sirop.engine.acb import TaxRules
 from sirop.models.messages import MessageCode
+from sirop.node.privacy import is_private_node_url
 from sirop.normalizer import normalizer
 from sirop.transfer_match import matcher
 from sirop.utils.boc import BoCRateError, fill_rate_gaps, prefetch_rates
@@ -69,6 +70,7 @@ def handle_boil(
     from_stage: str | None,
     audit: bool = False,
     settings: Settings | None = None,
+    allow_public_mempool: bool = False,
 ) -> int:
     """Run the pipeline from *from_stage* (or from the beginning if None).
 
@@ -81,6 +83,10 @@ def handle_boil(
         When True, write an ACB ledger CSV after the pipeline completes.
     settings:
         Application settings; resolved from the environment if omitted.
+    allow_public_mempool:
+        When True, skip the interactive privacy prompt even if
+        ``BTC_MEMPOOL_URL`` points to a public host.  Equivalent to setting
+        ``BTC_TRAVERSAL_ALLOW_PUBLIC=true`` in the environment.
 
     Returns
     -------
@@ -90,7 +96,7 @@ def handle_boil(
     if settings is None:
         settings = get_settings()
     try:
-        return _run_boil(from_stage, audit, settings)
+        return _run_boil(from_stage, audit, settings, allow_public_mempool=allow_public_mempool)
     except _BoilError as exc:
         emit(exc.msg_code, **exc.msg_kwargs)
         return 1
@@ -101,7 +107,13 @@ def handle_boil(
 # ---------------------------------------------------------------------------
 
 
-def _run_boil(from_stage: str | None, audit: bool, settings: Settings) -> int:
+def _run_boil(
+    from_stage: str | None,
+    audit: bool,
+    settings: Settings,
+    *,
+    allow_public_mempool: bool = False,
+) -> int:
     """Core pipeline coordinator.  Raises ``_BoilError`` on any user-facing error."""
     batch_name = get_active_batch_name(settings)
     if batch_name is None:
@@ -119,6 +131,11 @@ def _run_boil(from_stage: str | None, audit: bool, settings: Settings) -> int:
 
         tax_rules = _load_tax_rules()
 
+        # Resolve graph traversal permission once before any stage runs.
+        graph_traversal_allowed = _resolve_graph_traversal_permission(
+            settings, allow_public_mempool=allow_public_mempool
+        )
+
         # Invalidate stages that will be re-run and clear their stale output.
         if from_stage is not None:
             _validate_from_stage(from_stage)
@@ -135,7 +152,14 @@ def _run_boil(from_stage: str | None, audit: bool, settings: Settings) -> int:
                 continue
 
             _check_not_running(conn, stage, batch_name)
-            _execute_stage(conn, stage, batch_name, tax_rules, cache_conn=cache_conn)
+            _execute_stage(
+                conn,
+                stage,
+                batch_name,
+                tax_rules,
+                cache_conn=cache_conn,
+                graph_traversal_allowed=graph_traversal_allowed,
+            )
 
         _print_summary(conn, batch_name)
         if audit:
@@ -148,12 +172,13 @@ def _run_boil(from_stage: str | None, audit: bool, settings: Settings) -> int:
             cache_conn.close()
 
 
-def _execute_stage(
+def _execute_stage(  # noqa: PLR0913
     conn: object,  # sqlite3.Connection — typed generically to avoid circular import hint
     stage: str,
     batch_name: str,
     tax_rules: TaxRules,
     cache_conn: sqlite3.Connection | None = None,
+    graph_traversal_allowed: bool = True,
 ) -> None:
     """Execute a single pipeline stage wrapped in StageContext."""
     assert isinstance(conn, sqlite3.Connection)
@@ -168,7 +193,7 @@ def _execute_stage(
             _run_verify(conn)
 
         elif stage == "transfer_match":
-            _run_transfer_match(conn)
+            _run_transfer_match(conn, graph_traversal_allowed=graph_traversal_allowed)
 
         elif stage == "boil":
             _run_acb(conn, tax_rules)
@@ -346,7 +371,48 @@ def _run_verify(conn: object) -> None:
     logger.debug("%d row(s) promoted to verified_transactions", count)
 
 
-def _run_transfer_match(conn: object) -> None:
+def _resolve_graph_traversal_permission(
+    settings: Settings, *, allow_public_mempool: bool = False
+) -> bool:
+    """Return True when graph traversal is permitted for the configured Mempool URL.
+
+    Rules (evaluated in order):
+    1. If ``BTC_TRAVERSAL_MAX_HOPS == 0`` — traversal disabled, return True
+       (the hop-gate in matcher.py will skip Pass 1b anyway; no prompt needed).
+    2. If the URL is a private/local address — return True silently.
+    3. If ``allow_public_mempool`` (CLI flag) or
+       ``settings.btc_traversal_allow_public`` (env var) — emit warning then
+       return True (non-interactive confirmation already given).
+    4. Otherwise — prompt the user interactively.  Return True on "y/Y", False
+       on anything else (including EOF / non-interactive stdin).
+    """
+    if settings.btc_traversal_max_hops <= 0:
+        return True
+
+    url = settings.btc_mempool_url
+    if is_private_node_url(url):
+        return True
+
+    # Public URL — check for non-interactive bypass first.
+    if allow_public_mempool or settings.btc_traversal_allow_public:
+        emit(MessageCode.BOIL_GRAPH_PRIVACY_WARNING, url=url)
+        return True
+
+    # Interactive prompt.
+    emit(MessageCode.BOIL_GRAPH_PRIVACY_WARNING, url=url)
+    try:
+        answer = input("Proceed with graph traversal? [y/N] ").strip().lower()
+    except (EOFError, OSError):
+        answer = ""
+
+    if answer == "y":
+        return True
+
+    emit(MessageCode.BOIL_GRAPH_PRIVACY_SKIPPED)
+    return False
+
+
+def _run_transfer_match(conn: object, *, graph_traversal_allowed: bool = True) -> None:
     assert isinstance(conn, sqlite3.Connection)
 
     tax_year = repo.read_tax_year(conn)
@@ -364,7 +430,12 @@ def _run_transfer_match(conn: object) -> None:
         )
 
     with spinner("Classifying events…"):
-        events, income_evts = matcher.match_transfers(txs, overrides=overrides, tax_year=tax_year)
+        events, income_evts = matcher.match_transfers(
+            txs,
+            overrides=overrides,
+            tax_year=tax_year,
+            graph_traversal_allowed=graph_traversal_allowed,
+        )
 
     # The matcher uses transactions.id as vtx_id; patch to verified_transactions.id
     # before writing, since classified_events.vtx_id and income_events.vtx_id both

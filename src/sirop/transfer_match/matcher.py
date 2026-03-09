@@ -89,6 +89,7 @@ def match_transfers(  # noqa: PLR0912 PLR0915
     txs: list[Transaction],
     overrides: list[TransferOverride] | None = None,
     tax_year: int | None = None,
+    graph_traversal_allowed: bool = True,
 ) -> tuple[list[ClassifiedEvent], list[IncomeEvent]]:
     """Classify *txs* into taxable events and income sub-records.
 
@@ -100,6 +101,11 @@ def match_transfers(  # noqa: PLR0912 PLR0915
         Optional user-specified link/unlink decisions from the ``stir`` command.
         Forced links are applied before auto-matching; forced unlinks prevent
         specific pairs from being auto-matched.
+    graph_traversal_allowed:
+        When ``False``, Pass 1b (BTC UTXO graph traversal) is skipped even if
+        ``BTC_TRAVERSAL_MAX_HOPS > 0``.  Set to ``False`` when the configured
+        Mempool URL is a public host and the user has not confirmed the privacy
+        risk (interactively or via ``BTC_TRAVERSAL_ALLOW_PUBLIC=true``).
 
     Returns
     -------
@@ -332,11 +338,12 @@ def match_transfers(  # noqa: PLR0912 PLR0915
             )
 
     # --- Pass 1b: BTC graph traversal for remaining unmatched txid transactions ---
-    # Only runs when BTC_TRAVERSAL_MAX_HOPS > 0.  Errors are caught so the
-    # pipeline continues identically to Pass-1-only behaviour when the node
-    # is unreachable or the setting is not configured.
+    # Only runs when BTC_TRAVERSAL_MAX_HOPS > 0 and graph_traversal_allowed is
+    # True (caller has confirmed the Mempool URL is acceptable to use).
+    # Errors are caught so the pipeline continues identically to Pass-1-only
+    # behaviour when the node is unreachable or the setting is not configured.
     _settings = get_settings()
-    if _settings.btc_traversal_max_hops > 0:
+    if _settings.btc_traversal_max_hops > 0 and graph_traversal_allowed:
         _unmatched_withdrawals = [
             t for t in sorted_txs if t.tx_type in _OUTGOING and t.id not in paired_ids and t.txid
         ]

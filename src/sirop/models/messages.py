@@ -78,6 +78,8 @@ class MessageCode(StrEnum):
     BOIL_AUDIT_ERROR_NOT_READY = "boil.audit.error.not_ready"
     BOIL_GRAPH_MATCH_FOUND = "boil.graph.match_found"
     BOIL_GRAPH_TRAVERSAL_UNAVAILABLE = "boil.graph.traversal_unavailable"
+    BOIL_GRAPH_PRIVACY_WARNING = "boil.graph.privacy_warning"
+    BOIL_GRAPH_PRIVACY_SKIPPED = "boil.graph.privacy_skipped"
 
     # ── stir ──────────────────────────────────────────────────────────────────
     STIR_ERROR_NOT_NORMALIZED = "stir.error.not_normalized"
