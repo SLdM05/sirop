@@ -43,6 +43,10 @@ class Settings(BaseSettings):
     btc_rpc_user: str = ""
     btc_rpc_password: str = ""
     btc_mempool_url: str = "http://localhost:3006/api"
+    # Maximum number of on-chain hops the graph traversal will follow when
+    # searching for a matching deposit/withdrawal pair.  Set to 0 to disable
+    # graph traversal entirely (pipeline behaviour is unchanged from Pass 1).
+    btc_traversal_max_hops: int = 0
 
     # ── External APIs ─────────────────────────────────────────────────────────
 

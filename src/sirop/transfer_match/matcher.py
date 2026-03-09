@@ -47,10 +47,12 @@ from datetime import timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
+from sirop.config.settings import get_settings
 from sirop.models.disposition import IncomeEvent
 from sirop.models.enums import TransactionType
 from sirop.models.event import ClassifiedEvent
 from sirop.models.messages import MessageCode
+from sirop.transfer_match.graph_analysis import find_graph_matches
 from sirop.utils.logging import get_logger
 from sirop.utils.messages import emit
 
@@ -328,6 +330,68 @@ def match_transfers(  # noqa: PLR0912 PLR0915
                     wallet_id=tx.wallet_id,
                 )
             )
+
+    # --- Pass 1b: BTC graph traversal for remaining unmatched txid transactions ---
+    # Only runs when BTC_TRAVERSAL_MAX_HOPS > 0.  Errors are caught so the
+    # pipeline continues identically to Pass-1-only behaviour when the node
+    # is unreachable or the setting is not configured.
+    _settings = get_settings()
+    if _settings.btc_traversal_max_hops > 0:
+        _unmatched_withdrawals = [
+            t for t in sorted_txs if t.tx_type in _OUTGOING and t.id not in paired_ids and t.txid
+        ]
+        _unmatched_deposits = [
+            t for t in sorted_txs if t.tx_type in _INCOMING and t.id not in paired_ids and t.txid
+        ]
+        if _unmatched_withdrawals or _unmatched_deposits:
+            try:
+                graph_matches = find_graph_matches(
+                    unmatched_withdrawals=_unmatched_withdrawals,
+                    unmatched_deposits=_unmatched_deposits,
+                    mempool_url=_settings.btc_mempool_url,
+                    max_hops=_settings.btc_traversal_max_hops,
+                )
+            except Exception:
+                logger.warning(
+                    "transfer_match: graph traversal raised an unexpected error — skipping"
+                )
+                emit(MessageCode.BOIL_GRAPH_TRAVERSAL_UNAVAILABLE)
+                graph_matches = []
+
+            for gm in graph_matches:
+                paired_ids.add(gm.deposit_db_id)
+                paired_ids.add(gm.withdrawal_db_id)
+                emit(
+                    MessageCode.BOIL_GRAPH_MATCH_FOUND,
+                    hops=gm.hops,
+                    direction=gm.direction,
+                    fee=format(gm.fee_crypto, "f"),
+                )
+                # Emit fee micro-disposal — same pattern as Pass 1.
+                withdrawal_tx = tx_by_id[gm.withdrawal_db_id]
+                if gm.fee_crypto > Decimal("0") and withdrawal_tx.cad_value > Decimal("0"):
+                    cad_rate = (
+                        withdrawal_tx.cad_value / withdrawal_tx.amount
+                        if withdrawal_tx.amount
+                        else Decimal("0")
+                    )
+                    fee_disposals.append(
+                        ClassifiedEvent(
+                            id=0,
+                            vtx_id=withdrawal_tx.id,
+                            timestamp=withdrawal_tx.timestamp,
+                            event_type="fee_disposal",
+                            asset=withdrawal_tx.asset,
+                            amount=gm.fee_crypto,
+                            cad_proceeds=gm.fee_crypto * cad_rate,
+                            cad_cost=None,
+                            cad_fee=None,
+                            txid=withdrawal_tx.txid,
+                            source=withdrawal_tx.source,
+                            is_taxable=True,
+                            wallet_id=withdrawal_tx.wallet_id,
+                        )
+                    )
 
     # --- Pass 2: convert remaining transactions to ClassifiedEvents ---
     events: list[ClassifiedEvent] = []

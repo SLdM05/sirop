@@ -280,6 +280,15 @@ messages:
     code: E022
     text: "Cannot write audit CSV: pipeline not complete. Run 'sirop boil' first."
 
+  boil.graph.match_found:
+    category: output
+    text: "Graph traversal matched transfer via {hops} hop(s) [{direction}] — fee {fee} BTC"
+
+  boil.graph.traversal_unavailable:
+    category: warning
+    code: W006
+    text: "BTC graph traversal failed — node unreachable or parse error; unmatched transfers treated as taxable. Check BTC_MEMPOOL_URL in .env."
+
   # ── stir ──────────────────────────────────────────────────────────────────
 
   stir.error.not_normalized:
