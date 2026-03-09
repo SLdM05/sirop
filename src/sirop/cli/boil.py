@@ -414,7 +414,16 @@ def _run_acb(conn: object, tax_rules: TaxRules) -> None:
     )
 
     with spinner("Running ACB engine…"):
-        disps, states, final_pools, last_events = acb_engine.run(events, tax_rules)
+        disps, states, final_pools, last_events, underruns = acb_engine.run(events, tax_rules)
+
+    for u in underruns:
+        emit(
+            MessageCode.BOIL_ACB_POOL_UNDERRUN,
+            asset=u.asset,
+            date=u.timestamp.date(),
+            attempted=format(u.attempted, "f"),
+            available=format(u.available, "f"),
+        )
 
     disps = repo.write_dispositions(conn, disps, states)
     logger.debug("wrote %d disposition(s)", len(disps))
@@ -675,7 +684,9 @@ def _run_audit(conn: sqlite3.Connection, batch_name: str, settings: Settings) ->
                 }
             )
 
-    out_path = settings.data_dir / f"{batch_name}-audit.csv"
+    audit_dir = settings.output_dir / "audit"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    out_path = audit_dir / f"{batch_name}-audit.csv"
     with out_path.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=_AUDIT_COLUMNS)
         writer.writeheader()

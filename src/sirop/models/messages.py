@@ -47,6 +47,12 @@ class MessageCode(StrEnum):
     TAP_FOLDER_ALL_UNKNOWN = "tap.folder.all_unknown"
     TAP_FOLDER_ABORTED = "tap.folder.aborted"
     TAP_WALLET_CONFLICT_ABORTED = "tap.wallet.conflict_aborted"
+    TAP_WALLETFOLDER_NO_SUBFOLDERS = "tap.walletfolder.no_subfolders"
+    TAP_WALLETFOLDER_HEADER = "tap.walletfolder.header"
+    TAP_WALLETFOLDER_SUBFOLDER_ITEM = "tap.walletfolder.subfolder_item"
+    TAP_WALLETFOLDER_SUBFOLDER_EMPTY = "tap.walletfolder.subfolder_empty"
+    TAP_WALLETFOLDER_NO_CSV_FOUND = "tap.walletfolder.no_csv_found"
+    TAP_WALLETFOLDER_ABORTED = "tap.walletfolder.aborted"
 
     # ── boil ──────────────────────────────────────────────────────────────────
     BOIL_ERROR_NOT_TAPPED = "boil.error.not_tapped"
@@ -63,6 +69,7 @@ class MessageCode(StrEnum):
     BOIL_TRANSFER_MATCH_UNMATCHED_WITHDRAWAL = "boil.transfer_match.unmatched_withdrawal"
     BOIL_TRANSFER_MATCH_UNMATCHED_DEPOSIT = "boil.transfer_match.unmatched_deposit"
     BOIL_WARNING_FUTURE_YEAR_DISPOSITIONS = "boil.warning.future_year_dispositions"
+    BOIL_ACB_POOL_UNDERRUN = "boil.acb.pool_underrun"
     BOIL_SUMMARY_COMPLETE = "boil.summary.complete"
     BOIL_SUMMARY_HOLDINGS_HEADER = "boil.summary.holdings_header"
     BOIL_SUMMARY_WALLET_HEADER = "boil.summary.wallet_header"

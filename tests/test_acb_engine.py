@@ -10,9 +10,7 @@ All values use Decimal to match production code.
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-import pytest
-
-from sirop.engine.acb import InsufficientUnitsError, TaxRules, run
+from sirop.engine.acb import PoolUnderrun, TaxRules, run
 from sirop.models.event import ClassifiedEvent
 
 # ---------------------------------------------------------------------------
@@ -184,13 +182,35 @@ def test_multiple_assets_isolated() -> None:
     assert eth_disp.gain_loss_cad == Decimal("3000.00000000")
 
 
-def test_empty_pool_disposal_raises() -> None:
-    """Disposing from an empty pool raises InsufficientUnitsError."""
+def test_empty_pool_disposal_clamps_and_warns() -> None:
+    """Disposing from an empty pool clamps to 0 and returns a PoolUnderrun warning.
+
+    Previously this raised InsufficientUnitsError and crashed the pipeline.
+    Now the engine records the underrun and continues so the user gets output
+    along with a W005 warning.
+    """
     events = [
         _sell("BTC", "0.1", "6000", offset_days=0, event_id=1),
     ]
-    with pytest.raises(InsufficientUnitsError):
-        run(events, _DEFAULT_RULES)
+    disps, _, _, _, underruns = run(events, _DEFAULT_RULES)
+    assert len(underruns) == 1
+    u = underruns[0]
+    assert isinstance(u, PoolUnderrun)
+    assert u.asset == "BTC"
+    assert u.attempted == Decimal("0.1")
+    assert u.available == Decimal("0")
+    # Disposal is still recorded (clamped to 0 units disposed).
+    assert len(disps) == 1
+
+
+def test_no_underrun_on_normal_disposal() -> None:
+    """A disposal within pool balance produces no underrun warning."""
+    events = [
+        _buy("BTC", "0.5", "30000", offset_days=0, event_id=1),
+        _sell("BTC", "0.3", "20000", offset_days=1, event_id=2),
+    ]
+    _, _, _, _, underruns = run(events, _DEFAULT_RULES)
+    assert underruns == []
 
 
 def test_disposition_type_recorded() -> None:
@@ -306,7 +326,7 @@ def test_final_pools_returned_for_acquisition_only_asset() -> None:
         _buy("BTC", "0.5", "25000", cad_fee="50", offset_days=0, event_id=1),
         _buy("BTC", "0.3", "18000", cad_fee="36", offset_days=10, event_id=2),
     ]
-    disps, acb_states, final_pools, last_events = run(events, _DEFAULT_RULES)
+    disps, acb_states, final_pools, last_events, _ = run(events, _DEFAULT_RULES)
 
     # No disposals → no dispositions and no per-disposal acb_state entries.
     assert len(disps) == 0

@@ -159,6 +159,30 @@ messages:
     category: output
     text: "Tap cancelled. Use --wallet NAME to import into a new wallet."
 
+  tap.walletfolder.no_subfolders:
+    category: output
+    text: "No subfolders found in {path}."
+
+  tap.walletfolder.header:
+    category: output
+    text: "Found {count} wallet folder(s) in {path}:"
+
+  tap.walletfolder.subfolder_item:
+    category: output
+    text: "  {name}/  ({count} CSV file(s))"
+
+  tap.walletfolder.subfolder_empty:
+    category: output
+    text: "  {name}/  (no CSV files — will be skipped)"
+
+  tap.walletfolder.no_csv_found:
+    category: output
+    text: "No CSV files found in any subfolder — nothing to tap."
+
+  tap.walletfolder.aborted:
+    category: output
+    text: "Tap cancelled."
+
   # ── boil ──────────────────────────────────────────────────────────────────
 
   boil.error.not_tapped:
@@ -225,6 +249,11 @@ messages:
     category: warning
     code: W004
     text: "{count} disposal(s) dated after {tax_year}-12-31 — excluded from the {tax_year} report. Future-year acquisitions within the 30-day superficial loss window are still used for loss detection."
+
+  boil.acb.pool_underrun:
+    category: warning
+    code: W005
+    text: "ACB pool underrun for {asset} on {date} — attempted to dispose {attempted} but pool held only {available}. Pipeline continued with clamped value. Verify all imports are present and that transfers are correctly matched with 'sirop stir'."
 
   boil.summary.complete:
     category: output
