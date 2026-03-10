@@ -26,7 +26,7 @@ is a no-op unless you pass `--from`.
 ## Syntax
 
 ```
-sirop boil [--from STAGE]
+sirop boil [--from STAGE] [--audit] [--allow-public-mempool]
 ```
 
 ### Arguments
@@ -34,6 +34,8 @@ sirop boil [--from STAGE]
 | Argument | Required | Description |
 |----------|----------|-------------|
 | `--from STAGE` | no | Re-run the pipeline starting from this stage. Earlier stages are skipped; this stage and all later ones are re-run even if `done`. |
+| `--audit` | no | After calculation, write an ACB ledger CSV to `<DATA_DIR>/<batch>-audit.csv` for manual verification in Excel. |
+| `--allow-public-mempool` | no | Skip the interactive privacy prompt when `BTC_MEMPOOL_URL` points to a public host. Equivalent to setting `BTC_TRAVERSAL_ALLOW_PUBLIC=true` in `.env`. See [BTC graph traversal](#btc-graph-traversal-pass-1b) below. |
 
 Valid `--from` values: `normalize`, `verify`, `transfer_match`, `boil`, `superficial_loss`.
 
@@ -82,6 +84,19 @@ Overrides written by `sirop stir` are applied first; auto-matching runs after.
 
 - Matches withdrawals to deposits of the same asset by shared `txid` (primary
   signal) or by amount proximity (±1%) + timestamp proximity (±4 hours).
+
+**Pass 1b — BTC UTXO graph traversal (optional, see below):**
+
+- For BTC transactions that still lack a match after Pass 1, follows the UTXO
+  graph through the Mempool REST API to find indirect links:
+  - **Backward** (deposit → withdrawal): walks `vin` inputs upstream from an
+    unmatched deposit until a known withdrawal txid appears.
+  - **Forward** (withdrawal → deposit): walks output spends downstream from an
+    unmatched withdrawal until a known deposit txid appears.
+- Only active when `BTC_TRAVERSAL_MAX_HOPS > 0` in `.env` and the configured
+  Mempool URL has been approved (see [privacy guard](#btc-graph-traversal-pass-1b)).
+- Each match emits a `fee_disposal` event for the difference between the
+  withdrawal and deposit amounts (the miner fee).
 
 **Classification:**
 
@@ -371,6 +386,69 @@ for row in conn.execute(
 for row in conn.execute("SELECT stage, status, completed_at FROM stage_status"):
     print(dict(row))
 ```
+
+---
+
+## BTC graph traversal (Pass 1b)
+
+Graph traversal attempts to link BTC transfers where the withdrawal and deposit
+txids differ — a common pattern when the receiving wallet uses a different
+address from the one the exchange sent to, or when the transaction has
+multiple inputs/outputs.
+
+### How it works
+
+For each unmatched BTC withdrawal, sirop calls `GET /tx/{txid}/outspends` on
+the Mempool REST API and follows spending outputs forward through the UTXO
+graph. For each unmatched BTC deposit, it reads `vin` txids and walks backward
+through inputs. Both passes stop after `BTC_TRAVERSAL_MAX_HOPS` steps.
+
+When a link is found:
+- Both legs are paired (not taxable disposals).
+- The difference in amounts (withdrawal minus deposit) is recorded as a
+  `fee_disposal` — a small taxable disposal of BTC at the block confirmation
+  rate.
+- A confirmation message is printed: `Graph traversal matched transfer via N
+  hop(s) [backward|forward] — fee X BTC`.
+
+### Configuration
+
+```bash
+# .env
+BTC_TRAVERSAL_MAX_HOPS=0          # 0 = disabled (default). Set 3–5 for typical use.
+BTC_MEMPOOL_URL=http://localhost:3006/api  # must be set to your self-hosted Mempool instance
+BTC_TRAVERSAL_ALLOW_PUBLIC=false  # set true to bypass the privacy prompt in CI/scripted runs
+```
+
+`BTC_TRAVERSAL_MAX_HOPS=0` disables graph traversal entirely — Pass 1b is
+skipped with no API calls. This is the safe default for users without a local
+node.
+
+### Privacy guard
+
+Sending txids to a public Mempool endpoint (e.g. `mempool.space`) lets the
+operator correlate your wallet activity with your IP address. sirop enforces
+a privacy gate before making any graph traversal calls:
+
+| `BTC_MEMPOOL_URL` points to… | Behaviour |
+|------------------------------|-----------|
+| Private IP / loopback / `.local` hostname | Silent — no prompt |
+| Public host, `--allow-public-mempool` passed | Warning printed, traversal proceeds |
+| Public host, `BTC_TRAVERSAL_ALLOW_PUBLIC=true` | Warning printed, traversal proceeds |
+| Public host, interactive session | `[W007]` warning + Y/n prompt |
+| Public host, non-interactive / user answers N | `[W008]` — traversal skipped, unmatched txns treated as sells |
+
+**Recommendation:** run a self-hosted [Mempool](https://github.com/mempool/mempool)
+instance backed by your own Bitcoin node. This gives full privacy with no rate
+limits and enables the full verification pipeline described in
+`docs/ref/bitcoin-node-validation-module.md`.
+
+### Automatic BTC price API
+
+The BTC historical price fetched during `normalize` continues to use
+`mempool.space` by default (configurable via `MEMPOOL_PRICE_URL`). The privacy
+guard applies only to **graph traversal** calls — price lookups do not send
+txids and are not subject to this restriction.
 
 ---
 

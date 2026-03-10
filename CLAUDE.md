@@ -185,7 +185,7 @@ src/
 ├── importers/       # CSV parsing ONLY — one importer per source
 ├── normalizer/      # Currency conversion, timestamp normalization
 ├── engine/          # Pure tax calculation logic (ACB, superficial loss)
-├── node/            # Bitcoin node verification (optional layer)
+├── node/            # Bitcoin node integration: graph traversal (implemented) + full verification (planned)
 ├── db/              # Repository layer — SQLite read/write ONLY
 ├── reports/         # Output formatting ONLY (Schedule 3, Schedule G, TP-21.4.39-V)
 ├── models/          # Dataclasses and type definitions shared across modules
@@ -208,8 +208,16 @@ Rules for module boundaries:
 - **Reports** take calculated results and format them for output. They know
   about form field names and line numbers but never about how the numbers
   were computed.
-- **Node verification** is an optional enrichment layer. The pipeline must
-  function identically (minus verification) when the node is unavailable.
+- **Node module** (`src/node/`) has two distinct responsibilities:
+  - *Graph traversal (implemented)*: `mempool_client.py` fetches UTXO data;
+    `graph.py` runs pure BFS (backward through `vin[]`, forward through
+    outspends) to link BTC transfers across mismatched txids; `graph_analysis.py`
+    orchestrates Pass 1b in the transfer matcher. `privacy.py` gates all
+    traversal calls — public Mempool endpoints require user confirmation.
+  - *Full node verification (planned)*: on-chain timestamp override, exact fee
+    capture, amount cross-validation, audit trail. Currently a pass-through.
+  - The pipeline must function identically (minus traversal/verification) when
+    the node is unavailable or `BTC_TRAVERSAL_MAX_HOPS=0`.
 
 ### 2. Config-Driven Design
 
@@ -266,6 +274,11 @@ Rules for privacy:
 - Log output should redact sensitive values by default. A `--verbose` flag
   can reveal txids/amounts for local debugging but this mode should print
   a clear warning that sensitive data is being logged.
+- **BTC graph traversal privacy**: `is_private_node_url()` in `src/node/privacy.py`
+  determines whether `BTC_MEMPOOL_URL` is a private address. Public endpoints
+  trigger an interactive Y/n prompt (or `[W008]` skip) before any txid is sent.
+  `BTC_TRAVERSAL_ALLOW_PUBLIC=true` / `--allow-public-mempool` bypass the prompt
+  for CI and scripted runs — only use after reviewing the privacy implications.
 
 ---
 
