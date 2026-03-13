@@ -29,3 +29,4 @@ class RawTransaction:
     raw_type: str
     raw_row: dict[str, str]
     wallet_id: int | None = None  # assigned at tap time; None until persisted
+    notes: str = ""  # label or annotation (e.g. Sparrow "Label" column)

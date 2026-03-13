@@ -341,7 +341,7 @@ class TestMatcherForcedLink:
         in_tx = _tx(2, TransactionType.DEPOSIT, amount="0.05", offset_hours=48, cad_value="3000")
         # These won't auto-match (amount mismatch + too far apart).
         override = _make_override(1, 2, "link")
-        events, _income = match_transfers([out_tx, in_tx], overrides=[override])
+        events, _income, _ = match_transfers([out_tx, in_tx], overrides=[override])
 
         transfer_events = [e for e in events if e.event_type == "transfer"]
         assert len(transfer_events) == 2  # noqa: PLR2004
@@ -357,7 +357,7 @@ class TestMatcherForcedLink:
             cad_value="30000",
         )
         override = _make_override(1, 2, "link")
-        events, _ = match_transfers([out_tx, in_tx], overrides=[override])
+        events, _, _ = match_transfers([out_tx, in_tx], overrides=[override])
 
         transfer_events = [e for e in events if e.event_type == "transfer"]
         assert len(transfer_events) == 2  # noqa: PLR2004
@@ -368,7 +368,7 @@ class TestMatcherForcedLink:
         in_tx = _tx(2, TransactionType.DEPOSIT, amount="0.01", cad_value="498")
         # User has set implied_fee = 0.00005 (sent - received)
         override = _make_override(1, 2, "link", implied_fee="0.00005")
-        events, _ = match_transfers([out_tx, in_tx], overrides=[override])
+        events, _, _ = match_transfers([out_tx, in_tx], overrides=[override])
 
         fee_events = [e for e in events if e.event_type == "fee_disposal"]
         assert len(fee_events) == 1
@@ -387,7 +387,7 @@ class TestMatcherForcedLink:
             _make_override(1, 3, "link"),
             _make_override(2, 3, "link"),
         ]
-        events, _ = match_transfers([out1, out2, in1], overrides=overrides)
+        events, _, _ = match_transfers([out1, out2, in1], overrides=overrides)
 
         # out1 and in1 are a forced-link transfer pair.
         transfers = [e for e in events if e.event_type == "transfer"]
@@ -411,7 +411,7 @@ class TestMatcherExternalOverrides:
         """A withdrawal marked external-out becomes a non-taxable 'external' event."""
         out_tx = _tx(1, TransactionType.WITHDRAWAL, amount="0.01", cad_value="500")
         override = _make_override(1, None, "external-out", external_wallet="ledger")
-        events, _ = match_transfers([out_tx], overrides=[override])
+        events, _, _ = match_transfers([out_tx], overrides=[override])
 
         ext_events = [e for e in events if e.event_type == "external"]
         assert len(ext_events) == 1
@@ -422,7 +422,7 @@ class TestMatcherExternalOverrides:
         """A deposit marked external-in becomes a non-taxable 'external' event."""
         in_tx = _tx(2, TransactionType.DEPOSIT, amount="0.05", cad_value="2500")
         override = _make_override(2, None, "external-in", external_wallet="old-exchange")
-        events, _ = match_transfers([in_tx], overrides=[override])
+        events, _, _ = match_transfers([in_tx], overrides=[override])
 
         ext_events = [e for e in events if e.event_type == "external"]
         assert len(ext_events) == 1
@@ -435,7 +435,7 @@ class TestMatcherExternalOverrides:
         )
         in_tx = _tx(2, TransactionType.DEPOSIT, txid="abc123fake", amount="0.01", cad_value="500")
         override = _make_override(1, None, "external-out")
-        events, _ = match_transfers([out_tx, in_tx], overrides=[override])
+        events, _, _ = match_transfers([out_tx, in_tx], overrides=[override])
 
         # out_tx (id:1) is external; in_tx (id:2) is unmatched → buy
         ext_events = [e for e in events if e.event_type == "external"]
@@ -458,7 +458,7 @@ class TestMatcherForcedUnlink:
         in_tx = _tx(2, TransactionType.DEPOSIT, txid="abc123fake", amount="0.01", cad_value="500")
 
         override = _make_override(1, 2, "unlink")
-        events, _ = match_transfers([out_tx, in_tx], overrides=[override])
+        events, _, _ = match_transfers([out_tx, in_tx], overrides=[override])
 
         # Both should be taxable (sell + buy), not transfers.
         taxable = [e for e in events if e.is_taxable]
@@ -473,7 +473,7 @@ class TestMatcherForcedUnlink:
         in_tx = _tx(2, TransactionType.DEPOSIT, amount="0.01", offset_hours=1, cad_value="500")
 
         override = _make_override(1, 2, "unlink")
-        events, _ = match_transfers([out_tx, in_tx], overrides=[override])
+        events, _, _ = match_transfers([out_tx, in_tx], overrides=[override])
 
         taxable = [e for e in events if e.is_taxable]
         assert len(taxable) == 2  # noqa: PLR2004
@@ -485,7 +485,7 @@ class TestMatcherForcedUnlink:
 
         # Reversed order compared to the default (out, in) convention.
         override = _make_override(2, 1, "unlink")
-        events, _ = match_transfers([out_tx, in_tx], overrides=[override])
+        events, _, _ = match_transfers([out_tx, in_tx], overrides=[override])
 
         taxable = [e for e in events if e.is_taxable]
         assert len(taxable) == 2  # noqa: PLR2004
@@ -502,7 +502,7 @@ class TestMatcherNoOverrides:
         out_tx = _tx(1, TransactionType.WITHDRAWAL, txid="feedcafe", amount="0.01", cad_value="500")
         in_tx = _tx(2, TransactionType.DEPOSIT, txid="feedcafe", amount="0.01", cad_value="500")
 
-        events, _ = match_transfers([out_tx, in_tx])
+        events, _, _ = match_transfers([out_tx, in_tx])
         transfers = [e for e in events if e.event_type == "transfer"]
         assert len(transfers) == 2  # noqa: PLR2004
 
@@ -510,7 +510,7 @@ class TestMatcherNoOverrides:
         out_tx = _tx(1, TransactionType.WITHDRAWAL, amount="0.01", cad_value="500")
         in_tx = _tx(2, TransactionType.DEPOSIT, amount="0.01", offset_hours=1, cad_value="500")
 
-        events, _ = match_transfers([out_tx, in_tx])
+        events, _, _ = match_transfers([out_tx, in_tx])
         transfers = [e for e in events if e.event_type == "transfer"]
         assert len(transfers) == 2  # noqa: PLR2004
 
@@ -519,8 +519,8 @@ class TestMatcherNoOverrides:
         out_tx = _tx(1, TransactionType.WITHDRAWAL, txid="cafe0000", amount="0.01", cad_value="500")
         in_tx = _tx(2, TransactionType.DEPOSIT, txid="cafe0000", amount="0.01", cad_value="500")
 
-        events_none, _ = match_transfers([out_tx, in_tx], overrides=None)
-        events_empty, _ = match_transfers([out_tx, in_tx], overrides=[])
+        events_none, _, _ = match_transfers([out_tx, in_tx], overrides=None)
+        events_empty, _, _ = match_transfers([out_tx, in_tx], overrides=[])
         assert len(events_none) == len(events_empty)
 
     def test_txid_match_amount_diff_no_fee_crypto_creates_fee_disposal(self) -> None:
@@ -528,7 +528,7 @@ class TestMatcherNoOverrides:
         out_tx = _tx(1, TransactionType.WITHDRAWAL, txid="abc123", amount="0.01", cad_value="600")
         in_tx = _tx(2, TransactionType.DEPOSIT, txid="abc123", amount="0.0099")
 
-        events, _ = match_transfers([out_tx, in_tx])
+        events, _, _ = match_transfers([out_tx, in_tx])
         fee_events = [e for e in events if e.event_type == "fee_disposal"]
         assert len(fee_events) == 1
         assert fee_events[0].amount == Decimal("0.0001")
@@ -546,7 +546,7 @@ class TestMatcherNoOverrides:
         )
         in_tx = _tx(2, TransactionType.DEPOSIT, txid="abc123", amount="0.01")
 
-        events, _ = match_transfers([out_tx, in_tx])
+        events, _, _ = match_transfers([out_tx, in_tx])
         fee_events = [e for e in events if e.event_type == "fee_disposal"]
         assert len(fee_events) == 1
         assert fee_events[0].amount == Decimal("0.0001")
@@ -564,7 +564,7 @@ class TestMatcherNoOverrides:
         )
         in_tx = _tx(2, TransactionType.DEPOSIT, txid="abc123", amount="0.00985")
 
-        events, _ = match_transfers([out_tx, in_tx])
+        events, _, _ = match_transfers([out_tx, in_tx])
         fee_events = [e for e in events if e.event_type == "fee_disposal"]
         assert len(fee_events) == 1
         assert fee_events[0].amount == Decimal("0.00015")
@@ -574,7 +574,7 @@ class TestMatcherNoOverrides:
         out_tx = _tx(1, TransactionType.WITHDRAWAL, txid="abc123", amount="0.01", cad_value="600")
         in_tx = _tx(2, TransactionType.DEPOSIT, txid="abc123", amount="0.01")
 
-        events, _ = match_transfers([out_tx, in_tx])
+        events, _, _ = match_transfers([out_tx, in_tx])
         fee_events = [e for e in events if e.event_type == "fee_disposal"]
         assert len(fee_events) == 0
 
@@ -710,7 +710,7 @@ class TestMatcherExternalFeeDisposal:
         """external-out with implied_fee_crypto > 0 emits a taxable fee_disposal."""
         out_tx = _tx(1, TransactionType.WITHDRAWAL, amount="0.01", cad_value="500")
         ov = _make_override(1, None, action="external-out", implied_fee="0.00005")
-        events, _ = match_transfers([out_tx], overrides=[ov])
+        events, _, _ = match_transfers([out_tx], overrides=[ov])
 
         fee_events = [e for e in events if e.event_type == "fee_disposal"]
         assert len(fee_events) == 1
@@ -721,7 +721,7 @@ class TestMatcherExternalFeeDisposal:
         """external-in with implied_fee_crypto > 0 also emits a fee_disposal."""
         in_tx = _tx(2, TransactionType.DEPOSIT, amount="0.01", cad_value="500")
         ov = _make_override(2, None, action="external-in", implied_fee="0.0001")
-        events, _ = match_transfers([in_tx], overrides=[ov])
+        events, _, _ = match_transfers([in_tx], overrides=[ov])
 
         fee_events = [e for e in events if e.event_type == "fee_disposal"]
         assert len(fee_events) == 1
@@ -731,7 +731,7 @@ class TestMatcherExternalFeeDisposal:
         """external-out with zero implied_fee_crypto emits no fee_disposal."""
         out_tx = _tx(1, TransactionType.WITHDRAWAL, amount="0.01", cad_value="500")
         ov = _make_override(1, None, action="external-out", implied_fee="0")
-        events, _ = match_transfers([out_tx], overrides=[ov])
+        events, _, _ = match_transfers([out_tx], overrides=[ov])
 
         fee_events = [e for e in events if e.event_type == "fee_disposal"]
         assert fee_events == []
@@ -741,7 +741,7 @@ class TestMatcherExternalFeeDisposal:
         out_tx = _tx(1, TransactionType.WITHDRAWAL, amount="0.01", cad_value="500")
         # rate = 500 / 0.01 = 50000 CAD/BTC; fee = 0.0001; proceeds = 5 CAD
         ov = _make_override(1, None, action="external-out", implied_fee="0.0001")
-        events, _ = match_transfers([out_tx], overrides=[ov])
+        events, _, _ = match_transfers([out_tx], overrides=[ov])
 
         fee_evt = next(e for e in events if e.event_type == "fee_disposal")
         assert fee_evt.cad_proceeds == Decimal("5")
@@ -750,7 +750,7 @@ class TestMatcherExternalFeeDisposal:
         """The external marker event remains non-taxable even when a fee is present."""
         out_tx = _tx(1, TransactionType.WITHDRAWAL, amount="0.01", cad_value="500")
         ov = _make_override(1, None, action="external-out", implied_fee="0.00005")
-        events, _ = match_transfers([out_tx], overrides=[ov])
+        events, _, _ = match_transfers([out_tx], overrides=[ov])
 
         ext_events = [e for e in events if e.event_type == "external"]
         assert len(ext_events) == 1
@@ -768,7 +768,7 @@ class TestMatcherExternalFeeDisposal:
             fee_crypto="0.0005",
         )
         ov = _make_override(1, None, action="external-out", implied_fee="0")
-        events, _ = match_transfers([out_tx], overrides=[ov])
+        events, _, _ = match_transfers([out_tx], overrides=[ov])
 
         fee_events = [e for e in events if e.event_type == "fee_disposal"]
         assert len(fee_events) == 1
@@ -781,7 +781,7 @@ class TestMatcherExternalFeeDisposal:
         """When both implied_fee_crypto and tx.fee_crypto are zero, no fee_disposal emitted."""
         out_tx = _tx(1, TransactionType.WITHDRAWAL, amount="0.01", cad_value="500")
         ov = _make_override(1, None, action="external-out", implied_fee="0")
-        events, _ = match_transfers([out_tx], overrides=[ov])
+        events, _, _ = match_transfers([out_tx], overrides=[ov])
 
         assert [e for e in events if e.event_type == "fee_disposal"] == []
 
@@ -804,7 +804,7 @@ class TestClassifyDisposalFeeCadDerivation:
             fee_crypto="0.0005",
             fee_cad="0",
         )
-        events, _ = match_transfers([out_tx])
+        events, _, _ = match_transfers([out_tx])
 
         fee_disposals = [e for e in events if e.event_type == "fee_disposal"]
         assert len(fee_disposals) == 1
@@ -822,7 +822,7 @@ class TestClassifyDisposalFeeCadDerivation:
             fee_crypto="0.0005",
             fee_cad="0",
         )
-        events, _ = match_transfers([out_tx])
+        events, _, _ = match_transfers([out_tx])
 
         sell_events = [e for e in events if e.event_type == "sell"]
         assert len(sell_events) == 1
@@ -838,7 +838,7 @@ class TestClassifyDisposalFeeCadDerivation:
             fee_crypto="0",
             fee_cad="25",
         )
-        events, _ = match_transfers([out_tx])
+        events, _, _ = match_transfers([out_tx])
 
         sell_events = [e for e in events if e.event_type == "sell"]
         assert len(sell_events) == 1
@@ -847,7 +847,7 @@ class TestClassifyDisposalFeeCadDerivation:
     def test_unmatched_withdrawal_no_fee_no_cad_fee(self) -> None:
         """When both fee_crypto and fee_cad are zero, cad_fee on sell is None."""
         out_tx = _tx(1, TransactionType.WITHDRAWAL, amount="0.01", cad_value="500")
-        events, _ = match_transfers([out_tx])
+        events, _, _ = match_transfers([out_tx])
 
         sell_events = [e for e in events if e.event_type == "sell"]
         assert len(sell_events) == 1
@@ -866,7 +866,7 @@ class TestClassifyDisposalFeeCadDerivation:
             cad_value="500",
             fee_crypto="0.0005",
         )
-        events, _ = match_transfers([buy_tx])
+        events, _, _ = match_transfers([buy_tx])
 
         fee_disposals = [e for e in events if e.event_type == "fee_disposal"]
         assert len(fee_disposals) == 1
@@ -878,6 +878,6 @@ class TestClassifyDisposalFeeCadDerivation:
     def test_buy_without_fee_crypto_no_fee_disposal(self) -> None:
         """A buy with no crypto fee must not produce a spurious fee_disposal."""
         buy_tx = _tx(1, TransactionType.BUY, asset="SOL", amount="0.25", cad_value="500")
-        events, _ = match_transfers([buy_tx])
+        events, _, _ = match_transfers([buy_tx])
 
         assert [e for e in events if e.event_type == "fee_disposal"] == []

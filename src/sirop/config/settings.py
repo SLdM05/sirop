@@ -51,6 +51,10 @@ class Settings(BaseSettings):
     # points to a public host (e.g. mempool.space).  Only use in non-interactive
     # environments where you have accepted the privacy implications.
     btc_traversal_allow_public: bool = False
+    # Seconds to wait between Mempool REST API requests during graph traversal.
+    # Default 0.0 (no delay). For a Raspberry Pi or similar single-board computer,
+    # 0.25 keeps requests under 250/min — the documented safe ceiling.
+    btc_traversal_request_delay: float = 0.0
 
     # ── External APIs ─────────────────────────────────────────────────────────
 

@@ -286,6 +286,10 @@ class SparrowImporter(BaseImporter):
             )
             txid_raw = None
 
+        # Label: optional user annotation (e.g. "online purchase", "change").
+        label_col = cols.get("label", "")
+        notes = row.get(label_col, "").strip() if label_col else ""
+
         return RawTransaction(
             source=self._config.source_name,
             timestamp=timestamp,
@@ -303,6 +307,7 @@ class SparrowImporter(BaseImporter):
             txid=txid_raw,
             raw_type=tx_type,
             raw_row=row,
+            notes=notes,
         )
 
     # ------------------------------------------------------------------

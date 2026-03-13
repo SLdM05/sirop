@@ -154,9 +154,9 @@ class TestWriteCache:
         ).fetchone()
         assert row is not None
         stored = row[0]
-        assert "E" not in stored and "e" not in stored, (
-            f"Scientific notation in stored rate: {stored!r}"
-        )
+        assert (
+            "E" not in stored and "e" not in stored
+        ), f"Scientific notation in stored rate: {stored!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -396,13 +396,14 @@ class TestPrefetchRates:
             prefetch_rates(conn, "usdcad", date(2025, 3, 10), date(2025, 3, 10))
         assert _read_cached(conn, "USDCAD", date(2025, 3, 10)) == Decimal("1.4300")
 
-    def test_overwrites_stale_cached_rate(self) -> None:
-        """INSERT OR REPLACE updates a previously cached rate."""
+    def test_skips_api_when_all_dates_cached(self) -> None:
+        """Returns 0 and makes no HTTP call when the full date range is already cached."""
         conn = _make_conn()
-        _write_cache(conn, "USDCAD", date(2025, 3, 10), Decimal("1.0000"))
-        obs = [("2025-03-10", "1.4300")]
-        with _mock_urlopen([_boc_range_response("FXUSDCAD", obs)]):
-            prefetch_rates(conn, "USDCAD", date(2025, 3, 10), date(2025, 3, 10))
+        _write_cache(conn, "USDCAD", date(2025, 3, 10), Decimal("1.4300"))
+        with patch("sirop.utils.boc.urllib.request.urlopen") as mock_open:
+            count = prefetch_rates(conn, "USDCAD", date(2025, 3, 10), date(2025, 3, 10))
+        assert count == 0
+        mock_open.assert_not_called()
         assert _read_cached(conn, "USDCAD", date(2025, 3, 10)) == Decimal("1.4300")
 
     def test_network_error_raises_boc_rate_error(self) -> None:

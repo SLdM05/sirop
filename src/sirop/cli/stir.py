@@ -86,6 +86,11 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 # Rich colour per transaction direction — used by _fmt_tx() and _tx_table().
+# Minimum input or output count to flag a graph match as a possible CoinJoin.
+_COINJOIN_TX_THRESHOLD = 5
+# Minimum output count on the deposit tx to suspect a purchase+change scenario.
+_PURCHASE_CHANGE_VOUT_MIN = 2
+
 _TYPE_STYLE: dict[TransactionType, str] = {
     TransactionType.WITHDRAWAL: "red",
     TransactionType.SELL: "red",
@@ -212,7 +217,10 @@ def _run_stir(
         txs = repo.read_transactions(conn)
         wallets = repo.read_wallets(conn)
         overrides = repo.read_transfer_overrides(conn)
-        state = _build_state(txs, overrides)
+
+        # Load graph-traversal pairs from the last boil run (empty if not yet run).
+        graph_pairs = _load_graph_pairs(conn, txs)
+        state = _build_state(txs, overrides, graph_pairs=graph_pairs)
         if list_only:
             _print_state(batch_name, txs, state, overrides, wallets)
             return 0
@@ -391,6 +399,10 @@ class _MatchState:
     def __init__(self) -> None:
         # auto_pairs: list of (outgoing_tx, incoming_tx, reason_str)
         self.auto_pairs: list[tuple[Transaction, Transaction, str]] = []
+        # graph_pairs: pairs found by on-chain graph traversal (from last boil run).
+        # Each entry holds withdrawal_tx, deposit_tx, hops, direction, fee_crypto,
+        # deposit_vout_count, and deposit_vin_count.
+        self.graph_pairs: list[tuple[Transaction, Transaction, int, str, Decimal, int, int]] = []
         # forced_link_pairs: list of (tx_a, tx_b) from overrides
         self.forced_link_pairs: list[tuple[Transaction, Transaction, Decimal]] = []
         # forced_unlink_pairs: pairs blocked by 'unlink' overrides
@@ -451,17 +463,52 @@ def _apply_forced_links(
         state.forced_link_pairs.append((tx_a, tx_b, ov.implied_fee_crypto))
 
 
+def _load_graph_pairs(
+    conn: sqlite3.Connection,
+    txs: list[Transaction],
+) -> list[tuple[Transaction, Transaction, int, str, Decimal, int, int]]:
+    """Read graph-traversal matched pairs from DB and resolve to Transaction objects."""
+    tx_by_id = {t.id: t for t in txs}
+    return [
+        (
+            tx_by_id[gm.withdrawal_db_id],
+            tx_by_id[gm.deposit_db_id],
+            gm.hops,
+            gm.direction,
+            gm.fee_crypto,
+            gm.deposit_vout_count,
+            gm.deposit_vin_count,
+        )
+        for gm in repo.read_graph_transfer_pairs(conn)
+        if gm.withdrawal_db_id in tx_by_id and gm.deposit_db_id in tx_by_id
+    ]
+
+
 def _build_state(  # noqa: PLR0912 PLR0915
     txs: list[Transaction],
     overrides: list[TransferOverride],
+    graph_pairs: list[tuple[Transaction, Transaction, int, str, Decimal, int, int]] | None = None,
 ) -> _MatchState:
-    """Compute a preview of how the transfer matcher will classify *txs*."""
+    """Compute a preview of how the transfer matcher will classify *txs*.
+
+    *graph_pairs* are pairs already matched by on-chain graph traversal during
+    the last ``boil`` run.  They are applied before Pass 1 so that these
+    transactions are not listed as unmatched withdrawals/deposits.
+    """
     state = _MatchState()
     tx_by_id: dict[int, Transaction] = {t.id: t for t in txs}
     sorted_txs = sorted(txs, key=lambda t: t.timestamp)
 
     forced_link_ids, forced_unlink_ids, external_ids = _build_override_sets(overrides)
     paired_ids: set[int] = set()
+
+    # Pre-pass: mark graph-traversal-matched pairs as paired so Pass 1 skips them.
+    for w_tx, d_tx, hops, direction, fee, vout_count, vin_count in graph_pairs or []:
+        if w_tx.id in paired_ids or d_tx.id in paired_ids:
+            continue
+        paired_ids.add(w_tx.id)
+        paired_ids.add(d_tx.id)
+        state.graph_pairs.append((w_tx, d_tx, hops, direction, fee, vout_count, vin_count))
 
     # Pass 0a: apply external markers.
     ov_by_tx: dict[int, TransferOverride] = {ov.tx_id_a: ov for ov in overrides}
@@ -569,6 +616,8 @@ def _fmt_tx(tx: Transaction, wallets: list[Wallet] | None = None) -> Text:
     t.append(f"{tx.tx_type.value:<14}", style=_TYPE_STYLE.get(tx.tx_type, ""))
     t.append(f"  {tx.amount:>14.8f} {tx.asset}", style="bold")
     t.append(f"  CAD {tx.cad_value:>10,.2f}", style="yellow")
+    if tx.notes:
+        t.append(f"  [{tx.notes}]", style="dim italic")
     return t
 
 
@@ -597,6 +646,7 @@ def _tx_table(txs: list[Transaction], wallets: list[Wallet]) -> Table:
     table.add_column("Amount", justify="right", style="bold", no_wrap=True)
     table.add_column("Asset")
     table.add_column("CAD Value", justify="right", style="yellow", no_wrap=True)
+    table.add_column("Label", style="dim italic")
     for tx in txs:
         wallet_str = _wallet_label(tx, wallets)
         table.add_row(
@@ -607,6 +657,7 @@ def _tx_table(txs: list[Transaction], wallets: list[Wallet]) -> Table:
             f"{tx.amount:.8f}",
             tx.asset,
             f"CAD {tx.cad_value:>10,.2f}",
+            tx.notes,
         )
     return table
 
@@ -641,6 +692,43 @@ def _print_state(  # noqa: PLR0912 PLR0915
                 out.print()
         else:
             out.print("  [dim](none)[/dim]")
+        out.print()
+
+        # Graph-traversal-matched pairs (populated after boil has run).
+        out.rule(f"Graph-matched transfer pairs ({len(state.graph_pairs)})", style="dim")
+        if state.graph_pairs:
+            for w_tx, d_tx, hops, direction, fee, vout_count, vin_count in state.graph_pairs:
+                _print_pair(w_tx, d_tx, _wallets)
+                hop_word = "hop" if hops == 1 else "hops"
+                out.print(
+                    f"       [dim]Reason: graph traversal: {hops} {hop_word} ({direction})[/dim]"
+                )
+                if fee > Decimal("0"):
+                    out.print(f"       [dim]Fee disposal: {fee:.8f} {w_tx.asset}[/dim]")
+
+                # Classify match confidence using deposit tx structure.
+                ratio = fee / w_tx.amount if w_tx.amount > Decimal("0") else Decimal("0")
+                thr = _COINJOIN_TX_THRESHOLD
+                is_coinjoin = vin_count >= thr or vout_count >= thr
+                min_vout = _PURCHASE_CHANGE_VOUT_MIN
+                is_purchase_change = ratio > Decimal("0.30") and vout_count >= min_vout
+                if is_coinjoin:
+                    out.print(
+                        f"       [yellow]⚠ High input/output count"
+                        f" ({vin_count} in, {vout_count} out)"
+                        f" — possible CoinJoin; verify manually.[/yellow]"
+                    )
+                elif is_purchase_change:
+                    pct = f"{ratio * 100:.0f}%"
+                    out.print(
+                        f"       [yellow]⚠ Implied fee is {pct} of withdrawal"
+                        f" ({vout_count} outputs on deposit tx)"
+                        f" — likely a purchase with change UTXO, not a self-transfer."
+                        f" Review and unlink if incorrect.[/yellow]"
+                    )
+                out.print()
+        else:
+            out.print("  [dim](none — run sirop boil to populate)[/dim]")
         out.print()
 
         # Forced links.
@@ -745,7 +833,10 @@ def _print_unmatched(
     """
     _wallets = wallets or []
     resolved = (
-        len(state.auto_pairs) * 2 + len(state.forced_link_pairs) * 2 + len(state.external_markers)
+        len(state.auto_pairs) * 2
+        + len(state.graph_pairs) * 2
+        + len(state.forced_link_pairs) * 2
+        + len(state.external_markers)
     )
     unmatched_out = [
         t for t in state.unmatched_out if tax_year is None or t.timestamp.year <= tax_year
@@ -885,7 +976,7 @@ def _cmd_link(  # noqa: PLR0911 PLR0913
     ov = repo.write_transfer_override(conn, id_a, id_b, "link", implied_fee_crypto=implied_fee)
     emit(MessageCode.STIR_LINK_APPLIED, id_a=id_a, id_b=id_b, ov_id=ov.id)
     overrides = repo.read_transfer_overrides(conn)
-    state = _build_state(txs, overrides)
+    state = _build_state(txs, overrides, graph_pairs=_load_graph_pairs(conn, txs))
     _print_unmatched(batch_name, txs, state, wallets, tax_year)
     return overrides, state
 
@@ -918,7 +1009,7 @@ def _cmd_unlink(  # noqa: PLR0913
     ov = repo.write_transfer_override(conn, id_a, id_b, "unlink")
     emit(MessageCode.STIR_UNLINK_APPLIED, id_a=id_a, id_b=id_b, ov_id=ov.id)
     overrides = repo.read_transfer_overrides(conn)
-    state = _build_state(txs, overrides)
+    state = _build_state(txs, overrides, graph_pairs=_load_graph_pairs(conn, txs))
     _print_unmatched(batch_name, txs, state, wallets, tax_year)
     return overrides, state
 
@@ -947,7 +1038,7 @@ def _cmd_clear(  # noqa: PLR0913
     count = repo.clear_transfer_overrides_for_tx(conn, tx_id)
     emit(MessageCode.STIR_CLEAR_APPLIED, tx_id=tx_id, count=count)
     overrides = repo.read_transfer_overrides(conn)
-    state = _build_state(txs, overrides)
+    state = _build_state(txs, overrides, graph_pairs=_load_graph_pairs(conn, txs))
     _print_unmatched(batch_name, txs, state, wallets, tax_year)
     return overrides, state
 
@@ -1064,7 +1155,7 @@ def _cmd_transfer(  # noqa: PLR0911 PLR0912 PLR0915 PLR0913
         out.print(f"  Marked id:{tx_id} as external transfer {verb}{ext_display}{fee_display}.")
         out.print("  Run 'boil --from transfer_match' to apply.")
         overrides = repo.read_transfer_overrides(conn)
-        state = _build_state(txs, overrides)
+        state = _build_state(txs, overrides, graph_pairs=_load_graph_pairs(conn, txs))
         _print_unmatched(batch_name, txs, state, wallets, tax_year)
         return overrides, state
 
@@ -1172,7 +1263,7 @@ def _cmd_transfer(  # noqa: PLR0911 PLR0912 PLR0915 PLR0913
     out.print("  Run 'boil --from transfer_match' to apply.")
     emit(MessageCode.STIR_LINK_APPLIED, id_a=tx.id, id_b=counterpart.id, ov_id=ov.id)
     overrides = repo.read_transfer_overrides(conn)
-    state = _build_state(txs, overrides)
+    state = _build_state(txs, overrides, graph_pairs=_load_graph_pairs(conn, txs))
     _print_unmatched(batch_name, txs, state, wallets, tax_year)
     return overrides, state
 
@@ -1214,14 +1305,14 @@ def _interactive_loop(  # noqa: PLR0912 PLR0913 PLR0915
         if cmd in {"list", "l", "ls"}:
             wallets = repo.read_wallets(conn)
             overrides = repo.read_transfer_overrides(conn)
-            state = _build_state(txs, overrides)
+            state = _build_state(txs, overrides, graph_pairs=_load_graph_pairs(conn, txs))
             _print_unmatched(batch_name, txs, state, wallets, tax_year)
             continue
 
         if cmd in {"view", "v"}:
             wallets = repo.read_wallets(conn)
             overrides = repo.read_transfer_overrides(conn)
-            state = _build_state(txs, overrides)
+            state = _build_state(txs, overrides, graph_pairs=_load_graph_pairs(conn, txs))
             _print_state(batch_name, txs, state, overrides, wallets)
             continue
 

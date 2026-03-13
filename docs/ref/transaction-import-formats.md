@@ -207,41 +207,57 @@ and marks both legs non-taxable so they are excluded from ACB calculations.
 
 ### Matching strategies
 
-Two strategies are used, depending on whether a blockchain txid is available.
+Four passes are used, in priority order:
 
-#### Strategy A — txid match (definitive) — Shakepay ↔ Sparrow
+#### Pass 1 — txid match (definitive)
 
-Shakepay exports the blockchain transaction ID for **both** incoming and
-outgoing on-chain transfers:
+If both legs carry the same non-null 64-character hex blockchain txid, they are
+paired immediately as a definitive self-transfer. Works for Sparrow ↔ Sparrow
+transfers and any future exchange that exports real txids.
 
-| Row type | Column with txid |
-|---|---|
-| `crypto cashout` (outgoing) | `Description` (2025 format) |
-| `crypto purchase` (incoming) | `Description` (2025 format) |
+#### Pass 1.25 — address-based txid resolution (Shakepay → Sparrow)
 
-> **Note:** In the 2025 Shakepay export format the `Blockchain Transaction ID` column was removed. The `Description` column may contain a txid, a counterparty identifier, or a free-text description depending on transaction type. Txid-based transfer matching against Shakepay records is not reliable in the 2025 format — fall back to amount + timestamp proximity matching.
+Shakepay's **2025 export format removed the `Blockchain Transaction ID`
+column**. For BTC withdrawals (`crypto cashout` / `send`) the `Description`
+field contains the recipient Bitcoin address (e.g. `"Bitcoin address bc1q…"`),
+not a txid.
 
-These are real 64-character hex on-chain txids. The Sparrow `Txid` column
-contains the same value for the matching row on the other side of the transfer.
+The Shakepay importer detects this prefix and:
+- Sets `txid = None` on the `RawTransaction`
+- Stores `notes = "Sent to: bc1q…"` (the recipient address)
 
-**Rule:** if a Shakepay withdrawal and a Sparrow deposit share the same
-non-null txid, they are paired as a definitive self-transfer.
+Pass 1.25 in the transfer matcher then:
+1. Collects unmatched withdrawals whose `notes` starts with `"Sent to: "`
+2. Queries the Mempool API `GET /api/address/{addr}/txs` to find transactions
+   that sent value to that address
+3. Matches by satoshi amount (±1000 sat tolerance) and block time (±24h window)
+4. If a match is found, re-runs Pass 1 txid matching using the resolved txid
+   against unmatched Sparrow deposits
 
-#### Strategy B — amount + timestamp proximity (probabilistic) — NDAX ↔ Sparrow
+This bridges the asymmetry: one side has a Bitcoin address, the other has the
+real on-chain txid (from Sparrow's `Txid` column). Pass 1.25 uses the same
+privacy gate as graph traversal (`BTC_TRAVERSAL_MAX_HOPS > 0` and user-confirmed
+mempool URL).
 
-> **NDAX TX_ID is an internal order identifier, not a blockchain txid.**
+#### Pass 1b — BTC UTXO graph traversal (multi-hop)
 
-NDAX's `TX_ID` column contains a short integer (e.g. `10008`) that identifies
-the order in NDAX's internal system. It bears no relation to the on-chain
-transaction ID. **NDAX does not export the blockchain txid for withdrawals.**
+For transfers routed through intermediate transactions (e.g. UTXO consolidation,
+CoinJoin inputs). Both sides must carry a real blockchain txid. Shakepay
+withdrawals with `txid = None` are correctly excluded from this pass.
+See `docs/ref/bitcoin-node-validation-module.md` for details.
 
-The NDAX importer therefore always sets `txid = None` on all records.
-Transfer matching for NDAX withdrawals falls back to:
+#### Pass 2 — amount + timestamp proximity (probabilistic)
 
+Fallback for sources that export no blockchain txid. Used for:
+- **NDAX withdrawals**: `TX_ID` is an internal order integer, not a txid.
+  The NDAX importer always sets `txid = None`.
+- **Shakepay withdrawals** that were not resolved by Pass 1.25 (e.g. mempool
+  unavailable, or address lookup returned no matching transaction).
+
+Match criteria:
 1. Same asset (e.g. BTC)
-2. Deposit amount ≈ withdrawal amount (within 1% or 0.00001 BTC absolute
-   floor, to account for miner fees deducted from the transferred amount)
-3. Deposit timestamp within ±4 hours of the withdrawal timestamp
+2. Deposit amount ≈ withdrawal amount (within 1% or 0.00001 BTC absolute floor)
+3. Deposit timestamp within ±8 hours of the withdrawal timestamp
 
 **This match is probabilistic.** Two independent transfers of the same amount
 on the same day would be incorrectly merged into a single self-transfer pair.
@@ -440,4 +456,8 @@ The following requirements apply to all importers regardless of source.
 4. **Reject malformed rows gracefully.** A row that fails parsing must be logged with row number and reason, and must not abort the entire import.
 5. **Detect duplicate imports.** Use `(source_id, txid, timestamp)` as the deduplication key. If a row already exists in the database, skip it and log a notice.
 6. **Never discard unknown transaction types.** If Shakepay adds a new type, store the record and flag it for manual review rather than silently dropping it.
-7. **Validate txid format.** Bitcoin txids must be 64-character lowercase hex strings. Reject and flag rows where txid is present but malformed.
+7. **Validate txid format.** Bitcoin txids must be 64-character lowercase hex strings. If a column mapped to `txid` in the YAML config contains anything other than 64 lowercase hex characters (e.g. a Bitcoin address, a URL, an internal order ID), set `txid = None` — do not store the non-txid value in the `txid` field.
+
+8. **Recipient address convention.** If an exchange or wallet exports the **recipient Bitcoin address** (not the on-chain txid) for an outgoing transfer, store it in `notes` as `"Sent to: <addr>"` and set `txid = None`. This enables Pass 1.25 address-based txid resolution in the transfer matcher, which queries `GET /api/address/{addr}/txs` to find the real txid and match it against a Sparrow deposit. The Shakepay importer (`shakepay.py`) is the reference implementation: it detects `"Bitcoin address bc1q…"` in the Description column and applies this convention automatically.
+
+9. **Label / annotation field.** Any wallet importer (Sparrow, Electrum, Blue Wallet, etc.) that exports a user-editable label column **must** read it via the `label` key in its YAML column mapping and pass the value to `RawTransaction.notes`. This enables `sirop stir` to display the label as context for each transaction. If no `label` key exists in the config, `notes` defaults to `""`. See `config/importers/sparrow.yaml` for the reference YAML declaration and `src/sirop/importers/sparrow.py` for the implementation.

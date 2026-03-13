@@ -50,6 +50,20 @@ class TxOutspend:
 
 
 @dataclass(frozen=True)
+class AddressTransaction:
+    """One transaction that sends value to a queried Bitcoin address.
+
+    Returned by ``fetch_address_txs`` for Pass 1.25 (address-based txid
+    resolution).  Used to resolve a Shakepay withdrawal's on-chain txid
+    from the known recipient address.
+    """
+
+    txid: str
+    received_sats: int  # satoshis sent to the queried address in this tx
+    block_time: int | None  # Unix timestamp of block confirmation; None if unconfirmed
+
+
+@dataclass(frozen=True)
 class GraphMatch:
     """A transfer pair discovered via on-chain UTXO graph traversal.
 
@@ -73,3 +87,5 @@ class GraphMatch:
     direction: Literal["backward", "forward"]
     hops: int
     fee_crypto: Decimal
+    deposit_vout_count: int = 0  # number of outputs on the deposit tx (2 = payment+change)
+    deposit_vin_count: int = 0  # number of inputs on the deposit tx (5+ = possible CoinJoin)

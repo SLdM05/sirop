@@ -182,9 +182,9 @@ def test_direction_rate_is_consistent(direction_txs: list[RawTransaction]) -> No
             continue
         assert tx.rate is not None
         expected = tx.fiat_value / tx.amount
-        assert abs(tx.rate - expected) < Decimal("0.01"), (
-            f"{tx.transaction_type} rate mismatch: {tx.rate} vs {expected}"
-        )
+        assert abs(tx.rate - expected) < Decimal(
+            "0.01"
+        ), f"{tx.transaction_type} rate mismatch: {tx.rate} vs {expected}"
 
 
 def test_no_trade_type_in_direction_fixture(direction_txs: list[RawTransaction]) -> None:
@@ -232,9 +232,9 @@ def test_btc_buy_rate_is_consistent(transactions: list[RawTransaction]) -> None:
         assert tx.rate is not None
         assert tx.fiat_value is not None
         expected_rate = tx.fiat_value / tx.amount
-        assert abs(tx.rate - expected_rate) < Decimal("0.01"), (
-            f"Rate mismatch on {tx.timestamp}: {tx.rate} vs {expected_rate}"
-        )
+        assert abs(tx.rate - expected_rate) < Decimal(
+            "0.01"
+        ), f"Rate mismatch on {tx.timestamp}: {tx.rate} vs {expected_rate}"
 
 
 def test_earliest_btc_buy(transactions: list[RawTransaction]) -> None:
@@ -330,9 +330,9 @@ def test_eth_sell_type_is_sell_not_buy(transactions: list[RawTransaction]) -> No
     buys = _find(transactions, "buy", "ETH")
     sell_timestamps = {t.timestamp for t in sells}
     buy_timestamps = {t.timestamp for t in buys}
-    assert sell_timestamps.isdisjoint(buy_timestamps), (
-        "Same timestamp appears in both buy and sell ETH lists — direction detection broken"
-    )
+    assert sell_timestamps.isdisjoint(
+        buy_timestamps
+    ), "Same timestamp appears in both buy and sell ETH lists — direction detection broken"
 
 
 # ---------------------------------------------------------------------------
@@ -378,9 +378,9 @@ def test_dust_group_emits_two_transactions(transactions: list[RawTransaction]) -
     dust_ts = datetime(2025, 4, 15, 16, 45, 0, tzinfo=UTC)
     dust_txs = [t for t in transactions if t.timestamp.replace(microsecond=0) == dust_ts]
     expected_count = 2
-    assert len(dust_txs) == expected_count, (
-        f"Expected {expected_count} transactions for DUST group at {dust_ts}, got {len(dust_txs)}"
-    )
+    assert (
+        len(dust_txs) == expected_count
+    ), f"Expected {expected_count} transactions for DUST group at {dust_ts}, got {len(dust_txs)}"
 
     btc_buy = next((t for t in dust_txs if t.asset == "BTC"), None)
     eth_sell = next((t for t in dust_txs if t.asset == "ETH"), None)
@@ -406,9 +406,9 @@ def test_dust_group_with_fee_leg_emits_two_transactions(
     dust_ts = datetime(2025, 5, 1, 10, 0, 0, tzinfo=UTC)
     dust_txs = [t for t in transactions if t.timestamp.replace(microsecond=0) == dust_ts]
     expected_count = 2
-    assert len(dust_txs) == expected_count, (
-        f"Expected {expected_count} transactions for 3-leg DUST group, got {len(dust_txs)}"
-    )
+    assert (
+        len(dust_txs) == expected_count
+    ), f"Expected {expected_count} transactions for 3-leg DUST group, got {len(dust_txs)}"
 
 
 def test_dust_group_with_fee_leg_fee_on_received_tx(
@@ -511,9 +511,9 @@ def test_zero_amount_rows_not_emitted(transactions: list[RawTransaction]) -> Non
     The importer returns None for zero-amount rows in _parse_single().
     """
     zero_amount = [t for t in transactions if t.amount == Decimal("0")]
-    assert zero_amount == [], (
-        f"Found {len(zero_amount)} zero-amount transaction(s) — should be skipped"
-    )
+    assert (
+        zero_amount == []
+    ), f"Found {len(zero_amount)} zero-amount transaction(s) — should be skipped"
 
 
 # ---------------------------------------------------------------------------
@@ -575,9 +575,9 @@ def test_empty_csv_returns_empty_list(importer: NDAXImporter, tmp_path: Path) ->
 def test_non_fiat_trade_emits_two_transactions(non_fiat_txs: list[RawTransaction]) -> None:
     """A non-fiat trade group must emit exactly two transactions."""
     expected_count = 2
-    assert len(non_fiat_txs) == expected_count, (
-        f"Expected {expected_count} transactions, got {len(non_fiat_txs)}"
-    )
+    assert (
+        len(non_fiat_txs) == expected_count
+    ), f"Expected {expected_count} transactions, got {len(non_fiat_txs)}"
 
 
 def test_non_fiat_trade_received_is_acquisition(non_fiat_txs: list[RawTransaction]) -> None:

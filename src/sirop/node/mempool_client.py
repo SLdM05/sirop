@@ -20,14 +20,17 @@ recommended for production use to avoid rate limiting.
 
 from __future__ import annotations
 
+import http.client
 import json
+import ssl
 import time
 import urllib.error
 import urllib.request
 from datetime import UTC, datetime
 from typing import Any
 
-from sirop.node.models import OnChainTx, TxOutspend
+from sirop.node.models import AddressTransaction, OnChainTx, TxOutspend
+from sirop.node.privacy import is_private_node_url
 from sirop.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -58,6 +61,33 @@ def fetch_tx(base_url: str, txid: str) -> OnChainTx | None:
     return _parse_tx(data)
 
 
+def fetch_address_txs(base_url: str, address: str) -> list[AddressTransaction]:
+    """Fetch transactions that sent value to *address*.
+
+    ``GET {base_url}/address/{address}/txs``
+
+    Returns a list of ``AddressTransaction`` objects, one per on-chain
+    transaction that has an output to *address*.  Returns an empty list on
+    any error (404, network failure, parse error).
+
+    Used by Pass 1.25 (address-based txid resolution) to resolve the on-chain
+    txid for Shakepay withdrawals whose Description column contains the
+    recipient Bitcoin address rather than a blockchain txid.
+    """
+    url = f"{base_url.rstrip('/')}/address/{address}/txs"
+    data = _get_json(url)
+    if not isinstance(data, list):
+        return []
+    results: list[AddressTransaction] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        parsed = _parse_address_tx(item, address)
+        if parsed is not None:
+            results.append(parsed)
+    return results
+
+
 def fetch_outspends(base_url: str, txid: str) -> list[TxOutspend]:
     """Fetch the outspend status of all outputs for a transaction.
 
@@ -78,15 +108,32 @@ def fetch_outspends(base_url: str, txid: str) -> list[TxOutspend]:
 # ---------------------------------------------------------------------------
 
 
-def _get_json(url: str, *, _retry: bool = True) -> Any:
+def _get_json(
+    url: str,
+    *,
+    _retry: bool = True,
+    _ssl_ctx: ssl.SSLContext | None = None,
+) -> Any:
     """Perform a GET request and return the parsed JSON body.
 
     Returns ``None`` on 404, network failure, or JSON parse error.
     Retries once on 5xx after ``_RETRY_DELAY_SECONDS``.
+
+    SSL verification is skipped automatically when the URL resolves to a
+    private/local address (e.g. a self-hosted node on 192.168.x.x) to
+    accommodate self-signed certificates on local network nodes.
     """
+    if _ssl_ctx is None and url.startswith("https://") and is_private_node_url(url):
+        _ssl_ctx = ssl.create_default_context()
+        _ssl_ctx.check_hostname = False
+        _ssl_ctx.verify_mode = ssl.CERT_NONE
+        logger.debug("mempool_client: SSL verification disabled for private URL %s", url)
+
     try:
         req = urllib.request.Request(url, headers={"Accept": "application/json"})  # noqa: S310
-        with urllib.request.urlopen(req, timeout=_REQUEST_TIMEOUT_SECONDS) as resp:  # noqa: S310
+        with urllib.request.urlopen(  # noqa: S310
+            req, timeout=_REQUEST_TIMEOUT_SECONDS, context=_ssl_ctx
+        ) as resp:
             raw = resp.read()
         return json.loads(raw)
     except urllib.error.HTTPError as exc:
@@ -101,10 +148,16 @@ def _get_json(url: str, *, _retry: bool = True) -> Any:
                 _RETRY_DELAY_SECONDS,
             )
             time.sleep(_RETRY_DELAY_SECONDS)
-            return _get_json(url, _retry=False)
+            return _get_json(url, _retry=False, _ssl_ctx=_ssl_ctx)
         logger.debug("mempool_client: HTTP %d for %s", exc.code, url)
         return None
-    except (urllib.error.URLError, OSError, json.JSONDecodeError, ValueError) as exc:
+    except (
+        urllib.error.URLError,
+        OSError,
+        json.JSONDecodeError,
+        ValueError,
+        http.client.HTTPException,
+    ) as exc:
         logger.debug("mempool_client: request failed for %s — %s", url, exc)
         return None
 
@@ -135,6 +188,31 @@ def _parse_tx(data: dict[str, Any]) -> OnChainTx | None:
         )
     except (KeyError, TypeError, ValueError) as exc:
         logger.debug("mempool_client: failed to parse tx JSON — %s", exc)
+        return None
+
+
+def _parse_address_tx(data: dict[str, Any], address: str) -> AddressTransaction | None:
+    """Parse one entry from the /address/:addr/txs response.
+
+    Finds the first vout whose ``scriptpubkey_address`` matches *address*
+    and returns the satoshi value received plus the confirmation timestamp.
+    Returns ``None`` if no matching output is found or on parse error.
+    """
+    try:
+        txid: str = data["txid"]
+        vout_list: list[Any] = data.get("vout", [])
+        received_sats: int | None = None
+        for vout in vout_list:
+            if isinstance(vout, dict) and vout.get("scriptpubkey_address") == address:
+                received_sats = int(vout["value"])
+                break
+        if received_sats is None:
+            return None
+        status: dict[str, Any] = data.get("status", {})
+        block_time: int | None = status.get("block_time") if status.get("confirmed") else None
+        return AddressTransaction(txid=txid, received_sats=received_sats, block_time=block_time)
+    except (KeyError, TypeError, ValueError) as exc:
+        logger.debug("mempool_client: failed to parse address tx JSON — %s", exc)
         return None
 
 

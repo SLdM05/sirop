@@ -687,18 +687,30 @@ def prefetch_crypto_prices_by_range(
             continue
 
         coin_id = str(cfg["coingecko_id"])
-        start_date = min(dates)
-        end_date = max(dates)
         date_set = frozenset(dates)
 
+        # Only fetch for dates not already in the batch DB.
+        uncached_dates = frozenset(d for d in date_set if _read_cached(conn, asset, d) is None)
+        if not uncached_dates:
+            logger.debug(
+                "crypto_prices: all %d dates for %s already cached — skipping range fetch",
+                len(date_set),
+                asset,
+            )
+            continue
+
+        # Narrow the fetch window to only span uncached dates.
+        fetch_start = min(uncached_dates)
+        fetch_end = max(uncached_dates)
+
         try:
-            usd_prices = _fetch_coingecko_range(coin_id, start_date, end_date)
+            usd_prices = _fetch_coingecko_range(coin_id, fetch_start, fetch_end)
         except CryptoPriceError as exc:
             logger.warning(
                 "crypto_prices: range prefetch failed for %s (%s to %s) — %s",
                 asset,
-                start_date,
-                end_date,
+                fetch_start,
+                fetch_end,
                 exc,
             )
             kraken_pair = str(cfg.get("kraken_pair", ""))
@@ -709,14 +721,14 @@ def prefetch_crypto_prices_by_range(
                     kraken_pair,
                 )
                 try:
-                    usd_prices = _fetch_kraken_range(kraken_pair, start_date, end_date)
+                    usd_prices = _fetch_kraken_range(kraken_pair, fetch_start, fetch_end)
                 except CryptoPriceError as exc2:
                     logger.warning(
                         "crypto_prices: Kraken range fallback also failed for %s (%s to %s) — %s. "
                         "Per-date fallback will handle remaining gaps.",
                         asset,
-                        start_date,
-                        end_date,
+                        fetch_start,
+                        fetch_end,
                         exc2,
                     )
                     continue
@@ -728,10 +740,9 @@ def prefetch_crypto_prices_by_range(
                 )
                 continue
 
+        written_this_asset = 0
         for d, usd_price in usd_prices.items():
-            if d not in date_set:
-                continue
-            if _read_cached(conn, asset, d) is not None:
+            if d not in uncached_dates:
                 continue
             try:
                 usd_cad = get_rate(conn, "USDCAD", d)
@@ -744,13 +755,14 @@ def prefetch_crypto_prices_by_range(
             _write_cache(conn, asset, d, usd_price, usd_price * usd_cad, "coingecko")
             total_written += 1
             coingecko_count += 1
+            written_this_asset += 1
 
         logger.debug(
             "crypto_prices: range prefetch wrote %d price(s) for %s (%s to %s)",
-            coingecko_count,
+            written_this_asset,
             asset,
-            start_date,
-            end_date,
+            fetch_start,
+            fetch_end,
         )
 
     return total_written, coingecko_count

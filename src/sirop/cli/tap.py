@@ -493,6 +493,7 @@ def _write_to_batch(  # noqa: PLR0913
                 tx.txid,
                 json.dumps(tx.raw_row),
                 wallet.id,
+                tx.notes,
             )
             for tx in txs
         ]
@@ -517,8 +518,8 @@ def _write_to_batch(  # noqa: PLR0913
                 INSERT INTO raw_transactions
                     (source, raw_timestamp, transaction_type, asset, amount,
                      amount_currency, fee, fee_currency, cad_amount, fiat_currency,
-                     cad_rate, spot_rate, txid, extra_json, wallet_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     cad_rate, spot_rate, txid, extra_json, wallet_id, notes)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 db_rows,
             )

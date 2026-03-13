@@ -14,8 +14,10 @@ Design notes
 ------------
 - **txid matching** is the primary matching signal — if both legs (withdrawal
   and deposit) carry the same on-chain txid, they are definitively paired.
-  Applies to: Shakepay ``crypto cashout`` / ``crypto purchase`` ↔ Sparrow.
-  Both Shakepay row types carry a real ``Blockchain Transaction ID``.
+  Note: Shakepay's 2025 export format removed the "Blockchain Transaction ID"
+  column, so Shakepay withdrawals no longer carry a real txid.  Their
+  Description column contains the recipient Bitcoin address instead, which
+  the Shakepay importer stores in ``notes`` (not ``txid``) for use by Pass 1.25.
 
 - **Amount + timestamp proximity** is the secondary (and only available)
   signal for sources that do not export the blockchain txid.  NDAX is the
@@ -52,18 +54,19 @@ from sirop.models.disposition import IncomeEvent
 from sirop.models.enums import TransactionType
 from sirop.models.event import ClassifiedEvent
 from sirop.models.messages import MessageCode
-from sirop.transfer_match.graph_analysis import find_graph_matches
+from sirop.transfer_match.graph_analysis import find_graph_matches, resolve_withdrawal_txids
 from sirop.utils.logging import get_logger
 from sirop.utils.messages import emit
 
 if TYPE_CHECKING:
     from sirop.models.override import TransferOverride
     from sirop.models.transaction import Transaction
+    from sirop.node.models import GraphMatch
 
 logger = get_logger(__name__)
 
 # Maximum time difference between a withdrawal and its matching deposit.
-MATCH_WINDOW_HOURS: int = 4
+MATCH_WINDOW_HOURS: int = 8
 
 # Relative tolerance for amount matching (e.g. 0.01 = 1% difference allowed).
 # Covers typical Bitcoin network fees relative to the transfer amount.
@@ -90,7 +93,7 @@ def match_transfers(  # noqa: PLR0912 PLR0915
     overrides: list[TransferOverride] | None = None,
     tax_year: int | None = None,
     graph_traversal_allowed: bool = True,
-) -> tuple[list[ClassifiedEvent], list[IncomeEvent]]:
+) -> tuple[list[ClassifiedEvent], list[IncomeEvent], list[GraphMatch]]:
     """Classify *txs* into taxable events and income sub-records.
 
     Parameters
@@ -337,13 +340,83 @@ def match_transfers(  # noqa: PLR0912 PLR0915
                 )
             )
 
-    # --- Pass 1b: BTC graph traversal for remaining unmatched txid transactions ---
-    # Only runs when BTC_TRAVERSAL_MAX_HOPS > 0 and graph_traversal_allowed is
-    # True (caller has confirmed the Mempool URL is acceptable to use).
-    # Errors are caught so the pipeline continues identically to Pass-1-only
-    # behaviour when the node is unreachable or the setting is not configured.
+    # --- Passes 1.25 and 1b: mempool-based transfer resolution ---
+    # Both contact the Mempool REST API and share the same privacy gate
+    # (BTC_TRAVERSAL_MAX_HOPS > 0 and caller-confirmed graph_traversal_allowed).
+    # Errors are caught so the pipeline degrades gracefully when the node is
+    # unreachable or BTC_TRAVERSAL_MAX_HOPS is not configured.
+    graph_matches: list[GraphMatch] = []
     _settings = get_settings()
     if _settings.btc_traversal_max_hops > 0 and graph_traversal_allowed:
+        # Pass 1.25 — address-based txid resolution.
+        # For Shakepay withdrawals where the Description held a Bitcoin address
+        # (e.g. "Bitcoin address bc1q…"), the importer stores that address in
+        # notes as "Sent to: bc1q…" and sets txid=None.  Here we query mempool
+        # for that address's transactions to discover the real on-chain txid,
+        # then match it against unmatched deposits by txid.
+        _addr_withdrawals = [
+            t
+            for t in sorted_txs
+            if t.tx_type in _OUTGOING and t.id not in paired_ids and "Sent to: " in (t.notes or "")
+        ]
+        if _addr_withdrawals:
+            try:
+                _resolved = resolve_withdrawal_txids(
+                    _addr_withdrawals,
+                    _settings.btc_mempool_url,
+                    _settings.btc_traversal_request_delay,
+                )
+            except Exception:
+                logger.warning("transfer_match: address-based txid resolution failed — skipping")
+                _resolved = {}
+            for _w in _addr_withdrawals:
+                _rtxid = _resolved.get(_w.id)
+                if not _rtxid or _w.id in paired_ids:
+                    continue
+                for _dep in sorted_txs:
+                    if _dep.id in paired_ids:
+                        continue
+                    if _dep.tx_type not in _INCOMING:
+                        continue
+                    if _dep.asset != _w.asset:
+                        continue
+                    if _dep.txid == _rtxid:
+                        paired_ids.add(_w.id)
+                        paired_ids.add(_dep.id)
+                        logger.info(
+                            "transfer_match: Pass 1.25 address-lookup match"
+                            " — withdrawal %d → deposit %d",
+                            _w.id,
+                            _dep.id,
+                        )
+                        _obs_diff = _w.amount - _dep.amount
+                        _fee_amt = (
+                            _obs_diff
+                            if _obs_diff > Decimal("0")
+                            else (_w.fee_crypto or Decimal("0"))
+                        )
+                        if _fee_amt > Decimal("0") and _w.cad_value > Decimal("0"):
+                            _cad_rate = _w.cad_value / _w.amount if _w.amount else Decimal("0")
+                            fee_disposals.append(
+                                ClassifiedEvent(
+                                    id=0,
+                                    vtx_id=_w.id,
+                                    timestamp=_w.timestamp,
+                                    event_type="fee_disposal",
+                                    asset=_w.asset,
+                                    amount=_fee_amt,
+                                    cad_proceeds=_fee_amt * _cad_rate,
+                                    cad_cost=None,
+                                    cad_fee=None,
+                                    txid=_w.txid,
+                                    source=_w.source,
+                                    is_taxable=True,
+                                    wallet_id=_w.wallet_id,
+                                )
+                            )
+                        break
+
+        # Pass 1b — BTC graph traversal for remaining unmatched txid transactions.
         _unmatched_withdrawals = [
             t for t in sorted_txs if t.tx_type in _OUTGOING and t.id not in paired_ids and t.txid
         ]
@@ -357,6 +430,7 @@ def match_transfers(  # noqa: PLR0912 PLR0915
                     unmatched_deposits=_unmatched_deposits,
                     mempool_url=_settings.btc_mempool_url,
                     max_hops=_settings.btc_traversal_max_hops,
+                    request_delay=_settings.btc_traversal_request_delay,
                 )
             except Exception:
                 logger.warning(
@@ -477,7 +551,7 @@ def match_transfers(  # noqa: PLR0912 PLR0915
     if paired_ids:
         logger.info("%d transfer legs paired", len(paired_ids))
 
-    return events, income_events
+    return events, income_events, graph_matches
 
 
 # ---------------------------------------------------------------------------
