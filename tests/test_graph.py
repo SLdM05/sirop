@@ -5,7 +5,12 @@ All tests use dict-based stubs — no HTTP, no network, no sirop DB.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from sirop.node.graph import backward_traverse, forward_traverse
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 from sirop.node.models import OnChainTx, TxOutspend
 
 # ---------------------------------------------------------------------------
@@ -24,7 +29,7 @@ def _make_tx(txid: str, vin_txids: list[str], vout_count: int = 1) -> OnChainTx:
     )
 
 
-def _make_fetch_tx(tx_map: dict[str, OnChainTx]):
+def _make_fetch_tx(tx_map: dict[str, OnChainTx]) -> Callable[[str], OnChainTx | None]:
     """Return a fetch_tx callable backed by a static dict."""
 
     def _fetch(txid: str) -> OnChainTx | None:
@@ -33,7 +38,9 @@ def _make_fetch_tx(tx_map: dict[str, OnChainTx]):
     return _fetch
 
 
-def _make_fetch_outspends(spend_map: dict[str, list[TxOutspend]]):
+def _make_fetch_outspends(
+    spend_map: dict[str, list[TxOutspend]],
+) -> Callable[[str], list[TxOutspend]]:
     """Return a fetch_outspends callable backed by a static dict."""
 
     def _fetch(txid: str) -> list[TxOutspend]:
@@ -48,7 +55,7 @@ def _make_fetch_outspends(spend_map: dict[str, list[TxOutspend]]):
 
 
 class TestBackwardTraverse:
-    def test_finds_direct_parent(self):
+    def test_finds_direct_parent(self) -> None:
         """1-hop backward: deposit's direct input is the withdrawal."""
         # withdrawal_tx ──→ deposit_tx
         tx_map = {
@@ -62,7 +69,7 @@ class TestBackwardTraverse:
         )
         assert result == ("withdrawal_tx", 1)
 
-    def test_finds_grandparent(self):
+    def test_finds_grandparent(self) -> None:
         """2-hop backward: withdrawal → intermediate → deposit."""
         tx_map = {
             "deposit_tx": _make_tx("deposit_tx", vin_txids=["intermediate_tx"]),
@@ -76,7 +83,7 @@ class TestBackwardTraverse:
         )
         assert result == ("withdrawal_tx", 2)
 
-    def test_max_hops_respected(self):
+    def test_max_hops_respected(self) -> None:
         """3-hop match blocked when max_hops=2."""
         tx_map = {
             "deposit_tx": _make_tx("deposit_tx", vin_txids=["hop1"]),
@@ -91,7 +98,7 @@ class TestBackwardTraverse:
         )
         assert result is None
 
-    def test_max_hops_exactly_reached(self):
+    def test_max_hops_exactly_reached(self) -> None:
         """3-hop match succeeds when max_hops=3."""
         tx_map = {
             "deposit_tx": _make_tx("deposit_tx", vin_txids=["hop1"]),
@@ -106,7 +113,7 @@ class TestBackwardTraverse:
         )
         assert result == ("withdrawal_tx", 3)
 
-    def test_no_match_returns_none(self):
+    def test_no_match_returns_none(self) -> None:
         """Returns None when target not found within hop limit."""
         tx_map = {
             "deposit_tx": _make_tx("deposit_tx", vin_txids=["unrelated_tx"]),
@@ -119,7 +126,7 @@ class TestBackwardTraverse:
         )
         assert result is None
 
-    def test_cycle_safe(self):
+    def test_cycle_safe(self) -> None:
         """Graph with a cycle does not loop forever."""
         # cyclic_a ↔ cyclic_b (both point at each other)
         tx_map = {
@@ -135,7 +142,7 @@ class TestBackwardTraverse:
         )
         assert result is None
 
-    def test_zero_max_hops_disabled(self):
+    def test_zero_max_hops_disabled(self) -> None:
         """max_hops=0 disables traversal entirely."""
         tx_map = {
             "deposit_tx": _make_tx("deposit_tx", vin_txids=["withdrawal_tx"]),
@@ -148,7 +155,7 @@ class TestBackwardTraverse:
         )
         assert result is None
 
-    def test_fetch_returns_none_gracefully(self):
+    def test_fetch_returns_none_gracefully(self) -> None:
         """A 404 (fetch returning None) does not crash the BFS."""
         tx_map: dict[str, OnChainTx] = {}  # all lookups return None
         result = backward_traverse(
@@ -159,7 +166,7 @@ class TestBackwardTraverse:
         )
         assert result is None
 
-    def test_multiple_inputs_finds_correct_one(self):
+    def test_multiple_inputs_finds_correct_one(self) -> None:
         """BFS finds the target among multiple inputs at the same depth."""
         tx_map = {
             "deposit_tx": _make_tx(
@@ -188,7 +195,7 @@ class TestForwardTraverse:
     def _unspent(self) -> TxOutspend:
         return TxOutspend(spent=False, txid=None, vin=None)
 
-    def test_finds_direct_child(self):
+    def test_finds_direct_child(self) -> None:
         """1-hop forward: withdrawal's output is directly spent by deposit."""
         spend_map = {
             "withdrawal_tx": [self._outspend("deposit_tx")],
@@ -201,7 +208,7 @@ class TestForwardTraverse:
         )
         assert result == ("deposit_tx", 1)
 
-    def test_finds_grandchild(self):
+    def test_finds_grandchild(self) -> None:
         """2-hop forward: withdrawal → intermediate → deposit."""
         spend_map = {
             "withdrawal_tx": [self._outspend("intermediate_tx")],
@@ -215,7 +222,7 @@ class TestForwardTraverse:
         )
         assert result == ("deposit_tx", 2)
 
-    def test_max_hops_respected(self):
+    def test_max_hops_respected(self) -> None:
         """3-hop match blocked when max_hops=2."""
         spend_map = {
             "withdrawal_tx": [self._outspend("hop1")],
@@ -230,7 +237,7 @@ class TestForwardTraverse:
         )
         assert result is None
 
-    def test_unspent_output_skipped(self):
+    def test_unspent_output_skipped(self) -> None:
         """Unspent outputs (TxOutspend.spent=False) are skipped gracefully."""
         spend_map = {
             "withdrawal_tx": [self._unspent(), self._outspend("deposit_tx")],
@@ -243,7 +250,7 @@ class TestForwardTraverse:
         )
         assert result == ("deposit_tx", 1)
 
-    def test_no_match_returns_none(self):
+    def test_no_match_returns_none(self) -> None:
         """Returns None when deposit not reachable within hop limit."""
         spend_map = {
             "withdrawal_tx": [self._outspend("unrelated_tx")],
@@ -256,7 +263,7 @@ class TestForwardTraverse:
         )
         assert result is None
 
-    def test_zero_max_hops_disabled(self):
+    def test_zero_max_hops_disabled(self) -> None:
         """max_hops=0 disables traversal."""
         spend_map = {
             "withdrawal_tx": [self._outspend("deposit_tx")],
@@ -269,7 +276,7 @@ class TestForwardTraverse:
         )
         assert result is None
 
-    def test_cycle_safe(self):
+    def test_cycle_safe(self) -> None:
         """Cycle in spend-chain does not loop forever."""
         spend_map = {
             "withdrawal_tx": [self._outspend("cycle_a")],
@@ -284,7 +291,7 @@ class TestForwardTraverse:
         )
         assert result is None
 
-    def test_empty_outspends_returns_none(self):
+    def test_empty_outspends_returns_none(self) -> None:
         """Empty outspend list (no outputs) does not crash BFS."""
         spend_map: dict[str, list[TxOutspend]] = {"withdrawal_tx": []}
         result = forward_traverse(

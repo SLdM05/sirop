@@ -60,9 +60,9 @@ def _http_error(code: int) -> urllib.error.HTTPError:
 
 
 class TestFetchTx:
-    def test_ok_parses_on_chain_tx(self):
+    def test_ok_parses_on_chain_tx(self) -> None:
         with patch("urllib.request.urlopen", return_value=_mock_response(_TX_JSON)):
-            result = fetch_tx(BASE_URL, _TX_JSON["txid"])
+            result = fetch_tx(BASE_URL, str(_TX_JSON["txid"]))
 
         assert isinstance(result, OnChainTx)
         assert result.txid == _TX_JSON["txid"]
@@ -73,12 +73,12 @@ class TestFetchTx:
         assert "ccc" + "0" * 61 in result.vin_txids
         assert result.vout_count == 1
 
-    def test_404_returns_none(self):
+    def test_404_returns_none(self) -> None:
         with patch("urllib.request.urlopen", side_effect=_http_error(404)):
             result = fetch_tx(BASE_URL, "nonexistent" + "0" * 53)
         assert result is None
 
-    def test_500_retries_then_returns_none(self):
+    def test_500_retries_then_returns_none(self) -> None:
         """On 500, client retries once (sleep mocked) then returns None."""
         side_effects = [_http_error(500), _http_error(500)]
         with (
@@ -88,17 +88,17 @@ class TestFetchTx:
             result = fetch_tx(BASE_URL, "aaa" + "0" * 61)
         assert result is None
 
-    def test_500_succeeds_on_retry(self):
+    def test_500_succeeds_on_retry(self) -> None:
         """On 500, client retries and returns the result from the retry."""
         side_effects = [_http_error(500), _mock_response(_TX_JSON)]
         with (
             patch("urllib.request.urlopen", side_effect=side_effects),
             patch("sirop.node.mempool_client.time.sleep"),
         ):
-            result = fetch_tx(BASE_URL, _TX_JSON["txid"])
+            result = fetch_tx(BASE_URL, str(_TX_JSON["txid"]))
         assert isinstance(result, OnChainTx)
 
-    def test_network_error_returns_none(self):
+    def test_network_error_returns_none(self) -> None:
         with patch(
             "urllib.request.urlopen",
             side_effect=urllib.error.URLError("connection refused"),
@@ -106,7 +106,7 @@ class TestFetchTx:
             result = fetch_tx(BASE_URL, "aaa" + "0" * 61)
         assert result is None
 
-    def test_malformed_json_returns_none(self):
+    def test_malformed_json_returns_none(self) -> None:
         mock_resp = MagicMock()
         mock_resp.read.return_value = b"not-json{"
         mock_resp.__enter__ = lambda s: s
@@ -115,10 +115,10 @@ class TestFetchTx:
             result = fetch_tx(BASE_URL, "aaa" + "0" * 61)
         assert result is None
 
-    def test_unconfirmed_tx_no_block_time(self):
+    def test_unconfirmed_tx_no_block_time(self) -> None:
         unconfirmed = {**_TX_JSON, "status": {"confirmed": False}}
         with patch("urllib.request.urlopen", return_value=_mock_response(unconfirmed)):
-            result = fetch_tx(BASE_URL, _TX_JSON["txid"])
+            result = fetch_tx(BASE_URL, str(_TX_JSON["txid"]))
         assert isinstance(result, OnChainTx)
         assert result.confirmed is False
         assert result.block_time is None
@@ -131,9 +131,9 @@ class TestFetchTx:
 
 
 class TestFetchOutspends:
-    def test_ok_parses_outspend_list(self):
+    def test_ok_parses_outspend_list(self) -> None:
         with patch("urllib.request.urlopen", return_value=_mock_response(_OUTSPENDS_JSON)):
-            result = fetch_outspends(BASE_URL, _TX_JSON["txid"])
+            result = fetch_outspends(BASE_URL, str(_TX_JSON["txid"]))
 
         assert len(result) == 2  # noqa: PLR2004
         assert isinstance(result[0], TxOutspend)
@@ -142,12 +142,12 @@ class TestFetchOutspends:
         assert result[1].spent is False
         assert result[1].txid is None
 
-    def test_404_returns_empty_list(self):
+    def test_404_returns_empty_list(self) -> None:
         with patch("urllib.request.urlopen", side_effect=_http_error(404)):
             result = fetch_outspends(BASE_URL, "nonexistent" + "0" * 53)
         assert result == []
 
-    def test_network_error_returns_empty_list(self):
+    def test_network_error_returns_empty_list(self) -> None:
         with patch(
             "urllib.request.urlopen",
             side_effect=urllib.error.URLError("timeout"),
@@ -155,7 +155,7 @@ class TestFetchOutspends:
             result = fetch_outspends(BASE_URL, "aaa" + "0" * 61)
         assert result == []
 
-    def test_non_list_response_returns_empty(self):
+    def test_non_list_response_returns_empty(self) -> None:
         with patch("urllib.request.urlopen", return_value=_mock_response({"error": 1})):
             result = fetch_outspends(BASE_URL, "aaa" + "0" * 61)
         assert result == []

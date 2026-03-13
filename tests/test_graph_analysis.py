@@ -96,7 +96,7 @@ def _unspent() -> TxOutspend:
 
 
 class TestBackwardMatch:
-    def test_backward_match_emitted(self):
+    def test_backward_match_emitted(self) -> None:
         """Deposit whose direct input is a known withdrawal txid is matched."""
         withdrawal_txid = "aaa" + "0" * 61
         deposit_txid = "bbb" + "0" * 61
@@ -126,7 +126,7 @@ class TestBackwardMatch:
         assert m.hops == 1
         assert m.fee_crypto == Decimal("0.00100000")
 
-    def test_backward_two_hop_match(self):
+    def test_backward_two_hop_match(self) -> None:
         """2-hop backward: withdrawal → intermediate → deposit."""
         withdrawal_txid = "aaa" + "0" * 61
         intermediate_txid = "ccc" + "0" * 61
@@ -162,7 +162,7 @@ class TestBackwardMatch:
 
 
 class TestForwardMatch:
-    def test_forward_match_emitted(self):
+    def test_forward_match_emitted(self) -> None:
         """Withdrawal whose output is spent by a known deposit txid is matched."""
         withdrawal_txid = "aaa" + "0" * 61
         deposit_txid = "bbb" + "0" * 61
@@ -199,7 +199,7 @@ class TestForwardMatch:
 
 
 class TestEdgeCases:
-    def test_no_txid_skipped(self):
+    def test_no_txid_skipped(self) -> None:
         """Transactions without a blockchain txid are not traversed."""
         w = _withdrawal(db_id=10, txid=None)
         d = _deposit(db_id=20, txid=None)
@@ -214,12 +214,12 @@ class TestEdgeCases:
         mock_fetch.assert_not_called()
         mock_outspends.assert_not_called()
 
-    def test_empty_lists_return_empty(self):
+    def test_empty_lists_return_empty(self) -> None:
         """Both empty lists — no traversal, empty result."""
         matches = find_graph_matches([], [], MEMPOOL_URL, max_hops=3)
         assert matches == []
 
-    def test_max_hops_zero_skips_traversal(self):
+    def test_max_hops_zero_skips_traversal(self) -> None:
         """max_hops=0 skips all traversal without any API calls."""
         w = _withdrawal(db_id=10, txid="aaa" + "0" * 61)
         d = _deposit(db_id=20, txid="bbb" + "0" * 61)
@@ -234,7 +234,7 @@ class TestEdgeCases:
         mock_fetch.assert_not_called()
         mock_outspends.assert_not_called()
 
-    def test_deduplication_backward_takes_priority(self):
+    def test_deduplication_backward_takes_priority(self) -> None:
         """Same pair found by both backward and forward appears only once."""
         withdrawal_txid = "aaa" + "0" * 61
         deposit_txid = "bbb" + "0" * 61
@@ -263,7 +263,7 @@ class TestEdgeCases:
         assert len(matches) == 1
         assert matches[0].direction == "backward"
 
-    def test_fee_clamped_to_zero_when_negative(self):
+    def test_fee_clamped_to_zero_when_negative(self) -> None:
         """Fee is clamped to zero if deposit amount exceeds withdrawal amount."""
         withdrawal_txid = "aaa" + "0" * 61
         deposit_txid = "bbb" + "0" * 61
@@ -289,7 +289,7 @@ class TestEdgeCases:
         assert len(matches) == 1
         assert matches[0].fee_crypto == Decimal("0")
 
-    def test_no_match_found_returns_empty(self):
+    def test_no_match_found_returns_empty(self) -> None:
         """No matching pair in graph — empty result without exceptions."""
         withdrawal_txid = "aaa" + "0" * 61
         deposit_txid = "bbb" + "0" * 61
