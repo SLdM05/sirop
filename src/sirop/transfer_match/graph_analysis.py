@@ -38,12 +38,14 @@ sources), the fee is clamped to zero.
 
 from __future__ import annotations
 
+import re
+import time
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from sirop.node.graph import backward_traverse, forward_traverse
-from sirop.node.mempool_client import fetch_outspends, fetch_tx
-from sirop.node.models import GraphMatch, OnChainTx, TxOutspend
+from sirop.node.mempool_client import fetch_address_txs, fetch_outspends, fetch_tx
+from sirop.node.models import AddressTransaction, GraphMatch, OnChainTx, TxOutspend
 from sirop.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -51,12 +53,23 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+# Pass 1.25 helpers — compiled once at module level.
+# Matches "Sent to: <addr>" notes written by the Shakepay importer.
+_NOTES_ADDR_RE = re.compile(r"^Sent to: (\S+)")
+# BTC address prefixes: bech32 (bc1) or legacy (1/3).
+_BTC_ADDR_RE = re.compile(r"^(?:bc1|[13])[a-zA-Z0-9]+$")
+# Sat tolerance for amount matching (covers minor miner-fee rounding).
+_ADDR_SAT_TOLERANCE: int = 1000
+# 24-hour window for block_time vs withdrawal timestamp comparison.
+_ADDR_TIME_WINDOW_SECONDS: int = 86400
+
 
 def find_graph_matches(  # noqa: PLR0912 PLR0915
     unmatched_withdrawals: list[Transaction],
     unmatched_deposits: list[Transaction],
     mempool_url: str,
     max_hops: int,
+    request_delay: float = 0.0,
 ) -> list[GraphMatch]:
     """Discover transfer pairs via on-chain UTXO graph traversal.
 
@@ -98,10 +111,16 @@ def find_graph_matches(  # noqa: PLR0912 PLR0915
     )
 
     # Bind the mempool URL into the fetch callables (partial application).
+    # When request_delay > 0, sleep before each call to avoid overwhelming
+    # slow local nodes (e.g. Raspberry Pi running self-hosted mempool.space).
     def _fetch_tx(txid: str) -> OnChainTx | None:
+        if request_delay > 0.0:
+            time.sleep(request_delay)
         return fetch_tx(mempool_url, txid)
 
     def _fetch_outspends(txid: str) -> list[TxOutspend]:
+        if request_delay > 0.0:
+            time.sleep(request_delay)
         return fetch_outspends(mempool_url, txid)
 
     matches: list[GraphMatch] = []
@@ -145,6 +164,7 @@ def find_graph_matches(  # noqa: PLR0912 PLR0915
             continue
 
         fee_crypto = _compute_fee(withdrawal_tx.amount, deposit_tx.amount)
+        dep_meta = _fetch_tx(deposit_tx.txid)
         matches.append(
             GraphMatch(
                 deposit_db_id=deposit_tx.id,
@@ -152,6 +172,8 @@ def find_graph_matches(  # noqa: PLR0912 PLR0915
                 direction="backward",
                 hops=hops,
                 fee_crypto=fee_crypto,
+                deposit_vout_count=dep_meta.vout_count if dep_meta else 0,
+                deposit_vin_count=len(dep_meta.vin_txids) if dep_meta else 0,
             )
         )
         paired_deposit_ids.add(deposit_tx.id)
@@ -200,6 +222,8 @@ def find_graph_matches(  # noqa: PLR0912 PLR0915
             continue
 
         fee_crypto = _compute_fee(withdrawal_tx.amount, deposit_tx.amount)
+        assert deposit_tx.txid is not None  # map only contains txid-indexed entries
+        dep_meta = _fetch_tx(deposit_tx.txid)
         matches.append(
             GraphMatch(
                 deposit_db_id=deposit_tx.id,
@@ -207,6 +231,8 @@ def find_graph_matches(  # noqa: PLR0912 PLR0915
                 direction="forward",
                 hops=hops,
                 fee_crypto=fee_crypto,
+                deposit_vout_count=dep_meta.vout_count if dep_meta else 0,
+                deposit_vin_count=len(dep_meta.vin_txids) if dep_meta else 0,
             )
         )
         paired_deposit_ids.add(deposit_tx.id)
@@ -225,6 +251,83 @@ def find_graph_matches(  # noqa: PLR0912 PLR0915
         len(matches),
     )
     return matches
+
+
+def resolve_withdrawal_txids(
+    unmatched_withdrawals: list[Transaction],
+    mempool_url: str,
+    request_delay: float = 0.0,
+) -> dict[int, str]:
+    """Resolve on-chain txids for withdrawals whose recipient address is known.
+
+    Pass 1.25 — for each withdrawal whose ``notes`` field contains
+    ``"Sent to: <btc_addr>"`` (written by the Shakepay importer when the
+    Description column holds a Bitcoin address rather than a real txid),
+    query the Mempool API for transactions involving that address and find
+    the one whose output amount matches the withdrawal amount.
+
+    Parameters
+    ----------
+    unmatched_withdrawals:
+        Withdrawal ``Transaction`` objects not yet matched by Pass 1.
+        Only those with ``"Sent to: "`` in their notes are processed.
+    mempool_url:
+        Base URL for the Mempool REST API.
+    request_delay:
+        Seconds to sleep before each API call (throttle for slow nodes).
+
+    Returns
+    -------
+    dict mapping ``transaction.id`` → resolved blockchain txid.
+    Only successfully resolved withdrawals appear in the result.
+    """
+    resolved: dict[int, str] = {}
+    for withdrawal in unmatched_withdrawals:
+        notes_m = _NOTES_ADDR_RE.match(withdrawal.notes or "")
+        if not notes_m:
+            continue
+        address = notes_m.group(1)
+        if not _BTC_ADDR_RE.match(address):
+            logger.debug(
+                "graph_analysis: Pass 1.25 — skipping non-BTC address %r for withdrawal %d",
+                address,
+                withdrawal.id,
+            )
+            continue
+
+        if request_delay > 0.0:
+            time.sleep(request_delay)
+
+        addr_txs: list[AddressTransaction] = fetch_address_txs(mempool_url, address)
+        if not addr_txs:
+            logger.debug(
+                "graph_analysis: Pass 1.25 — no txs found for address of withdrawal %d",
+                withdrawal.id,
+            )
+            continue
+
+        withdrawal_sats = int(withdrawal.amount * Decimal("1e8"))
+        withdrawal_ts = withdrawal.timestamp.timestamp()
+
+        for addr_tx in addr_txs:
+            # Amount match: within tolerance (covers minor miner-fee deductions).
+            if abs(addr_tx.received_sats - withdrawal_sats) > _ADDR_SAT_TOLERANCE:
+                continue
+            # Date match: block_time within 24h window of withdrawal timestamp.
+            if (
+                addr_tx.block_time is not None
+                and abs(addr_tx.block_time - withdrawal_ts) > _ADDR_TIME_WINDOW_SECONDS
+            ):
+                continue
+            # First match wins.
+            resolved[withdrawal.id] = addr_tx.txid
+            logger.info(
+                "graph_analysis: Pass 1.25 resolved txid for withdrawal %d via address lookup",
+                withdrawal.id,
+            )
+            break
+
+    return resolved
 
 
 def _compute_fee(withdrawal_amount: Decimal, deposit_amount: Decimal) -> Decimal:

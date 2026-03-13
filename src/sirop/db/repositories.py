@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, cast
 
 from sirop.models.disposition import ACBState, AdjustedDisposition, Disposition, IncomeEvent
 from sirop.models.enums import TransactionType
@@ -30,6 +30,7 @@ from sirop.models.override import TransferOverride
 from sirop.models.raw import RawTransaction
 from sirop.models.transaction import Transaction
 from sirop.models.wallet import Wallet
+from sirop.node.models import GraphMatch
 
 if TYPE_CHECKING:
     import sqlite3
@@ -154,7 +155,7 @@ def read_raw_transactions(conn: sqlite3.Connection) -> list[RawTransaction]:
         """
         SELECT source, raw_timestamp, transaction_type, asset, amount,
                amount_currency, fee, fee_currency, cad_amount, fiat_currency,
-               cad_rate, spot_rate, txid, extra_json, wallet_id
+               cad_rate, spot_rate, txid, extra_json, wallet_id, notes
         FROM raw_transactions
         ORDER BY raw_timestamp
         """
@@ -189,6 +190,7 @@ def read_raw_transactions(conn: sqlite3.Connection) -> list[RawTransaction]:
                 raw_type=row["transaction_type"],
                 raw_row=raw_row,
                 wallet_id=row["wallet_id"],
+                notes=row["notes"] or "",
             )
         )
     return result
@@ -949,3 +951,60 @@ def clear_transfer_overrides_for_tx(conn: sqlite3.Connection, tx_id: int) -> int
             (tx_id, tx_id),
         )
     return cursor.rowcount
+
+
+def write_graph_transfer_pairs(conn: sqlite3.Connection, pairs: list[GraphMatch]) -> None:
+    """Replace the graph_transfer_pairs table contents atomically.
+
+    Clears all existing rows before inserting *pairs* so the table always
+    reflects the most recent ``boil`` run.  An empty *pairs* list results in
+    a cleared table (graph traversal found no matches or was disabled).
+    """
+    with conn:
+        conn.execute("DELETE FROM graph_transfer_pairs")
+        conn.executemany(
+            "INSERT INTO graph_transfer_pairs"
+            " (withdrawal_id, deposit_id, hops, direction, fee_crypto,"
+            "  deposit_vout_count, deposit_vin_count)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    gm.withdrawal_db_id,
+                    gm.deposit_db_id,
+                    gm.hops,
+                    gm.direction,
+                    format(gm.fee_crypto, "f"),
+                    gm.deposit_vout_count,
+                    gm.deposit_vin_count,
+                )
+                for gm in pairs
+            ],
+        )
+
+
+def read_graph_transfer_pairs(conn: sqlite3.Connection) -> list[GraphMatch]:
+    """Return all graph-traversal matched pairs from the last boil run.
+
+    Returns an empty list if the table does not exist (boil not yet run on a
+    pre-v8 batch file) or contains no rows (traversal disabled or no matches).
+    """
+    try:
+        rows = conn.execute(
+            "SELECT withdrawal_id, deposit_id, hops, direction, fee_crypto,"
+            "       deposit_vout_count, deposit_vin_count"
+            " FROM graph_transfer_pairs"
+        ).fetchall()
+    except Exception:  # table absent on pre-v8 schema
+        return []
+    return [
+        GraphMatch(
+            deposit_db_id=int(row[1]),
+            withdrawal_db_id=int(row[0]),
+            direction=cast(Literal["backward", "forward"], str(row[3])),
+            hops=int(row[2]),
+            fee_crypto=Decimal(row[4]),
+            deposit_vout_count=int(row[5]) if row[5] is not None else 0,
+            deposit_vin_count=int(row[6]) if row[6] is not None else 0,
+        )
+        for row in rows
+    ]
