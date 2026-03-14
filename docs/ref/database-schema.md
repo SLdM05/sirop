@@ -45,7 +45,7 @@ open and refuses to process a file whose version does not match the current
 `SCHEMA_VERSION` constant in `db/schema.py`. Bump `SCHEMA_VERSION` whenever
 the schema changes.
 
-Current version: **7**
+Current version: **10**
 
 ---
 
@@ -583,6 +583,174 @@ must be explicitly removed with `sirop stir --clear`.
 
 ---
 
+## Per-wallet Holdings vs Global ACB Pool
+
+The `sirop boil` summary displays both a **global** year-end holdings figure
+and a **per-wallet** breakdown.  These are computed from different sources and
+require careful reconciliation.  Read this before debugging any discrepancy
+between the two.
+
+### Sources
+
+| View | Source table | Scope |
+|---|---|---|
+| Global (`acb_state`) | `classified_events` → ACB engine | All taxable events for the batch, filtered to `timestamp.year <= tax_year` |
+| Per-wallet (`_print_wallet_holdings`) | `transactions` table | Reconstructed by summing credits and debits per wallet |
+
+The ACB engine writes one `acb_state` row per disposal event (sells, fee
+disposals, spends) recording the running `units` and `pool_cost` for each
+asset.  It is a **single global pool** — there is no per-wallet ACB state.
+
+### Two sources of divergence
+
+**1. Fee micro-disposals**
+
+The transfer matcher creates `classified_events` rows with
+`event_type = 'fee_disposal'` for every network fee that is a taxable
+disposal of crypto.  These reduce the global pool but have no corresponding
+row in `transactions` (the transactions table stores the gross amount, not
+the net-after-fee amount).
+
+To reconcile, per-wallet sums must subtract fee_disposal amounts — but only
+for **non-transfer** transactions.  For matched transfer pairs, the fee is
+already captured in the amount difference between the withdrawal and deposit
+legs (W amount − D amount = fee).  Fee_disposals linked to matched transfers
+share a `vtx_id` with an `event_type = 'transfer'` row; those must be
+excluded from the subtraction to avoid double-counting.
+
+Canonical SQL pattern (from `boil.py _print_wallet_holdings`):
+
+```sql
+WITH transfer_vtx_ids AS (
+    -- vtx_ids with a 'transfer' event: fee already captured in W-D amount diff
+    SELECT DISTINCT vtx_id FROM classified_events WHERE event_type = 'transfer'
+),
+fee_disposal_adj AS (
+    SELECT
+        ce.wallet_id,
+        ce.asset,
+        SUM(CAST(ce.amount AS REAL)) AS adj
+    FROM classified_events ce
+    WHERE ce.event_type = 'fee_disposal'
+      AND ce.is_taxable = 1
+      AND ce.timestamp <= ?          -- tax year boundary (see below)
+      AND ce.vtx_id NOT IN (SELECT vtx_id FROM transfer_vtx_ids)
+    GROUP BY ce.wallet_id, ce.asset
+)
+SELECT
+    COALESCE(w.name, t.source) AS wallet_name,
+    t.asset,
+    SUM(CASE
+        WHEN t.transaction_type IN ('buy','transfer_in','deposit','income')
+            THEN CAST(t.amount AS REAL)
+        WHEN t.transaction_type IN ('sell','transfer_out','withdrawal','spend','fee')
+            THEN -CAST(t.amount AS REAL)
+        ELSE 0
+    END) - COALESCE(MAX(fda.adj), 0) AS net_units
+FROM transactions t
+LEFT JOIN wallets w ON t.wallet_id = w.id
+LEFT JOIN fee_disposal_adj fda ON fda.wallet_id = t.wallet_id AND fda.asset = t.asset
+WHERE t.timestamp <= ?             -- tax year boundary
+  AND t.asset IN (
+    SELECT asset FROM acb_state
+    WHERE id IN (SELECT MAX(id) FROM acb_state GROUP BY asset)
+      AND CAST(units AS REAL) > 0
+  )
+GROUP BY wallet_name, t.asset
+HAVING net_units > 0.00000001
+ORDER BY wallet_name, t.asset
+```
+
+Both `?` parameters are bound to `f"{tax_year}-12-31"`.
+
+**2. Tax year boundary**
+
+`_run_acb` in `boil.py` explicitly filters classified events to
+`timestamp.year <= tax_year` before feeding them to the ACB engine.
+Import data from the following year (e.g. January 2026 transactions in a
+2025 batch) will appear in `transactions` but not in `acb_state`.  The
+per-wallet query must apply the same `WHERE t.timestamp <= '{tax_year}-12-31'`
+filter or the two totals will diverge.  Read `tax_year` from
+`repo.read_tax_year(conn)` (`batch_meta.tax_year`).
+
+### Residual gap
+
+After applying both corrections a small residual gap (< 0.001 BTC in
+practice) can remain due to:
+
+- **Graph-traversal mismatches**: when BTC graph traversal pairs a deposit
+  with a different-sized withdrawal (deposit > withdrawal), the fee is clamped
+  to 0 but the per-wallet view sees the full deposit amount while the global
+  pool only received the withdrawal amount.
+- **Float precision**: `transactions.amount` is stored as TEXT Decimal but
+  the per-wallet query casts to REAL for summation.
+
+These are data quality artefacts from graph traversal, not code bugs.
+
+---
+
+## Ad-hoc Investigation
+
+A `.sirop` file is plain SQLite.  Open it directly without renaming:
+
+```bash
+sqlite3 data/my2025tax.sirop
+```
+
+Or with the interactive browser: copy/rename to `.db` and open in DB Browser
+for SQLite or any SQLite-compatible tool.
+
+### Useful diagnostic queries
+
+```sql
+-- Pipeline stage progress
+SELECT stage, status, completed_at FROM stage_status;
+
+-- Year-end global holdings (final ACB state per asset)
+SELECT asset, units, pool_cost
+FROM acb_state
+WHERE id IN (SELECT MAX(id) FROM acb_state GROUP BY asset)
+ORDER BY asset;
+
+-- All classified events for one asset (chronological)
+SELECT event_type, amount, wallet_id, timestamp, vtx_id, is_taxable
+FROM classified_events
+WHERE asset = 'BTC'
+ORDER BY timestamp;
+
+-- Fee disposals per wallet (shows what gets subtracted from per-wallet sum)
+SELECT ce.wallet_id, w.name, ce.asset,
+       SUM(CAST(ce.amount AS REAL)) AS total_fee_disposal
+FROM classified_events ce
+LEFT JOIN wallets w ON ce.wallet_id = w.id
+WHERE ce.event_type = 'fee_disposal' AND ce.is_taxable = 1
+GROUP BY ce.wallet_id, ce.asset;
+
+-- Identify which fee_disposals share a vtx_id with a transfer (should be excluded)
+SELECT vtx_id, event_type, amount, asset
+FROM classified_events
+WHERE vtx_id IN (SELECT vtx_id FROM classified_events WHERE event_type = 'transfer')
+ORDER BY vtx_id, event_type;
+
+-- BTC graph-traversal matched pairs (withdrawal → deposit, on-chain hops)
+SELECT gtp.withdrawal_id, gtp.deposit_id, gtp.hops, gtp.direction,
+       gtp.fee_crypto, gtp.deposit_vout_count, gtp.deposit_vin_count,
+       wt.amount AS withdrawal_amount, dt.amount AS deposit_amount
+FROM graph_transfer_pairs gtp
+JOIN transactions wt ON wt.id = gtp.withdrawal_id
+JOIN transactions dt ON dt.id = gtp.deposit_id;
+
+-- Dispositions (gains/losses before superficial-loss adjustment)
+SELECT asset, proceeds_cad, acb_of_disposed, gain_loss_cad, disposition_type
+FROM dispositions
+ORDER BY timestamp;
+
+-- Wallets registered in this batch
+SELECT id, name, source FROM wallets ORDER BY name;
+```
+
+---
+
 ## Active batch marker
 
 The currently active batch is tracked outside SQLite in a plain text file:
@@ -607,3 +775,6 @@ that need a batch (and weren't given one explicitly) read this file first.
 | 5 | New table: `wallets`. `wallet_id` FK added to `raw_transactions` and `transactions` — traces each transaction to its originating wallet. `transfer_overrides` recreated with nullable `tx_id_b` (supports external-leg overrides), new columns `implied_fee_crypto` and `external_wallet`, and `external-out` / `external-in` added to `action` CHECK constraint. |
 | 6 | New table: `crypto_prices` — caches historical cryptocurrency prices (USD and CAD) fetched from Mempool.space (BTC) and CoinGecko. Used by the normalizer as a fallback when no exchange-provided fiat value is present. |
 | 7 | `wallet_id` FK added to `verified_transactions` and `classified_events` — propagates wallet origin through the full pipeline so every classified event is traceable to its source wallet. `migrate_to_v7()` adds the columns idempotently to existing files. |
+| 8 | New table: `graph_transfer_pairs` — persists BTC graph-traversal matched pairs (withdrawal_id, deposit_id, hops, direction, fee_crypto) from the transfer_match stage so `sirop stir` can display them without re-running traversal. |
+| 9 | `raw_transactions.notes` — label/annotation field (e.g. Sparrow "Label" column, Shakepay recipient address when Description contains an address instead of a txid). `graph_transfer_pairs`: added `deposit_vout_count` and `deposit_vin_count` for CoinJoin and purchase+change pattern detection in `sirop stir`. |
+| 10 | New table: `transaction_txid_overrides` — stores user-supplied blockchain txids (via `sirop stir destination <id>`) for BTC transactions whose CSV did not include a txid (e.g. NDAX withdrawals). Applied in-memory by `boil --from transfer_match` before Pass 1 exact-txid matching; also applied by `sirop stir` so destination-matched pairs are visible without re-running boil. |

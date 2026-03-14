@@ -88,6 +88,10 @@ class MessageCode(StrEnum):
     STIR_UNLINK_APPLIED = "stir.unlink_applied"
     STIR_CLEAR_APPLIED = "stir.clear_applied"
     STIR_EXIT = "stir.exit"
+    STIR_DESTINATION_SAVED = "stir.destination_saved"
+    STIR_ERROR_DESTINATION_NOT_BTC = "stir.error.destination_not_btc"
+    STIR_ERROR_DESTINATION_HAS_TXID = "stir.error.destination_has_txid"
+    STIR_ERROR_DESTINATION_INVALID_TXID = "stir.error.destination_invalid_txid"
 
     # ── list ──────────────────────────────────────────────────────────────────
     LIST_NO_BATCHES = "list.no_batches"

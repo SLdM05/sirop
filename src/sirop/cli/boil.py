@@ -429,6 +429,20 @@ def _run_transfer_match(conn: object, *, graph_traversal_allowed: bool = True) -
             sum(1 for o in overrides if o.action == "unlink"),
         )
 
+    # Apply user-supplied txid overrides (from `sirop stir destination`) before
+    # matching.  These patch in blockchain txids for transactions whose CSV did
+    # not include one (e.g. NDAX withdrawals), making them eligible for Pass 1
+    # exact matching and Pass 1b graph traversal.
+    txid_overrides = repo.read_transaction_txid_overrides(conn)
+    if txid_overrides:
+        logger.info("applying %d user-supplied txid override(s)", len(txid_overrides))
+        txs = [
+            dataclasses.replace(t, txid=txid_overrides[t.id])
+            if t.id in txid_overrides and t.txid is None
+            else t
+            for t in txs
+        ]
+
     with spinner("Classifying events…"):
         events, income_evts, graph_matches = matcher.match_transfers(
             txs,

@@ -1008,3 +1008,50 @@ def read_graph_transfer_pairs(conn: sqlite3.Connection) -> list[GraphMatch]:
         )
         for row in rows
     ]
+
+
+# ---------------------------------------------------------------------------
+# Transaction txid overrides  (v10)
+# ---------------------------------------------------------------------------
+
+
+def write_transaction_txid_override(
+    conn: sqlite3.Connection, transaction_id: int, txid: str
+) -> None:
+    """Persist a user-supplied blockchain txid for a transaction that had none.
+
+    Uses INSERT OR REPLACE so calling this twice for the same *transaction_id*
+    simply overwrites the previous value.  The txid must be a valid 64-char
+    lowercase hex string — validation is the caller's responsibility.
+    """
+    now = datetime.now(tz=UTC).isoformat()
+    with conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO transaction_txid_overrides"
+            " (transaction_id, txid, created_at) VALUES (?, ?, ?)",
+            (transaction_id, txid, now),
+        )
+
+
+def read_transaction_txid_overrides(conn: sqlite3.Connection) -> dict[int, str]:
+    """Return all user-supplied txid overrides as a ``{transaction_id: txid}`` map.
+
+    Returns an empty dict when no overrides exist or the table is absent
+    (pre-v10 batch file opened before migration ran).
+    """
+    try:
+        rows = conn.execute(
+            "SELECT transaction_id, txid FROM transaction_txid_overrides"
+        ).fetchall()
+    except Exception:
+        return {}
+    return {int(row[0]): str(row[1]) for row in rows}
+
+
+def delete_transaction_txid_override(conn: sqlite3.Connection, transaction_id: int) -> None:
+    """Remove the txid override for *transaction_id*, if one exists."""
+    with conn:
+        conn.execute(
+            "DELETE FROM transaction_txid_overrides WHERE transaction_id = ?",
+            (transaction_id,),
+        )

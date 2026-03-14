@@ -122,6 +122,7 @@ Read these before making changes:
 - `docs/ref/sirop-language-guide.md` — Tool name, CLI verbs, message vocabulary, and the two-register rule
 - `docs/ref/security-input-hardening.md` — Security rules for every pipeline boundary: SQL parameterization, batch name validation, YAML loading, node API responses, logging redaction
 - `docs/ref/transaction-import-formats.md` — Authoritative CSV schemas for Shakepay and Sparrow Wallet: column definitions, unit detection rules (BTC vs sats), fee availability, unconfirmed-row handling, cross-source transfer matching, and YAML config reference. **Read this before building or modifying the Shakepay or Sparrow importers.**
+- `docs/ref/database-schema.md` — Schema changelog, per-wallet vs global ACB pool reconciliation pattern, and ad-hoc SQLite investigation queries. **Read this before debugging `boil` output discrepancies or querying `.sirop` files directly.**
 
 ## Key Rules (quick reference)
 

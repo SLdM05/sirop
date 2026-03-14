@@ -14,7 +14,7 @@ from typing import Final
 
 # Bump this when the schema changes. The migration guard reads this value
 # and refuses to open a file whose schema_version doesn't match.
-SCHEMA_VERSION: Final[int] = 9
+SCHEMA_VERSION: Final[int] = 10
 
 # All pipeline stage names in execution order.
 PIPELINE_STAGES: Final[tuple[str, ...]] = (
@@ -304,6 +304,14 @@ CREATE TABLE IF NOT EXISTS graph_transfer_pairs (
 )
 """
 
+_TRANSACTION_TXID_OVERRIDES_DDL = """
+CREATE TABLE IF NOT EXISTS transaction_txid_overrides (
+    transaction_id  INTEGER PRIMARY KEY REFERENCES transactions(id),
+    txid            TEXT    NOT NULL,   -- 64-char lowercase hex blockchain txid
+    created_at      TEXT    NOT NULL    -- ISO 8601 UTC
+)
+"""
+
 _AUDIT_LOG_DDL = """
 CREATE TABLE IF NOT EXISTS audit_log (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -353,6 +361,7 @@ _ALL_DDL: Final[tuple[str, ...]] = (
     _INCOME_EVENTS_DDL,
     _TRANSFER_OVERRIDES_DDL,
     _GRAPH_TRANSFER_PAIRS_DDL,
+    _TRANSACTION_TXID_OVERRIDES_DDL,
     _AUDIT_LOG_DDL,
 )
 
@@ -502,3 +511,15 @@ def migrate_to_v9(conn: sqlite3.Connection) -> None:
                 "ALTER TABLE graph_transfer_pairs"
                 " ADD COLUMN deposit_vin_count INTEGER NOT NULL DEFAULT 0"
             )
+
+
+def migrate_to_v10(conn: sqlite3.Connection) -> None:
+    """Apply v10 schema migrations to an existing batch file.
+
+    Idempotent — safe to call on fresh databases and already-migrated ones.
+    v10 adds ``transaction_txid_overrides`` — a user-supplied blockchain txid
+    for transactions whose CSV export did not include one (e.g. NDAX withdrawals).
+    Because it is a brand-new table, CREATE TABLE IF NOT EXISTS inside
+    ``create_tables`` is sufficient and no ALTER TABLE statements are required.
+    """
+    create_tables(conn)

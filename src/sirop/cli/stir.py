@@ -52,6 +52,7 @@ Non-interactive flags
 
 from __future__ import annotations
 
+import dataclasses
 import re
 from datetime import timedelta
 from decimal import Decimal
@@ -215,6 +216,9 @@ def _run_stir(
         # Display mode — shared by --list and interactive.
         tax_year = repo.read_tax_year(conn)
         txs = repo.read_transactions(conn)
+        # Apply user-supplied destination txid overrides so Pass 1 exact matching
+        # in _build_state finds the same pairs that boil's match_transfers would find.
+        txs = _apply_txid_overrides(conn, txs)
         wallets = repo.read_wallets(conn)
         overrides = repo.read_transfer_overrides(conn)
 
@@ -461,6 +465,26 @@ def _apply_forced_links(
         paired_ids.add(tx_a.id)
         paired_ids.add(tx_b.id)
         state.forced_link_pairs.append((tx_a, tx_b, ov.implied_fee_crypto))
+
+
+def _apply_txid_overrides(
+    conn: sqlite3.Connection,
+    txs: list[Transaction],
+) -> list[Transaction]:
+    """Patch in-memory txids from user-supplied destination overrides.
+
+    Mirrors the same logic in ``boil._run_transfer_match`` so stir's
+    ``_build_state`` Pass 1 can find the same txid-based matches that
+    boil's ``match_transfers`` would find.  Only patches transactions whose
+    ``txid`` is currently ``None`` — existing CSV txids are never overwritten.
+    """
+    overrides = repo.read_transaction_txid_overrides(conn)
+    if not overrides:
+        return txs
+    return [
+        dataclasses.replace(t, txid=overrides[t.id]) if t.id in overrides and t.txid is None else t
+        for t in txs
+    ]
 
 
 def _load_graph_pairs(
@@ -915,6 +939,9 @@ def _print_help() -> None:
     )
     out.print("  unlink <id1> <id2>  Prevent two transactions from being auto-paired.")
     out.print("  clear <id>          Remove all stir overrides for a transaction.")
+    out.print("  destination <id>    Add the on-chain txid for a BTC transaction whose CSV")
+    out.print("                      did not include one (e.g. NDAX withdrawals).")
+    out.print("                      After setting, run: sirop boil --from transfer_match")
     out.print("  list                Refresh unmatched transactions.")
     out.print("  view                Open full state in pager (all sections).")
     out.print("  help                Show this help.")
@@ -1041,6 +1068,68 @@ def _cmd_clear(  # noqa: PLR0913
     state = _build_state(txs, overrides, graph_pairs=_load_graph_pairs(conn, txs))
     _print_unmatched(batch_name, txs, state, wallets, tax_year)
     return overrides, state
+
+
+_TXID_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _cmd_destination(  # noqa: PLR0911
+    conn: sqlite3.Connection,
+    parts: list[str],
+    tx_ids: set[int],
+    txs: list[Transaction],
+) -> None:
+    """Handle the ``destination <id>`` sub-command.
+
+    Prompts the user for the on-chain txid and saves it to
+    ``transaction_txid_overrides``.  Only BTC transactions whose CSV did not
+    include a txid are accepted.
+    """
+    if len(parts) != _ONE_ARG_PARTS:
+        out.print("Usage: destination <id>")
+        return
+    try:
+        tx_id = int(parts[1])
+    except ValueError:
+        out.print("Transaction id must be an integer.")
+        return
+    if tx_id not in tx_ids:
+        out.print(f"Transaction id {tx_id} not found.")
+        return
+
+    tx_by_id = {t.id: t for t in txs}
+    tx = tx_by_id[tx_id]
+
+    if tx.asset != "BTC":
+        emit(MessageCode.STIR_ERROR_DESTINATION_NOT_BTC, tx_id=tx_id, asset=tx.asset)
+        return
+    # Refuse only if the txid came from the CSV import (not from a prior override).
+    # Checking the DB avoids false positives when txs has already been patched
+    # by _apply_txid_overrides (where the txid is ours and can be replaced).
+    existing_overrides = repo.read_transaction_txid_overrides(conn)
+    has_csv_txid = tx.txid is not None and tx_id not in existing_overrides
+    if has_csv_txid:
+        emit(MessageCode.STIR_ERROR_DESTINATION_HAS_TXID, tx_id=tx_id)
+        return
+
+    ts = tx.timestamp.strftime("%Y-%m-%d %H:%M UTC")
+    out.print(
+        f"Transaction {tx_id} — {tx.source} {tx.tx_type.value}" f"  BTC {tx.amount:.8f}  {ts}"
+    )
+    out.print("Paste the on-chain txid (64 lowercase hex characters):")
+    try:
+        raw = input("> ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        out.print()
+        out.print("Cancelled.")
+        return
+
+    if not _TXID_RE.fullmatch(raw):
+        emit(MessageCode.STIR_ERROR_DESTINATION_INVALID_TXID)
+        return
+
+    repo.write_transaction_txid_override(conn, tx_id, raw)
+    emit(MessageCode.STIR_DESTINATION_SAVED, tx_id=tx_id)
 
 
 def _cmd_transfer(  # noqa: PLR0911 PLR0912 PLR0915 PLR0913
@@ -1348,6 +1437,15 @@ def _interactive_loop(  # noqa: PLR0912 PLR0913 PLR0915
             result = _cmd_clear(conn, parts, tx_ids, batch_name, txs, wallets, tax_year)
             if result is not None:
                 overrides, state = result
+            continue
+
+        if cmd == "destination":
+            _cmd_destination(conn, parts, tx_ids, txs)
+            # Re-patch txs with any newly-saved override so the next state
+            # rebuild (list, view, or the next command) sees the updated txid.
+            txs = _apply_txid_overrides(conn, txs)
+            overrides = repo.read_transfer_overrides(conn)
+            state = _build_state(txs, overrides, graph_pairs=_load_graph_pairs(conn, txs))
             continue
 
         out.print(f"Unknown command: {cmd!r}. Type 'help' for available commands.")

@@ -328,6 +328,25 @@ messages:
     category: output
     text: "Overrides saved. Run 'sirop boil --from transfer_match' to apply them."
 
+  stir.destination_saved:
+    category: output
+    text: "Destination txid saved for tx:{tx_id}. Run 'sirop boil --from transfer_match' to apply."
+
+  stir.error.destination_not_btc:
+    category: error
+    code: E022
+    text: "Transaction {tx_id} is {asset}, not BTC. Only BTC transactions can have a txid annotated."
+
+  stir.error.destination_has_txid:
+    category: error
+    code: E023
+    text: "Transaction {tx_id} already has a txid from its CSV import. Refusing to overwrite."
+
+  stir.error.destination_invalid_txid:
+    category: error
+    code: E024
+    text: "Invalid txid — must be exactly 64 lowercase hexadecimal characters."
+
   # ── list ──────────────────────────────────────────────────────────────────
 
   list.no_batches:

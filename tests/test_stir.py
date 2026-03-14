@@ -14,7 +14,13 @@ from decimal import Decimal
 
 import pytest
 
-from sirop.cli.stir import _compute_implied_fee, _parse_fee_amount, _validate_wallet_name
+from sirop.cli.stir import (
+    _apply_txid_overrides,
+    _build_state,
+    _compute_implied_fee,
+    _parse_fee_amount,
+    _validate_wallet_name,
+)
 from sirop.db import repositories as repo
 from sirop.db.schema import create_tables, migrate_to_v5
 from sirop.models.enums import TransactionType
@@ -881,3 +887,98 @@ class TestClassifyDisposalFeeCadDerivation:
         events, _, _ = match_transfers([buy_tx])
 
         assert [e for e in events if e.event_type == "fee_disposal"] == []
+
+
+# ---------------------------------------------------------------------------
+# Destination txid override visibility
+# ---------------------------------------------------------------------------
+
+
+class TestTxidOverrideVisibility:
+    """Guard: destination txid overrides must be visible to stir's matching logic.
+
+    stir calls _apply_txid_overrides before _build_state; boil patches txids
+    before match_transfers.  Both must produce consistent pair classification —
+    if boil treats a pair as a non-taxable transfer, stir must show it as
+    resolved, not as an unmatched sell/buy.
+    """
+
+    def test_apply_patches_null_txid(self) -> None:
+        """Withdrawal with txid=None gets patched from the override table."""
+        conn = _make_conn()
+        w = _tx(1, TransactionType.WITHDRAWAL)  # txid=None by default
+        _seed_transactions(conn, [w])
+        repo.write_transaction_txid_override(conn, 1, "a" * 64)
+
+        result = _apply_txid_overrides(conn, [w])
+
+        assert result[0].txid == "a" * 64
+
+    def test_apply_does_not_overwrite_csv_txid(self) -> None:
+        """A transaction whose txid came from the CSV is never overwritten."""
+        conn = _make_conn()
+        csv_txid = "b" * 64
+        w = _tx(1, TransactionType.WITHDRAWAL, txid=csv_txid)
+        _seed_transactions(conn, [w])
+        repo.write_transaction_txid_override(conn, 1, "a" * 64)
+
+        result = _apply_txid_overrides(conn, [w])
+
+        assert result[0].txid == csv_txid  # unchanged
+
+    def test_apply_returns_list_unchanged_when_no_overrides(self) -> None:
+        """Empty override table → transactions returned with txid=None."""
+        conn = _make_conn()
+        w = _tx(1, TransactionType.WITHDRAWAL)
+
+        result = _apply_txid_overrides(conn, [w])
+
+        assert result[0].txid is None
+
+    def test_build_state_matches_pair_via_patched_txid(self) -> None:
+        """Core regression: after txid patch, _build_state shows the pair as resolved.
+
+        Amounts are too different for amount-proximity matching (0.00001 vs 1.0 BTC),
+        so without the txid patch the withdrawal stays unmatched.  With the patch,
+        Pass 1 exact txid match fires and the pair appears in state.auto_pairs.
+        """
+        deposit_txid = "a" * 64
+        # Wildly different amounts → amount-proximity match impossible
+        withdrawal = _tx(1, TransactionType.WITHDRAWAL, amount="0.00001", cad_value="1")
+        deposit = _tx(
+            2, TransactionType.DEPOSIT, amount="1.0", cad_value="100000", txid=deposit_txid
+        )
+
+        # Without patch: withdrawal unmatched
+        state_raw = _build_state([withdrawal, deposit], overrides=[])
+        assert len(state_raw.unmatched_out) == 1
+        assert len(state_raw.auto_pairs) == 0
+
+        # With patch: Pass 1 exact txid match resolves the pair
+        patched = dataclasses.replace(withdrawal, txid=deposit_txid)
+        state_patched = _build_state([patched, deposit], overrides=[])
+        assert len(state_patched.auto_pairs) == 1
+        assert len(state_patched.unmatched_out) == 0
+        assert len(state_patched.unmatched_in) == 0
+
+    def test_apply_then_build_state_end_to_end(self) -> None:
+        """End-to-end: _apply_txid_overrides → _build_state finds the pair.
+
+        This is the exact sequence stir._run_stir performs after the fix.
+        Failure here means a new destination override will NOT be visible in
+        stir until after boil runs.
+        """
+        conn = _make_conn()
+        deposit_txid = "c" * 64
+        withdrawal = _tx(1, TransactionType.WITHDRAWAL, amount="0.00001", cad_value="1")
+        deposit = _tx(
+            2, TransactionType.DEPOSIT, amount="1.0", cad_value="100000", txid=deposit_txid
+        )
+        _seed_transactions(conn, [withdrawal, deposit])
+        repo.write_transaction_txid_override(conn, 1, deposit_txid)
+
+        patched_txs = _apply_txid_overrides(conn, [withdrawal, deposit])
+        state = _build_state(patched_txs, overrides=[])
+
+        assert len(state.auto_pairs) == 1
+        assert len(state.unmatched_out) == 0
