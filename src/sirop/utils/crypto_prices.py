@@ -3,20 +3,32 @@
 Fetches daily USD prices for crypto assets from public, no-auth APIs,
 then converts to CAD using the Bank of Canada USDCAD rate.
 
-Two sources are supported:
+Three sources are supported:
 - **Mempool.space** (BTC only) — BTC-native, already used by the node
   verification module.  No documented rate limit.
   Endpoint: https://mempool.space/api/v1/historical-price
-- **CoinGecko** (any supported asset) — free public tier, no API key.
-  Rate limit: ~30 req/min.  Handled by exponential backoff on HTTP 429.
+- **CoinGecko** (any supported asset) — requires a free Demo API key set via
+  COINGECKO_API_KEY in .env.  Rate limit: ~30 req/min; handled by exponential
+  backoff on HTTP 429.  Demo plan covers the last 365 days of history.
   Endpoint: https://api.coingecko.com/api/v3/coins/{id}/history
+  Attribution: CoinGecko (https://www.coingecko.com)
+- **Kraken** (any asset with a ``kraken_pair`` in currencies.yaml) — free
+  public OHLC endpoint, no authentication required.  Returns up to 720 daily
+  candles per call; VWAP of the matching candle is used as the daily price.
+  Used as a fallback when CoinGecko is unavailable or lacks data (e.g. dates
+  older than 365 days on the Demo plan).
+  Endpoint: https://api.kraken.com/0/public/OHLC
+  Attribution: Kraken Exchange public REST API
+  (https://docs.kraken.com/api/docs/rest-api/get-ohlc-data)
 
 Fetch strategy for BTC:
   1. Try Mempool.space.
   2. On failure, fall back to CoinGecko.
+  3. On CoinGecko failure, fall back to Kraken.
 
 Fetch strategy for other assets:
-  1. CoinGecko only.
+  1. Try CoinGecko.
+  2. On failure, fall back to Kraken.
 
 Asset → CoinGecko ID mapping is read from ``config/currencies.yaml``
 (``crypto.<ASSET>.coingecko_id``). Assets not in that file raise
@@ -64,6 +76,10 @@ logger = get_logger(__name__)
 _MEMPOOL_URL = "https://mempool.space/api/v1/historical-price"
 _COINGECKO_URL = "https://api.coingecko.com/api/v3/coins/{coin_id}/history"
 _COINGECKO_CHART_URL = "https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart/range"
+# Kraken public OHLC endpoint — no authentication required.
+# Attribution: Kraken Exchange REST API
+# https://docs.kraken.com/api/docs/rest-api/get-ohlc-data
+_KRAKEN_OHLC_URL = "https://api.kraken.com/0/public/OHLC"
 
 # HTTP timeout for all requests.
 _TIMEOUT = 15
@@ -190,11 +206,23 @@ def _fetch_usd_price(asset: str, price_date: date) -> tuple[Decimal, str]:
     if usd is not None:
         return usd, "coingecko"
 
+    kraken_pair = str(cfg.get("kraken_pair", ""))
+    if kraken_pair:
+        logger.debug(
+            "crypto_prices: CoinGecko unavailable for %s on %s — trying Kraken (%s)",
+            asset,
+            price_date,
+            kraken_pair,
+        )
+        usd = _fetch_usd_kraken(kraken_pair, price_date)
+        if usd is not None:
+            return usd, "kraken"
+
+    sources = "Mempool.space, CoinGecko, and Kraken" if mempool_ok else "CoinGecko and Kraken"
+    if not kraken_pair:
+        sources = "Mempool.space and CoinGecko" if mempool_ok else "CoinGecko"
     raise CryptoPriceError(
-        f"No price available for {asset} on {price_date}. "
-        "Both Mempool.space and CoinGecko returned no data."
-        if mempool_ok
-        else f"No price available for {asset} on {price_date}. CoinGecko returned no data."
+        f"No price available for {asset} on {price_date}. {sources} returned no data."
     )
 
 
@@ -347,7 +375,7 @@ def _fetch_coingecko_range(
         raw = _fetch_with_backoff(url, api_key=api_key)
     except CryptoPriceError as exc:
         raise CryptoPriceError(
-            f"CoinGecko range fetch failed for {coin_id} " f"({start_date} to {end_date}): {exc}"
+            f"CoinGecko range fetch failed for {coin_id} ({start_date} to {end_date}): {exc}"
         ) from exc
 
     try:
@@ -362,6 +390,134 @@ def _fetch_coingecko_range(
     for ts_ms, price_float in payload.get("prices", []):
         d = datetime.fromtimestamp(ts_ms / 1000, tz=UTC).date()
         daily[d] = Decimal(str(price_float))
+
+    return daily
+
+
+def _fetch_usd_kraken(kraken_pair: str, price_date: date) -> Decimal | None:
+    """Fetch the USD VWAP of *kraken_pair* on *price_date* from Kraken's OHLC API.
+
+    Uses daily candles (interval=1440).  The VWAP field (index 5) of the
+    matching candle is returned as the representative daily price.
+
+    Kraken's public OHLC endpoint requires no authentication and returns up to
+    720 candles per call.
+
+    Attribution: Kraken Exchange public REST API
+    https://docs.kraken.com/api/docs/rest-api/get-ohlc-data
+
+    Returns None on any error so the caller can propagate the failure.
+    """
+    midnight_ts = int(
+        datetime(price_date.year, price_date.month, price_date.day, tzinfo=UTC).timestamp()
+    )
+    # Kraken's ``since`` is exclusive — subtract 1 so the first candle returned
+    # is the one that opens exactly at midnight on price_date.
+    url = f"{_KRAKEN_OHLC_URL}?pair={kraken_pair}&interval=1440&since={midnight_ts - 1}"
+
+    try:
+        with urllib.request.urlopen(url, timeout=_TIMEOUT) as resp:  # noqa: S310
+            payload = json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:
+        logger.debug(
+            "crypto_prices: Kraken request failed for %s on %s: %s", kraken_pair, price_date, exc
+        )
+        return None
+
+    if payload.get("error"):
+        logger.debug("crypto_prices: Kraken API error for %s: %s", kraken_pair, payload["error"])
+        return None
+
+    # The result key is Kraken's canonical pair name (may differ from input).
+    result = {k: v for k, v in payload.get("result", {}).items() if k != "last"}
+    if not result:
+        logger.debug(
+            "crypto_prices: Kraken returned no candles for %s on %s", kraken_pair, price_date
+        )
+        return None
+
+    candles = next(iter(result.values()))
+    for candle in candles:
+        if candle[0] == midnight_ts:
+            try:
+                return Decimal(str(candle[5]))  # VWAP
+            except Exception as exc:
+                logger.debug(
+                    "crypto_prices: cannot parse Kraken VWAP for %s on %s: %s",
+                    kraken_pair,
+                    price_date,
+                    exc,
+                )
+                return None
+
+    logger.debug("crypto_prices: Kraken has no candle matching %s for %s", price_date, kraken_pair)
+    return None
+
+
+def _fetch_kraken_range(
+    kraken_pair: str,
+    start_date: date,
+    end_date: date,
+) -> dict[date, Decimal]:
+    """Fetch daily USD VWAP prices for *kraken_pair* over a date range from Kraken.
+
+    Uses daily candles (interval=1440).  Kraken returns up to 720 candles per
+    call (~2 years), so a single request covers the full range in almost all
+    practical cases.  The VWAP field (index 5) is used as the daily price.
+
+    Attribution: Kraken Exchange public REST API
+    https://docs.kraken.com/api/docs/rest-api/get-ohlc-data
+
+    Returns
+    -------
+    dict[date, Decimal]
+        UTC date → USD VWAP price.  Dates with no candle are absent.
+
+    Raises
+    ------
+    CryptoPriceError
+        On network errors or unparseable responses.
+    """
+    since_ts = (
+        int(datetime(start_date.year, start_date.month, start_date.day, tzinfo=UTC).timestamp()) - 1
+    )  # exclusive lower bound
+
+    url = f"{_KRAKEN_OHLC_URL}?pair={kraken_pair}&interval=1440&since={since_ts}"
+
+    try:
+        with urllib.request.urlopen(url, timeout=_TIMEOUT) as resp:  # noqa: S310
+            payload = json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:
+        raise CryptoPriceError(
+            f"Kraken request failed for {kraken_pair} ({start_date} to {end_date}): {exc}"
+        ) from exc
+
+    if payload.get("error"):
+        raise CryptoPriceError(f"Kraken API error for {kraken_pair}: {payload['error']}")
+
+    result = {k: v for k, v in payload.get("result", {}).items() if k != "last"}
+    if not result:
+        raise CryptoPriceError(
+            f"Kraken returned no candles for {kraken_pair} ({start_date} to {end_date})"
+        )
+
+    candles = next(iter(result.values()))
+    end_ts = int(
+        datetime(end_date.year, end_date.month, end_date.day, 23, 59, 59, tzinfo=UTC).timestamp()
+    )
+    daily: dict[date, Decimal] = {}
+    for candle in candles:
+        ts = candle[0]
+        if ts > end_ts:
+            break
+        d = datetime.fromtimestamp(ts, tz=UTC).date()
+        if d < start_date:
+            continue
+        try:
+            daily[d] = Decimal(str(candle[5]))  # VWAP
+        except Exception as exc:
+            logger.debug("crypto_prices: cannot parse Kraken VWAP in range for %s: %s", d, exc)
+            continue
 
     return daily
 
@@ -531,27 +687,62 @@ def prefetch_crypto_prices_by_range(
             continue
 
         coin_id = str(cfg["coingecko_id"])
-        start_date = min(dates)
-        end_date = max(dates)
         date_set = frozenset(dates)
 
-        try:
-            usd_prices = _fetch_coingecko_range(coin_id, start_date, end_date)
-        except CryptoPriceError as exc:
-            logger.warning(
-                "crypto_prices: range prefetch failed for %s (%s to %s) — %s. "
-                "Per-date fallback will handle remaining gaps.",
+        # Only fetch for dates not already in the batch DB.
+        uncached_dates = frozenset(d for d in date_set if _read_cached(conn, asset, d) is None)
+        if not uncached_dates:
+            logger.debug(
+                "crypto_prices: all %d dates for %s already cached — skipping range fetch",
+                len(date_set),
                 asset,
-                start_date,
-                end_date,
-                exc,
             )
             continue
 
-        for d, usd_price in usd_prices.items():
-            if d not in date_set:
+        # Narrow the fetch window to only span uncached dates.
+        fetch_start = min(uncached_dates)
+        fetch_end = max(uncached_dates)
+
+        try:
+            usd_prices = _fetch_coingecko_range(coin_id, fetch_start, fetch_end)
+        except CryptoPriceError as exc:
+            logger.warning(
+                "crypto_prices: range prefetch failed for %s (%s to %s) — %s",
+                asset,
+                fetch_start,
+                fetch_end,
+                exc,
+            )
+            kraken_pair = str(cfg.get("kraken_pair", ""))
+            if kraken_pair:
+                logger.warning(
+                    "crypto_prices: trying Kraken range fallback for %s (%s)",
+                    asset,
+                    kraken_pair,
+                )
+                try:
+                    usd_prices = _fetch_kraken_range(kraken_pair, fetch_start, fetch_end)
+                except CryptoPriceError as exc2:
+                    logger.warning(
+                        "crypto_prices: Kraken range fallback also failed for %s (%s to %s) — %s. "
+                        "Per-date fallback will handle remaining gaps.",
+                        asset,
+                        fetch_start,
+                        fetch_end,
+                        exc2,
+                    )
+                    continue
+            else:
+                logger.warning(
+                    "crypto_prices: no Kraken pair configured for %s — "
+                    "per-date fallback will handle remaining gaps.",
+                    asset,
+                )
                 continue
-            if _read_cached(conn, asset, d) is not None:
+
+        written_this_asset = 0
+        for d, usd_price in usd_prices.items():
+            if d not in uncached_dates:
                 continue
             try:
                 usd_cad = get_rate(conn, "USDCAD", d)
@@ -564,13 +755,14 @@ def prefetch_crypto_prices_by_range(
             _write_cache(conn, asset, d, usd_price, usd_price * usd_cad, "coingecko")
             total_written += 1
             coingecko_count += 1
+            written_this_asset += 1
 
         logger.debug(
             "crypto_prices: range prefetch wrote %d price(s) for %s (%s to %s)",
-            coingecko_count,
+            written_this_asset,
             asset,
-            start_date,
-            end_date,
+            fetch_start,
+            fetch_end,
         )
 
     return total_written, coingecko_count

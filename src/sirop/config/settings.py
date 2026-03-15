@@ -43,10 +43,26 @@ class Settings(BaseSettings):
     btc_rpc_user: str = ""
     btc_rpc_password: str = ""
     btc_mempool_url: str = "http://localhost:3006/api"
+    # Maximum number of on-chain hops the graph traversal will follow when
+    # searching for a matching deposit/withdrawal pair.  Set to 0 to disable
+    # graph traversal entirely (pipeline behaviour is unchanged from Pass 1).
+    btc_traversal_max_hops: int = 0
+    # Set to True to skip the interactive privacy prompt when BTC_MEMPOOL_URL
+    # points to a public host (e.g. mempool.space).  Only use in non-interactive
+    # environments where you have accepted the privacy implications.
+    btc_traversal_allow_public: bool = False
+    # Seconds to wait between Mempool REST API requests during graph traversal.
+    # Default 0.0 (no delay). For a Raspberry Pi or similar single-board computer,
+    # 0.25 keeps requests under 250/min — the documented safe ceiling.
+    btc_traversal_request_delay: float = 0.0
 
     # ── External APIs ─────────────────────────────────────────────────────────
 
     coingecko_api_key: str = ""
+
+    # ── Price cache ───────────────────────────────────────────────────────────
+
+    asset_price_cache: bool = False
 
 
 def get_settings() -> Settings:

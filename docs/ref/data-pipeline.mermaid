@@ -164,10 +164,11 @@ flowchart TD
     %% STAGE 4 — transfer matching
     %% ═══════════════════════════════════════════
 
-    MATCH["Transfer Matcher<br/><i>Pass 0: apply stir overrides first</i><br/><i>Pass 1: txid matching across sources</i><br/><i>Pass 2: amount ± fee tolerance + timestamp proximity</i><br/><i>emits fee micro-dispositions for implied fees</i><br/><i>marks transfers as non-dispositions</i>"]:::process
+    MATCH["Transfer Matcher<br/><i>Pass 0: apply stir overrides first</i><br/><i>Pass 1: txid matching across sources</i><br/><i>Pass 1b: BTC UTXO graph traversal (optional)</i><br/><i> — backward BFS from deposit vin[]</i><br/><i> — forward BFS through output spends</i><br/><i> — gated by BTC_TRAVERSAL_MAX_HOPS &gt; 0</i><br/><i> — privacy guard before any Mempool API calls</i><br/><i>Pass 2: amount ± fee tolerance + timestamp proximity</i><br/><i>emits fee micro-dispositions for implied fees</i><br/><i>marks transfers as non-dispositions</i><br/><i>warns on same-wallet transfers (coin consolidation)</i><br/><i>propagates wallet_id to classified_events</i>"]:::process
 
     T_VTX -->|"via repo"| MATCH
     T_OVRD -.->|"overrides applied before auto-match"| MATCH
+    PRICE_API -.->|"Pass 1b: BTC UTXO graph traversal<br/><i>GET /tx/{txid} · GET /tx/{txid}/outspends</i><br/><i>privacy-gated · only when BTC_TRAVERSAL_MAX_HOPS &gt; 0</i>"| MATCH
     MATCH -->|"via repo → atomic write"| T_EVT
     MATCH -->|"via repo → atomic write"| T_INCOME
 

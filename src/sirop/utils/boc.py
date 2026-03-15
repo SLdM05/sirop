@@ -156,6 +156,22 @@ def prefetch_rates(
         On network or parse errors.
     """
     pair_upper = currency_pair.upper()
+
+    # After prefetch_rates + fill_rate_gaps, every calendar day in the range
+    # has a row.  If the count already matches, skip the API call.
+    total_days = (end_date - start_date).days + 1
+    (cached_count,) = conn.execute(
+        "SELECT COUNT(*) FROM boc_rates WHERE currency_pair = ? AND date BETWEEN ? AND ?",
+        (pair_upper, str(start_date), str(end_date)),
+    ).fetchone()
+    if cached_count >= total_days:
+        logger.debug(
+            "boc: all %d rates for %s already cached — skipping API call",
+            total_days,
+            pair_upper,
+        )
+        return 0
+
     rates = _fetch_range_from_api(pair_upper, start_date, end_date)
     if not rates:
         return 0

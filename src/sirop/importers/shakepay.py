@@ -35,6 +35,7 @@ discarding it silently.
 """
 
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
@@ -49,6 +50,11 @@ logger = logging.getLogger(__name__)
 # Internal sentinel: the type-map returns this for "purchase/sale" rows.
 # The importer resolves it to "buy" or "sell" via _parse_purchase_sale().
 _PURCHASE_SALE: str = "purchase_sale"
+
+# Matches Shakepay Description values that contain a recipient crypto address
+# rather than a blockchain txid.  Captures the address itself as group 1.
+# Examples: "Bitcoin address bc1q...", "Ethereum address 0x..."
+_ADDR_DESCRIPTION_RE = re.compile(r"^(?:Bitcoin|Ethereum) address (\S+)")
 
 
 @dataclass
@@ -67,6 +73,7 @@ class _RowCtx:
     debit_currency: str
     credit_currency: str
     txid_raw: str | None
+    notes: str  # "Sent to: <addr>" when Description contains a crypto address
     raw_type: str
     row_num: int
 
@@ -156,6 +163,19 @@ class ShakepayImporter(BaseImporter):
             )
             return None
 
+        # Detect whether the Description/txid column holds a real blockchain txid
+        # or a recipient crypto address (e.g. "Bitcoin address bc1q...").
+        # Shakepay's 2025 export dropped the dedicated txid column; withdrawals
+        # now show the recipient address in Description, not the on-chain txid.
+        _raw_desc = row[cols["txid"]].strip()
+        _addr_m = _ADDR_DESCRIPTION_RE.match(_raw_desc)
+        if _addr_m:
+            _txid_raw: str | None = None
+            _notes: str = f"Sent to: {_addr_m.group(1)}"
+        else:
+            _txid_raw = _raw_desc or None
+            _notes = ""
+
         ctx = _RowCtx(
             row=row,
             timestamp=timestamp,
@@ -167,7 +187,8 @@ class ShakepayImporter(BaseImporter):
             ),
             debit_currency=row[cols["debit_currency"]].strip(),
             credit_currency=row[cols["credit_currency"]].strip(),
-            txid_raw=row[cols["txid"]].strip() or None,
+            txid_raw=_txid_raw,
+            notes=_notes,
             raw_type=raw_type,
             row_num=row_num,
         )
@@ -266,6 +287,7 @@ class ShakepayImporter(BaseImporter):
             txid=ctx.txid_raw,
             raw_type=ctx.raw_type.lower(),
             raw_row=ctx.row,
+            notes=ctx.notes,
         )
 
     def _parse_withdrawal(self, ctx: _RowCtx) -> RawTransaction | None:
@@ -292,6 +314,7 @@ class ShakepayImporter(BaseImporter):
             txid=ctx.txid_raw,
             raw_type=ctx.raw_type.lower(),
             raw_row=ctx.row,
+            notes=ctx.notes,
         )
 
     def _parse_deposit(self, ctx: _RowCtx) -> RawTransaction | None:
@@ -318,6 +341,7 @@ class ShakepayImporter(BaseImporter):
             txid=ctx.txid_raw,
             raw_type=ctx.raw_type.lower(),
             raw_row=ctx.row,
+            notes=ctx.notes,
         )
 
     def _parse_fiat(self, ctx: _RowCtx, canonical_type: str) -> RawTransaction | None:
@@ -423,6 +447,7 @@ class ShakepayImporter(BaseImporter):
             txid=ctx.txid_raw,
             raw_type=ctx.raw_type.lower(),
             raw_row=ctx.row,
+            notes=ctx.notes,
         )
 
     # ------------------------------------------------------------------

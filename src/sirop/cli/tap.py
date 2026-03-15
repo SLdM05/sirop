@@ -70,6 +70,76 @@ class _TapError(Exception):
         super().__init__(str(code))
 
 
+def handle_tap_walletfolder(
+    folder_path: Path,
+    source: str | None,
+    settings: Settings | None = None,
+) -> int:
+    """Scan *folder_path* for subfolders; tap CSVs in each as a wallet named after the subfolder.
+
+    Parameters
+    ----------
+    folder_path:
+        Root directory whose immediate subdirectories are treated as wallet names.
+    source:
+        Importer name override passed through to each file tap.  When ``None``,
+        format is auto-detected per file.
+    settings:
+        Application settings; resolved from the environment if omitted.
+
+    Returns
+    -------
+    int
+        Exit code: 0 on success, 1 on any error.
+    """
+    if settings is None:
+        settings = get_settings()
+
+    if not folder_path.is_dir():
+        emit(MessageCode.TAP_ERROR_FILE_NOT_FOUND, path=folder_path)
+        return 1
+
+    subfolders = sorted(p for p in folder_path.iterdir() if p.is_dir())
+    if not subfolders:
+        emit(MessageCode.TAP_WALLETFOLDER_NO_SUBFOLDERS, path=folder_path)
+        return 0
+
+    # ── Show listing ──────────────────────────────────────────────────────────
+    emit(MessageCode.TAP_WALLETFOLDER_HEADER, count=len(subfolders), path=folder_path)
+    tappable: list[tuple[Path, str]] = []
+    for sub in subfolders:
+        csv_files = sorted(sub.glob("*.csv"))
+        if csv_files:
+            emit(MessageCode.TAP_WALLETFOLDER_SUBFOLDER_ITEM, name=sub.name, count=len(csv_files))
+            tappable.append((sub, sub.name))
+        else:
+            emit(MessageCode.TAP_WALLETFOLDER_SUBFOLDER_EMPTY, name=sub.name)
+
+    if not tappable:
+        emit(MessageCode.TAP_WALLETFOLDER_NO_CSV_FOUND)
+        return 1
+
+    # ── Confirmation ──────────────────────────────────────────────────────────
+    try:
+        answer = input(f"\nTap {len(tappable)} wallet folder(s)? [y/N] ").strip().lower()
+    except EOFError:
+        answer = ""
+
+    if answer not in {"y", "yes"}:
+        emit(MessageCode.TAP_WALLETFOLDER_ABORTED)
+        return 0
+
+    # ── Tap each CSV, wallet name = subfolder name ────────────────────────────
+    # Pass wallet explicitly (not None) so auto-created=False — no conflict prompt.
+    overall_rc = 0
+    for sub, wallet_name in tappable:
+        for csv_path in sorted(sub.glob("*.csv")):
+            rc = handle_tap(csv_path, source, wallet_name, settings)
+            if rc != 0:
+                overall_rc = rc
+    return overall_rc
+
+
 def handle_tap(
     file_path: Path,
     source: str | None,
@@ -244,6 +314,14 @@ def _run_tap(file_path: Path, source: str | None, wallet: str | None, settings: 
     wallet_name = wallet if wallet is not None else detected_source
     auto_created = wallet is None
 
+    # ── 5b. Conflict check — prompt before appending to an existing auto-named wallet ──
+    # Only triggered when the user didn't supply --wallet.  If the derived wallet
+    # name already exists they may have two different physical wallets of the same
+    # format (e.g. two Sparrow wallets).  Ask before silently merging.
+    if auto_created and not _confirm_wallet_append(batch_name, settings, wallet_name):
+        emit(MessageCode.TAP_WALLET_CONFLICT_ABORTED, wallet=wallet_name)
+        return 0
+
     # ── 6. Write to DB ────────────────────────────────────────────────────────
     inserted, skipped = _write_to_batch(
         batch_name, settings, txs, wallet_name, auto_created, detected_source
@@ -266,6 +344,7 @@ def _run_tap(file_path: Path, source: str | None, wallet: str | None, settings: 
         )
         return 0
 
+    wallet_note = f" (wallet: {wallet_name})" if not auto_created else ""
     skip_note = f" ({skipped} duplicate(s) skipped)" if skipped else ""
     emit(
         MessageCode.TAP_SUCCESS,
@@ -273,6 +352,7 @@ def _run_tap(file_path: Path, source: str | None, wallet: str | None, settings: 
         filename=file_path.name,
         fmt=disp,
         batch=batch_name,
+        wallet_note=wallet_note,
         skip_note=skip_note,
     )
     logger.debug(
@@ -284,6 +364,39 @@ def _run_tap(file_path: Path, source: str | None, wallet: str | None, settings: 
         skipped,
     )
     return 0
+
+
+def _confirm_wallet_append(batch_name: str, settings: Settings, wallet_name: str) -> bool:
+    """Return True if it is OK to append rows to *wallet_name*.
+
+    When the wallet does not yet exist, returns True immediately (no prompt).
+    When it already exists, asks the user interactively.
+
+    EOFError (non-interactive stdin) is treated as yes so that scripted pipelines
+    that omit ``--wallet`` preserve the pre-prompt append behaviour.
+    """
+    conn = open_batch(batch_name, settings)
+    try:
+        exists = repo.wallet_exists(conn, wallet_name)
+    finally:
+        conn.close()
+
+    if not exists:
+        return True
+
+    try:
+        answer = (
+            input(
+                f'\nWallet "{wallet_name}" already exists. Append to it? [Y/n]'
+                " (use --wallet NAME to create a new wallet) "
+            )
+            .strip()
+            .lower()
+        )
+    except EOFError:
+        return True
+
+    return answer not in {"n", "no"}
 
 
 def _write_to_batch(  # noqa: PLR0913
@@ -380,6 +493,7 @@ def _write_to_batch(  # noqa: PLR0913
                 tx.txid,
                 json.dumps(tx.raw_row),
                 wallet.id,
+                tx.notes,
             )
             for tx in txs
         ]
@@ -404,8 +518,8 @@ def _write_to_batch(  # noqa: PLR0913
                 INSERT INTO raw_transactions
                     (source, raw_timestamp, transaction_type, asset, amount,
                      amount_currency, fee, fee_currency, cad_amount, fiat_currency,
-                     cad_rate, spot_rate, txid, extra_json, wallet_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     cad_rate, spot_rate, txid, extra_json, wallet_id, notes)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 db_rows,
             )

@@ -107,9 +107,7 @@ class NDAXImporter(BaseImporter):
         groups = self._group_by_timestamp(rows)
         results: list[RawTransaction] = []
         for ts_key, group_rows in groups.items():
-            tx = self._parse_group(ts_key, group_rows)
-            if tx is not None:
-                results.append(tx)
+            results.extend(self._parse_group(ts_key, group_rows))
 
         results.sort(key=lambda t: t.timestamp)
         return results
@@ -143,7 +141,7 @@ class NDAXImporter(BaseImporter):
     # Group parsing
     # ------------------------------------------------------------------
 
-    def _parse_group(self, ts_key: str, rows: list[dict[str, str]]) -> RawTransaction | None:
+    def _parse_group(self, ts_key: str, rows: list[dict[str, str]]) -> list[RawTransaction]:
         cols = self._config.columns
 
         # Separate fee rows from main transaction rows.
@@ -157,7 +155,7 @@ class NDAXImporter(BaseImporter):
                 main_rows.append(row)
 
         if not main_rows:
-            return None
+            return []
 
         timestamp = self._parse_timestamp(main_rows[0][cols["date"]])
         primary, _ = self._split_type(main_rows[0][cols["type"]])
@@ -166,23 +164,22 @@ class NDAXImporter(BaseImporter):
 
         # Dispatch to the handler strategy configured in ndax.yaml.
         handler = self._type_to_handler.get(primary)
-        result: RawTransaction | None
         if handler == _HANDLER_SINGLE:
             result = self._parse_single(
                 main_rows[0], timestamp, fee_amount, fee_currency, raw_type_full
             )
+            return [result] if result is not None else []
         elif handler == _HANDLER_TRADE:
-            result = self._parse_trade(main_rows, timestamp, fee_amount, fee_currency)
+            return self._parse_trade(main_rows, timestamp, fee_amount, fee_currency)
         elif handler == _HANDLER_DUST:
-            result = self._parse_dust(main_rows, timestamp, fee_amount, fee_currency)
+            return self._parse_dust(main_rows, timestamp, fee_amount, fee_currency)
         else:
             logger.warning(
                 "ndax: unrecognised TYPE %r in group %s — skipping",
                 main_rows[0][cols["type"]],
                 ts_key,
             )
-            result = None
-        return result
+            return []
 
     # ------------------------------------------------------------------
     # Transaction-type handlers
@@ -194,7 +191,7 @@ class NDAXImporter(BaseImporter):
         timestamp: datetime,
         fee_amount: Decimal | None,
         fee_currency: str | None,
-    ) -> RawTransaction | None:
+    ) -> list[RawTransaction]:
         cols = self._config.columns
         fiat_class = self._fiat_asset_class
 
@@ -203,10 +200,10 @@ class NDAXImporter(BaseImporter):
 
         if not non_fiat_rows:
             logger.warning("ndax: TRADE group has no non-fiat rows — skipping")
-            return None
+            return []
 
         if len(non_fiat_rows) == _NON_FIAT_TRADE_LEG_COUNT and not fiat_rows:
-            # Both legs are non-fiat (e.g. SOL → BTC via DUST or direct trade).
+            # Both legs are non-fiat (e.g. SOL → ETH direct trade).
             return self._parse_non_fiat_trade(non_fiat_rows, timestamp, fee_amount, fee_currency)
 
         if len(non_fiat_rows) != 1 or not fiat_rows:
@@ -215,7 +212,7 @@ class NDAXImporter(BaseImporter):
                 len(non_fiat_rows),
                 len(fiat_rows),
             )
-            return None
+            return []
 
         non_fiat_row = non_fiat_rows[0]
         fiat_row = fiat_rows[0]
@@ -236,23 +233,25 @@ class NDAXImporter(BaseImporter):
         rate = (fiat_value / non_fiat_amount) if non_fiat_amount else None
 
         tx_type = "sell" if is_sell else "buy"
-        return RawTransaction(
-            source=self._config.source_name,
-            timestamp=timestamp,
-            transaction_type=tx_type,
-            asset=asset,
-            amount=non_fiat_amount,
-            amount_currency=asset,
-            fiat_value=fiat_value,
-            fiat_currency=fiat_currency_code,
-            fee_amount=fee_amount,
-            fee_currency=fee_currency,
-            rate=rate,
-            spot_rate=None,
-            txid=None,
-            raw_type=non_fiat_row[cols["type"]].strip().lower(),
-            raw_row=non_fiat_row,
-        )
+        return [
+            RawTransaction(
+                source=self._config.source_name,
+                timestamp=timestamp,
+                transaction_type=tx_type,
+                asset=asset,
+                amount=non_fiat_amount,
+                amount_currency=asset,
+                fiat_value=fiat_value,
+                fiat_currency=fiat_currency_code,
+                fee_amount=fee_amount,
+                fee_currency=fee_currency,
+                rate=rate,
+                spot_rate=None,
+                txid=None,
+                raw_type=non_fiat_row[cols["type"]].strip().lower(),
+                raw_row=non_fiat_row,
+            )
+        ]
 
     def _parse_non_fiat_trade(
         self,
@@ -260,8 +259,13 @@ class NDAXImporter(BaseImporter):
         timestamp: datetime,
         fee_amount: Decimal | None,
         fee_currency: str | None,
-    ) -> RawTransaction | None:
-        """Handle a trade where both sides are non-fiat assets (e.g. SOL → BTC)."""
+    ) -> list[RawTransaction]:
+        """Handle a trade where both sides are non-fiat assets (e.g. SOL → ETH).
+
+        Emits two ``RawTransaction`` objects: one acquisition for the received
+        asset and one disposal for the sent asset.  Both legs are needed so that
+        the ACB pool for the sent asset is correctly reduced.
+        """
         cols = self._config.columns
 
         # Received asset has a positive AMOUNT; sent asset has a negative AMOUNT.
@@ -270,7 +274,7 @@ class NDAXImporter(BaseImporter):
 
         if not received or not sent:
             logger.warning("ndax: non-fiat TRADE group missing a leg — skipping")
-            return None
+            return []
 
         received_asset = received[cols["asset"]].strip()
         sent_asset = sent[cols["asset"]].strip()
@@ -279,17 +283,10 @@ class NDAXImporter(BaseImporter):
 
         rate = (received_amount / sent_amount) if sent_amount else None
 
-        # raw_row carries the received leg as primary; sent info is embedded
-        # so downstream stages can reconstruct the full picture.
-        primary_row = dict(received)
-        primary_row["_ndax_sent_asset"] = sent_asset
-        primary_row["_ndax_sent_amount"] = str(sent_amount)
-
-        tx_type = self._lookup_type("trade")
-        return RawTransaction(
+        received_tx = RawTransaction(
             source=self._config.source_name,
             timestamp=timestamp,
-            transaction_type=tx_type,
+            transaction_type=self._lookup_type("trade"),
             asset=received_asset,
             amount=received_amount,
             amount_currency=received_asset,
@@ -301,8 +298,27 @@ class NDAXImporter(BaseImporter):
             spot_rate=None,
             txid=None,
             raw_type=received[cols["type"]].strip().lower(),
-            raw_row=primary_row,
+            raw_row=dict(received),
         )
+        # Disposal of the sent asset at its own BoC-derived rate.
+        sent_tx = RawTransaction(
+            source=self._config.source_name,
+            timestamp=timestamp,
+            transaction_type="sell",
+            asset=sent_asset,
+            amount=sent_amount,
+            amount_currency=sent_asset,
+            fiat_value=None,
+            fiat_currency=None,
+            fee_amount=None,  # fee is recorded on the received leg
+            fee_currency=None,
+            rate=None,
+            spot_rate=None,
+            txid=None,
+            raw_type=sent[cols["type"]].strip().lower(),
+            raw_row=dict(sent),
+        )
+        return [received_tx, sent_tx]
 
     def _parse_single(
         self,
@@ -382,31 +398,29 @@ class NDAXImporter(BaseImporter):
         timestamp: datetime,
         fee_amount: Decimal | None,
         fee_currency: str | None,
-    ) -> RawTransaction | None:
-        """Handle DUST conversion groups (DUST / IN, DUST / OUT)."""
+    ) -> list[RawTransaction]:
+        """Handle DUST conversion groups (DUST / IN, DUST / OUT).
+
+        Emits two ``RawTransaction`` objects when both legs are present: one
+        acquisition for the received asset and one disposal for the sent asset.
+        Emitting only the acquisition (the previous behaviour) left the sent
+        asset's ACB pool unreduced, producing phantom ending balances.
+        """
         cols = self._config.columns
 
         received = next((r for r in rows if self._parse_amount(r[cols["amount"]], "") > 0), None)
         sent = next((r for r in rows if self._parse_amount(r[cols["amount"]], "") < 0), None)
 
         if not received:
-            return None
+            return []
 
         received_asset = received[cols["asset"]].strip()
         received_amount = self._parse_amount(received[cols["amount"]], received_asset)
 
-        primary_row = dict(received)
-        if sent:
-            sent_asset = sent[cols["asset"]].strip()
-            sent_amount = abs(self._parse_amount(sent[cols["amount"]], sent_asset))
-            primary_row["_ndax_sent_asset"] = sent_asset
-            primary_row["_ndax_sent_amount"] = str(sent_amount)
-
-        tx_type = self._lookup_type("dust") or "other"
-        return RawTransaction(
+        received_tx = RawTransaction(
             source=self._config.source_name,
             timestamp=timestamp,
-            transaction_type=tx_type,
+            transaction_type=self._lookup_type("dust") or "other",
             asset=received_asset,
             amount=received_amount,
             amount_currency=received_asset,
@@ -418,8 +432,35 @@ class NDAXImporter(BaseImporter):
             spot_rate=None,
             txid=None,
             raw_type=received[cols["type"]].strip().lower(),
-            raw_row=primary_row,
+            raw_row=dict(received),
         )
+
+        if not sent:
+            return [received_tx]
+
+        sent_asset = sent[cols["asset"]].strip()
+        sent_amount = abs(self._parse_amount(sent[cols["amount"]], sent_asset))
+
+        # Disposal of the sent asset.  fiat_value is None — the normalizer will
+        # derive the CAD value from the BoC spot rate at the transaction timestamp.
+        sent_tx = RawTransaction(
+            source=self._config.source_name,
+            timestamp=timestamp,
+            transaction_type="sell",
+            asset=sent_asset,
+            amount=sent_amount,
+            amount_currency=sent_asset,
+            fiat_value=None,
+            fiat_currency=None,
+            fee_amount=None,  # fee is recorded on the received leg
+            fee_currency=None,
+            rate=None,
+            spot_rate=None,
+            txid=None,
+            raw_type=sent[cols["type"]].strip().lower(),
+            raw_row=dict(sent),
+        )
+        return [received_tx, sent_tx]
 
     # ------------------------------------------------------------------
     # Helpers

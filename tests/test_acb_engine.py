@@ -10,9 +10,7 @@ All values use Decimal to match production code.
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-import pytest
-
-from sirop.engine.acb import InsufficientUnitsError, TaxRules, run
+from sirop.engine.acb import PoolUnderrun, TaxRules, run
 from sirop.models.event import ClassifiedEvent
 
 # ---------------------------------------------------------------------------
@@ -94,7 +92,7 @@ def test_buy_buy_sell_gain() -> None:
         _buy("BTC", "0.3", "18000", cad_fee="36", offset_days=10, event_id=2),
         _sell("BTC", "0.4", "28000", cad_fee="40", offset_days=20, event_id=3),
     ]
-    disps, _ = run(events, _DEFAULT_RULES)
+    disps, *_ = run(events, _DEFAULT_RULES)
 
     assert len(disps) == 1
     d = disps[0]
@@ -120,7 +118,7 @@ def test_sell_at_loss() -> None:
         _buy("BTC", "1.0", "50000", cad_fee="0", offset_days=0, event_id=1),
         _sell("BTC", "0.5", "20000", cad_fee="0", offset_days=30, event_id=2),
     ]
-    disps, _ = run(events, _DEFAULT_RULES)
+    disps, *_ = run(events, _DEFAULT_RULES)
 
     assert len(disps) == 1
     d = disps[0]
@@ -150,7 +148,7 @@ def test_fee_disposal_reduces_pool() -> None:
             is_taxable=True,
         ),
     ]
-    disps, states = run(events, _DEFAULT_RULES)
+    disps, states, *_ = run(events, _DEFAULT_RULES)
 
     assert len(disps) == 1
     d = disps[0]
@@ -170,7 +168,7 @@ def test_multiple_assets_isolated() -> None:
         _sell("BTC", "0.5", "32000", offset_days=10, event_id=3),
         _sell("ETH", "5.0", "18000", offset_days=11, event_id=4),
     ]
-    disps, _ = run(events, _DEFAULT_RULES)
+    disps, *_ = run(events, _DEFAULT_RULES)
 
     assert len(disps) == 2  # noqa: PLR2004
 
@@ -184,13 +182,35 @@ def test_multiple_assets_isolated() -> None:
     assert eth_disp.gain_loss_cad == Decimal("3000.00000000")
 
 
-def test_empty_pool_disposal_raises() -> None:
-    """Disposing from an empty pool raises InsufficientUnitsError."""
+def test_empty_pool_disposal_clamps_and_warns() -> None:
+    """Disposing from an empty pool clamps to 0 and returns a PoolUnderrun warning.
+
+    Previously this raised InsufficientUnitsError and crashed the pipeline.
+    Now the engine records the underrun and continues so the user gets output
+    along with a W005 warning.
+    """
     events = [
         _sell("BTC", "0.1", "6000", offset_days=0, event_id=1),
     ]
-    with pytest.raises(InsufficientUnitsError):
-        run(events, _DEFAULT_RULES)
+    disps, _, _, _, underruns = run(events, _DEFAULT_RULES)
+    assert len(underruns) == 1
+    u = underruns[0]
+    assert isinstance(u, PoolUnderrun)
+    assert u.asset == "BTC"
+    assert u.attempted == Decimal("0.1")
+    assert u.available == Decimal("0")
+    # Disposal is still recorded (clamped to 0 units disposed).
+    assert len(disps) == 1
+
+
+def test_no_underrun_on_normal_disposal() -> None:
+    """A disposal within pool balance produces no underrun warning."""
+    events = [
+        _buy("BTC", "0.5", "30000", offset_days=0, event_id=1),
+        _sell("BTC", "0.3", "20000", offset_days=1, event_id=2),
+    ]
+    _, _, _, _, underruns = run(events, _DEFAULT_RULES)
+    assert underruns == []
 
 
 def test_disposition_type_recorded() -> None:
@@ -199,7 +219,7 @@ def test_disposition_type_recorded() -> None:
         _buy("BTC", "1.0", "60000", offset_days=0, event_id=1),
         _sell("BTC", "0.1", "7000", offset_days=10, event_id=2),
     ]
-    disps, _ = run(events, _DEFAULT_RULES)
+    disps, *_ = run(events, _DEFAULT_RULES)
     assert disps[0].disposition_type == "sell"
 
 
@@ -209,7 +229,7 @@ def test_year_acquired_single_year() -> None:
         _buy("BTC", "1.0", "60000", offset_days=0, event_id=1),
         _sell("BTC", "0.5", "35000", offset_days=100, event_id=2),
     ]
-    disps, _ = run(events, _DEFAULT_RULES)
+    disps, *_ = run(events, _DEFAULT_RULES)
     assert disps[0].year_acquired == "2025"
 
 
@@ -259,7 +279,7 @@ def test_year_acquired_various() -> None:
             is_taxable=True,
         ),
     ]
-    disps, _ = run(events, _DEFAULT_RULES)
+    disps, *_ = run(events, _DEFAULT_RULES)
     assert disps[0].year_acquired == "Various"
 
 
@@ -282,7 +302,7 @@ def test_income_event_establishes_acb() -> None:
         ),
         _sell("BTC", "0.001", "70", offset_days=30, event_id=2),
     ]
-    disps, _ = run(events, _DEFAULT_RULES)
+    disps, *_ = run(events, _DEFAULT_RULES)
 
     assert len(disps) == 1
     d = disps[0]
@@ -292,3 +312,32 @@ def test_income_event_establishes_acb() -> None:
     assert d.acb_of_disposed_cad == Decimal("65.00000000")
     # gain = 70 - 65 = 5
     assert d.gain_loss_cad == Decimal("5.00000000")
+
+
+def test_final_pools_returned_for_acquisition_only_asset() -> None:
+    """Assets never sold return their final pool state in the third return value.
+
+    This is the data source for year-end holdover acb_state snapshots: assets
+    that were only bought/received in the tax year produce no acb_states entries
+    (those are only written after disposals), so the caller must use final_pools
+    to write year-end holdings for them.
+    """
+    events = [
+        _buy("BTC", "0.5", "25000", cad_fee="50", offset_days=0, event_id=1),
+        _buy("BTC", "0.3", "18000", cad_fee="36", offset_days=10, event_id=2),
+    ]
+    disps, acb_states, final_pools, last_events, _ = run(events, _DEFAULT_RULES)
+
+    # No disposals → no dispositions and no per-disposal acb_state entries.
+    assert len(disps) == 0
+    assert len(acb_states) == 0
+
+    # Final pool must reflect both buys.
+    assert "BTC" in final_pools
+    pool = final_pools["BTC"]
+    assert pool.total_units == Decimal("0.8")
+    assert pool.total_acb_cad == Decimal("25000") + Decimal("50") + Decimal("18000") + Decimal("36")
+
+    # last_events must point to the second (most recent) buy (event_id=2).
+    assert "BTC" in last_events
+    assert last_events["BTC"].id == events[1].id

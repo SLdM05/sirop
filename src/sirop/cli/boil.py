@@ -17,11 +17,12 @@ Usage
 
 from __future__ import annotations
 
+import csv
 import dataclasses
 import sqlite3
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
@@ -33,12 +34,14 @@ from sirop.engine import acb as acb_engine
 from sirop.engine import superficial_loss as sld_engine
 from sirop.engine.acb import TaxRules
 from sirop.models.messages import MessageCode
+from sirop.node.privacy import is_private_node_url
 from sirop.normalizer import normalizer
 from sirop.transfer_match import matcher
 from sirop.utils.boc import BoCRateError, fill_rate_gaps, prefetch_rates
 from sirop.utils.crypto_prices import prefetch_crypto_prices, prefetch_crypto_prices_by_range
 from sirop.utils.logging import StageContext, get_logger
 from sirop.utils.messages import emit, spinner
+from sirop.utils.price_cache import copy_prices_into_batch, open_price_cache, sync_prices_to_cache
 
 if TYPE_CHECKING:
     from datetime import date
@@ -65,7 +68,9 @@ class _BoilError(Exception):
 
 def handle_boil(
     from_stage: str | None,
+    audit: bool = False,
     settings: Settings | None = None,
+    allow_public_mempool: bool = False,
 ) -> int:
     """Run the pipeline from *from_stage* (or from the beginning if None).
 
@@ -74,8 +79,14 @@ def handle_boil(
     from_stage:
         When provided, all stages before this one are skipped even if they
         are pending.  Stages after it (and itself) are re-run even if done.
+    audit:
+        When True, write an ACB ledger CSV after the pipeline completes.
     settings:
         Application settings; resolved from the environment if omitted.
+    allow_public_mempool:
+        When True, skip the interactive privacy prompt even if
+        ``BTC_MEMPOOL_URL`` points to a public host.  Equivalent to setting
+        ``BTC_TRAVERSAL_ALLOW_PUBLIC=true`` in the environment.
 
     Returns
     -------
@@ -85,7 +96,7 @@ def handle_boil(
     if settings is None:
         settings = get_settings()
     try:
-        return _run_boil(from_stage, settings)
+        return _run_boil(from_stage, audit, settings, allow_public_mempool=allow_public_mempool)
     except _BoilError as exc:
         emit(exc.msg_code, **exc.msg_kwargs)
         return 1
@@ -96,13 +107,22 @@ def handle_boil(
 # ---------------------------------------------------------------------------
 
 
-def _run_boil(from_stage: str | None, settings: Settings) -> int:
+def _run_boil(
+    from_stage: str | None,
+    audit: bool,
+    settings: Settings,
+    *,
+    allow_public_mempool: bool = False,
+) -> int:
     """Core pipeline coordinator.  Raises ``_BoilError`` on any user-facing error."""
     batch_name = get_active_batch_name(settings)
     if batch_name is None:
         raise _BoilError(MessageCode.BATCH_ERROR_NO_ACTIVE)
 
     conn = open_batch(batch_name, settings)
+    cache_conn: sqlite3.Connection | None = None
+    if settings.asset_price_cache:
+        cache_conn = open_price_cache(settings.data_dir)
     try:
         # Ensure tap has been run.
         tap_status = repo.get_stage_status(conn, "tap")
@@ -110,6 +130,11 @@ def _run_boil(from_stage: str | None, settings: Settings) -> int:
             raise _BoilError(MessageCode.BOIL_ERROR_NOT_TAPPED, name=batch_name)
 
         tax_rules = _load_tax_rules()
+
+        # Resolve graph traversal permission once before any stage runs.
+        graph_traversal_allowed = _resolve_graph_traversal_permission(
+            settings, allow_public_mempool=allow_public_mempool
+        )
 
         # Invalidate stages that will be re-run and clear their stale output.
         if from_stage is not None:
@@ -127,20 +152,33 @@ def _run_boil(from_stage: str | None, settings: Settings) -> int:
                 continue
 
             _check_not_running(conn, stage, batch_name)
-            _execute_stage(conn, stage, batch_name, tax_rules)
+            _execute_stage(
+                conn,
+                stage,
+                batch_name,
+                tax_rules,
+                cache_conn=cache_conn,
+                graph_traversal_allowed=graph_traversal_allowed,
+            )
 
         _print_summary(conn, batch_name)
+        if audit:
+            _run_audit(conn, batch_name, settings)
         return 0
 
     finally:
         conn.close()
+        if cache_conn is not None:
+            cache_conn.close()
 
 
-def _execute_stage(
+def _execute_stage(  # noqa: PLR0913
     conn: object,  # sqlite3.Connection — typed generically to avoid circular import hint
     stage: str,
     batch_name: str,
     tax_rules: TaxRules,
+    cache_conn: sqlite3.Connection | None = None,
+    graph_traversal_allowed: bool = True,
 ) -> None:
     """Execute a single pipeline stage wrapped in StageContext."""
     assert isinstance(conn, sqlite3.Connection)
@@ -149,13 +187,13 @@ def _execute_stage(
         repo.set_stage_running(conn, stage)
 
         if stage == "normalize":
-            _run_normalize(conn)
+            _run_normalize(conn, cache_conn=cache_conn)
 
         elif stage == "verify":
             _run_verify(conn)
 
         elif stage == "transfer_match":
-            _run_transfer_match(conn)
+            _run_transfer_match(conn, graph_traversal_allowed=graph_traversal_allowed)
 
         elif stage == "boil":
             _run_acb(conn, tax_rules)
@@ -166,13 +204,27 @@ def _execute_stage(
         repo.set_stage_done(conn, stage)
 
 
-def _run_normalize(conn: object) -> None:
+def _run_normalize(
+    conn: object,
+    *,
+    cache_conn: sqlite3.Connection | None = None,
+) -> None:
     assert isinstance(conn, sqlite3.Connection)
 
     logger.debug("Checking sap levels...")
     raw_txs = repo.read_raw_transactions(conn)
     if not raw_txs:
         raise _BoilError(MessageCode.BOIL_ERROR_NO_RAW_TRANSACTIONS)
+
+    if cache_conn is not None:
+        min_date = min(r.timestamp.date() for r in raw_txs)
+        max_date = max(r.timestamp.date() for r in raw_txs)
+        boc_hit, crypto_hit = copy_prices_into_batch(cache_conn, conn, min_date, max_date)
+        logger.debug(
+            "price cache: pre-loaded %d BoC rate(s), %d crypto price(s)",
+            boc_hit,
+            crypto_hit,
+        )
 
     boc_attributed = _prefetch_boc_rates(conn, raw_txs)
     _prefetch_crypto_prices_bulk(conn, raw_txs, boc_already_attributed=boc_attributed)
@@ -182,6 +234,14 @@ def _run_normalize(conn: object) -> None:
         txs = normalizer.normalize(raw_txs, conn)
     txs = repo.write_transactions(conn, txs)
     logger.debug("wrote %d normalized transaction(s)", len(txs))
+
+    if cache_conn is not None:
+        boc_synced, crypto_synced = sync_prices_to_cache(conn, cache_conn)
+        logger.debug(
+            "price cache: synced %d BoC rate(s), %d crypto price(s)",
+            boc_synced,
+            crypto_synced,
+        )
 
     zero_count = sum(
         1
@@ -311,7 +371,48 @@ def _run_verify(conn: object) -> None:
     logger.debug("%d row(s) promoted to verified_transactions", count)
 
 
-def _run_transfer_match(conn: object) -> None:
+def _resolve_graph_traversal_permission(
+    settings: Settings, *, allow_public_mempool: bool = False
+) -> bool:
+    """Return True when graph traversal is permitted for the configured Mempool URL.
+
+    Rules (evaluated in order):
+    1. If ``BTC_TRAVERSAL_MAX_HOPS == 0`` — traversal disabled, return True
+       (the hop-gate in matcher.py will skip Pass 1b anyway; no prompt needed).
+    2. If the URL is a private/local address — return True silently.
+    3. If ``allow_public_mempool`` (CLI flag) or
+       ``settings.btc_traversal_allow_public`` (env var) — emit warning then
+       return True (non-interactive confirmation already given).
+    4. Otherwise — prompt the user interactively.  Return True on "y/Y", False
+       on anything else (including EOF / non-interactive stdin).
+    """
+    if settings.btc_traversal_max_hops <= 0:
+        return True
+
+    url = settings.btc_mempool_url
+    if is_private_node_url(url):
+        return True
+
+    # Public URL — check for non-interactive bypass first.
+    if allow_public_mempool or settings.btc_traversal_allow_public:
+        emit(MessageCode.BOIL_GRAPH_PRIVACY_WARNING, url=url)
+        return True
+
+    # Interactive prompt.
+    emit(MessageCode.BOIL_GRAPH_PRIVACY_WARNING, url=url)
+    try:
+        answer = input("Proceed with graph traversal? [y/N] ").strip().lower()
+    except (EOFError, OSError):
+        answer = ""
+
+    if answer == "y":
+        return True
+
+    emit(MessageCode.BOIL_GRAPH_PRIVACY_SKIPPED)
+    return False
+
+
+def _run_transfer_match(conn: object, *, graph_traversal_allowed: bool = True) -> None:
     assert isinstance(conn, sqlite3.Connection)
 
     tax_year = repo.read_tax_year(conn)
@@ -328,8 +429,37 @@ def _run_transfer_match(conn: object) -> None:
             sum(1 for o in overrides if o.action == "unlink"),
         )
 
-    with spinner("Classifying events…"):
-        events, income_evts = matcher.match_transfers(txs, overrides=overrides, tax_year=tax_year)
+    # Apply user-supplied txid overrides (from `sirop stir destination`) before
+    # matching.  These patch in blockchain txids for transactions whose CSV did
+    # not include one (e.g. NDAX withdrawals), making them eligible for Pass 1
+    # exact matching and Pass 1b graph traversal.
+    txid_overrides = repo.read_transaction_txid_overrides(conn)
+    if txid_overrides:
+        logger.info("applying %d user-supplied txid override(s)", len(txid_overrides))
+        txs = [
+            dataclasses.replace(t, txid=txid_overrides[t.id])
+            if t.id in txid_overrides and t.txid is None
+            else t
+            for t in txs
+        ]
+
+    with spinner("Classifying events…") as _status:
+
+        def _graph_progress(api_calls: int, done: int, total: int, found: int) -> None:
+            noun = "match" if found == 1 else "matches"
+            _status.update(
+                f"Traversing UTXO graph… "
+                f"[{done}/{total} · {api_calls} API calls · {found} {noun} found]"
+            )
+
+        events, income_evts, graph_matches = matcher.match_transfers(
+            txs,
+            overrides=overrides,
+            tax_year=tax_year,
+            graph_traversal_allowed=graph_traversal_allowed,
+            on_graph_progress=_graph_progress,
+        )
+    repo.write_graph_transfer_pairs(conn, graph_matches)
 
     # The matcher uses transactions.id as vtx_id; patch to verified_transactions.id
     # before writing, since classified_events.vtx_id and income_events.vtx_id both
@@ -379,10 +509,31 @@ def _run_acb(conn: object, tax_rules: TaxRules) -> None:
     )
 
     with spinner("Running ACB engine…"):
-        disps, states = acb_engine.run(events, tax_rules)
+        disps, states, final_pools, last_events, underruns = acb_engine.run(events, tax_rules)
+
+    for u in underruns:
+        emit(
+            MessageCode.BOIL_ACB_POOL_UNDERRUN,
+            asset=u.asset,
+            date=u.timestamp.date(),
+            attempted=format(u.attempted, "f"),
+            available=format(u.available, "f"),
+        )
 
     disps = repo.write_dispositions(conn, disps, states)
     logger.debug("wrote %d disposition(s)", len(disps))
+
+    # Write year-end snapshots for assets acquired but never sold in this tax year.
+    # Without these, the holdings query finds nothing for those assets.
+    assets_with_disposal = {s.asset for s in states}
+    holdovers = [
+        (pool, last_events[asset].id)
+        for asset, pool in final_pools.items()
+        if asset not in assets_with_disposal and pool.total_units > Decimal("0")
+    ]
+    if holdovers:
+        repo.write_holdover_acb_states(conn, holdovers)
+        logger.debug("wrote %d holdover acb_state snapshot(s)", len(holdovers))
 
 
 def _run_superficial_loss(conn: object, tax_rules: TaxRules) -> None:
@@ -458,6 +609,314 @@ def _stages_from(from_stage: str) -> tuple[str, ...]:
     return _BOIL_STAGES[idx:]
 
 
+_AUDIT_COLUMNS = [
+    "Date",
+    "Time (UTC)",
+    "Asset",
+    "Event Type",
+    "Source",
+    "Units",
+    "CAD Cost (ACQ)",
+    "Fees (CAD)",
+    "Pool Units Before",
+    "Pool Cost Before (CAD)",
+    "ACB/Unit Before (CAD)",
+    "Proceeds (CAD)",
+    "ACB of Disposed (CAD)",
+    "Selling Fees (CAD)",
+    "Gross Gain/Loss (CAD)",
+    "Superficial Loss",
+    "Denied Loss (CAD)",
+    "Allowable Loss (CAD)",
+    "Net Gain/Loss (CAD)",
+    "Pool Units After",
+    "Pool Cost After (CAD)",
+    "ACB/Unit After (CAD)",
+    "Year Acquired",
+]
+
+_ROUNDING = Decimal("0.00000001")
+
+
+def _run_audit(conn: sqlite3.Connection, batch_name: str, settings: Settings) -> None:
+    """Write a chronological ACB ledger CSV for manual verification.
+
+    One row per classified taxable event (acquisitions and disposals).
+    Acquisition rows show the running pool evolution computed by replaying
+    the same weighted-average math as the ACB engine.  Disposal rows pull
+    authoritative values from the database (``dispositions_adjusted``).
+    """
+    if repo.get_stage_status(conn, "superficial_loss") != "done":
+        raise _BoilError(MessageCode.BOIL_AUDIT_ERROR_NOT_READY)
+
+    # Load all taxable classified events sorted chronologically.
+    all_events = repo.read_classified_events(conn)
+    taxable = sorted(
+        (e for e in all_events if e.is_taxable),
+        key=lambda e: (e.timestamp, e.id),
+    )
+
+    # Pre-load disposal details keyed by classified_event id.
+    disposal_rows = conn.execute(
+        """
+        SELECT
+            d.event_id,
+            d.acb_per_unit_before,
+            d.pool_units_before,
+            d.pool_cost_before,
+            d.acb_per_unit_after,
+            d.pool_units_after,
+            d.pool_cost_after,
+            da.proceeds,
+            da.acb_of_disposed,
+            da.selling_fees,
+            da.gain_loss,
+            da.is_superficial_loss,
+            da.superficial_loss_denied,
+            da.allowable_loss,
+            da.adjusted_gain_loss,
+            da.year_acquired,
+            da.disposition_type
+        FROM dispositions_adjusted da
+        JOIN dispositions d ON da.disposition_id = d.id
+        """
+    ).fetchall()
+    disposal_map: dict[int, Any] = {r["event_id"]: r for r in disposal_rows}
+
+    # Per-asset running pool (total_units, total_acb_cad) — used for acquisition rows.
+    # Disposal after-states are taken from the DB and used to keep the running pool
+    # consistent for any acquisitions that follow a disposal.
+    pools: dict[str, tuple[Decimal, Decimal]] = {}
+
+    out_rows: list[dict[str, object]] = []
+
+    for event in taxable:
+        asset = event.asset
+        pool_units, pool_cost = pools.get(asset, (Decimal("0"), Decimal("0")))
+
+        if event.event_type in ("buy", "income", "other"):
+            acb_per_unit_before = (
+                (pool_cost / pool_units).quantize(_ROUNDING) if pool_units else Decimal("0")
+            )
+
+            cad_cost = event.cad_cost or Decimal("0")
+            cad_fee = event.cad_fee or Decimal("0")
+            pool_units_after = pool_units + event.amount
+            pool_cost_after = pool_cost + cad_cost + cad_fee
+            acb_per_unit_after = (
+                (pool_cost_after / pool_units_after).quantize(_ROUNDING)
+                if pool_units_after
+                else Decimal("0")
+            )
+            pools[asset] = (pool_units_after, pool_cost_after)
+
+            out_rows.append(
+                {
+                    "Date": event.timestamp.date().isoformat(),
+                    "Time (UTC)": event.timestamp.time().isoformat(timespec="seconds"),
+                    "Asset": asset,
+                    "Event Type": "Acquisition",
+                    "Source": event.source,
+                    "Units": format(event.amount, "f"),
+                    "CAD Cost (ACQ)": format(cad_cost, "f"),
+                    "Fees (CAD)": format(cad_fee, "f"),
+                    "Pool Units Before": format(pool_units, "f"),
+                    "Pool Cost Before (CAD)": format(pool_cost, "f"),
+                    "ACB/Unit Before (CAD)": format(acb_per_unit_before, "f"),
+                    "Proceeds (CAD)": "",
+                    "ACB of Disposed (CAD)": "",
+                    "Selling Fees (CAD)": "",
+                    "Gross Gain/Loss (CAD)": "",
+                    "Superficial Loss": "",
+                    "Denied Loss (CAD)": "",
+                    "Allowable Loss (CAD)": "",
+                    "Net Gain/Loss (CAD)": "",
+                    "Pool Units After": format(pool_units_after, "f"),
+                    "Pool Cost After (CAD)": format(pool_cost_after, "f"),
+                    "ACB/Unit After (CAD)": format(acb_per_unit_after, "f"),
+                    "Year Acquired": "",
+                }
+            )
+
+        elif event.event_type in ("sell", "fee_disposal", "spend"):
+            d = disposal_map.get(event.id)
+            if d is None:
+                logger.warning("audit: no disposal row found for event_id=%d, skipping", event.id)
+                continue
+
+            # Update running pool from DB's authoritative after-state so subsequent
+            # acquisition rows see the correct pool balance.
+            pools[asset] = (Decimal(d["pool_units_after"]), Decimal(d["pool_cost_after"]))
+
+            is_sl = bool(d["is_superficial_loss"])
+            out_rows.append(
+                {
+                    "Date": event.timestamp.date().isoformat(),
+                    "Time (UTC)": event.timestamp.time().isoformat(timespec="seconds"),
+                    "Asset": asset,
+                    "Event Type": "Disposal",
+                    "Source": event.source,
+                    "Units": format(
+                        Decimal(d["pool_units_before"]) - Decimal(d["pool_units_after"]), "f"
+                    ),
+                    "CAD Cost (ACQ)": "",
+                    "Fees (CAD)": "",
+                    "Pool Units Before": d["pool_units_before"],
+                    "Pool Cost Before (CAD)": d["pool_cost_before"],
+                    "ACB/Unit Before (CAD)": d["acb_per_unit_before"],
+                    "Proceeds (CAD)": d["proceeds"],
+                    "ACB of Disposed (CAD)": d["acb_of_disposed"],
+                    "Selling Fees (CAD)": d["selling_fees"],
+                    "Gross Gain/Loss (CAD)": d["gain_loss"],
+                    "Superficial Loss": "Yes" if is_sl else "No",
+                    "Denied Loss (CAD)": d["superficial_loss_denied"],
+                    "Allowable Loss (CAD)": d["allowable_loss"],
+                    "Net Gain/Loss (CAD)": d["adjusted_gain_loss"],
+                    "Pool Units After": d["pool_units_after"],
+                    "Pool Cost After (CAD)": d["pool_cost_after"],
+                    "ACB/Unit After (CAD)": d["acb_per_unit_after"],
+                    "Year Acquired": d["year_acquired"],
+                }
+            )
+
+    audit_dir = settings.output_dir / "audit"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    out_path = audit_dir / f"{batch_name}-audit.csv"
+    with out_path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=_AUDIT_COLUMNS)
+        writer.writeheader()
+        writer.writerows(out_rows)
+
+    emit(MessageCode.BOIL_AUDIT_WRITTEN, path=out_path, count=len(out_rows))
+
+
+def _print_income_and_costs(conn: sqlite3.Connection) -> None:
+    """Print income and costs & expenses sections of the boil summary."""
+    income_rows = conn.execute(
+        """
+        SELECT income_type, SUM(CAST(fmv_cad AS REAL)) AS total
+        FROM income_events
+        GROUP BY income_type
+        ORDER BY income_type
+        """
+    ).fetchall()
+    if income_rows:
+        total_income = sum(float(r["total"]) for r in income_rows)
+        print(f"  Income:                {total_income:>12,.2f} CAD")
+        for r in income_rows:
+            print(f"    {r['income_type']:<20} {float(r['total']):>10,.2f} CAD")
+
+    costs_row = conn.execute(
+        "SELECT COALESCE(SUM(CAST(cad_fee AS REAL)), 0) "
+        "FROM classified_events "
+        "WHERE is_taxable = 1 AND cad_fee IS NOT NULL"
+    ).fetchone()
+    if costs_row and costs_row[0]:
+        print(f"  Costs & expenses:      {float(costs_row[0]):>12,.2f} CAD")
+
+
+def _print_wallet_holdings(
+    conn: sqlite3.Connection, per_unit_acb: dict[str, float], tax_year: int
+) -> None:
+    """Print year-end holdings broken down by wallet."""
+    year_end = f"{tax_year}-12-31"
+    wallet_rows = conn.execute(
+        """
+        WITH transfer_vtx_ids AS (
+            -- vtx_ids of matched transfer legs; their fee is already captured
+            -- in the amount difference (W - D) and must not be double-subtracted.
+            SELECT DISTINCT vtx_id FROM classified_events WHERE event_type = 'transfer'
+        ),
+        fee_disposal_adj AS (
+            -- Sum fee_disposal amounts per wallet/asset for non-transfer transactions
+            -- within the tax year.  These crypto fees reduce the global ACB pool but
+            -- are not reflected in transactions.amount, so per-wallet holdings would
+            -- otherwise overstate.
+            SELECT
+                ce.wallet_id,
+                ce.asset,
+                SUM(CAST(ce.amount AS REAL)) AS adj
+            FROM classified_events ce
+            WHERE ce.event_type = 'fee_disposal'
+              AND ce.is_taxable = 1
+              AND ce.timestamp <= ?
+              AND ce.vtx_id NOT IN (SELECT vtx_id FROM transfer_vtx_ids)
+            GROUP BY ce.wallet_id, ce.asset
+        )
+        SELECT
+            COALESCE(w.name, t.source) AS wallet_name,
+            t.asset,
+            SUM(CASE
+                WHEN t.transaction_type IN ('buy','transfer_in','deposit','income')
+                    THEN CAST(t.amount AS REAL)
+                WHEN t.transaction_type IN ('sell','transfer_out','withdrawal','spend','fee')
+                    THEN -CAST(t.amount AS REAL)
+                ELSE 0
+            END) - COALESCE(MAX(fda.adj), 0) AS net_units
+        FROM transactions t
+        LEFT JOIN wallets w ON t.wallet_id = w.id
+        LEFT JOIN fee_disposal_adj fda ON fda.wallet_id = t.wallet_id AND fda.asset = t.asset
+        WHERE t.timestamp <= ?
+          AND t.asset IN (
+            SELECT asset FROM acb_state
+            WHERE id IN (SELECT MAX(id) FROM acb_state GROUP BY asset)
+              AND CAST(units AS REAL) > 0
+        )
+        GROUP BY wallet_name, t.asset
+        HAVING net_units > 0.00000001
+        ORDER BY wallet_name, t.asset
+        """,
+        (year_end, year_end),
+    ).fetchall()
+
+    wallet_assets: dict[str, list[Any]] = {}
+    for r in wallet_rows:
+        wallet_assets.setdefault(r["wallet_name"], []).append(r)
+
+    # External wallets — net units held in wallets flagged via `stir external`.
+    # external-out: units left a tracked wallet → positive for the external wallet
+    # external-in:  units returned to a tracked wallet → negative for the external wallet
+    ext_rows = conn.execute(
+        """
+        SELECT
+            tor.external_wallet AS wallet_name,
+            t.asset,
+            SUM(CASE
+                WHEN tor.action = 'external-out' THEN  CAST(t.amount AS REAL)
+                WHEN tor.action = 'external-in'  THEN -CAST(t.amount AS REAL)
+                ELSE 0
+            END) AS net_units
+        FROM transfer_overrides tor
+        JOIN transactions t ON tor.tx_id_a = t.id
+        WHERE tor.action IN ('external-out', 'external-in')
+          AND tor.external_wallet != ''
+          AND t.asset IN (
+              SELECT asset FROM acb_state
+              WHERE id IN (SELECT MAX(id) FROM acb_state GROUP BY asset)
+                AND CAST(units AS REAL) > 0
+          )
+        GROUP BY tor.external_wallet, t.asset
+        HAVING net_units > 0.00000001
+        ORDER BY tor.external_wallet, t.asset
+        """
+    ).fetchall()
+    for r in ext_rows:
+        wallet_assets.setdefault(r["wallet_name"], []).append(r)
+
+    for wallet_name, rows in wallet_assets.items():
+        emit(MessageCode.BOIL_SUMMARY_WALLET_HEADER, name=wallet_name)
+        emit(MessageCode.BOIL_SUMMARY_HOLDINGS_HEADER)
+        for r in rows:
+            u = float(r["net_units"])
+            acb_pu = per_unit_acb.get(r["asset"], 0.0)
+            wallet_acb = u * acb_pu
+            print(
+                f"    {r['asset']:<6} {u:>14.8f} units"
+                f"   ACB: {wallet_acb:>12,.2f} CAD"
+                f"   ({acb_pu:>12,.2f} CAD/unit)"
+            )
+
+
 def _print_summary(conn: object, batch_name: str) -> None:
     """Print a summary of row counts written to the batch."""
     assert isinstance(conn, sqlite3.Connection)
@@ -482,6 +941,8 @@ def _print_summary(conn: object, batch_name: str) -> None:
         sign = "+" if net >= 0 else ""
         print(f"\n  Realised gain/loss:    {sign}{net:,.2f} CAD (before inclusion rate)")
 
+    _print_income_and_costs(conn)
+
     # Year-end holdings — cost basis for open positions.
     holdings = conn.execute(
         """
@@ -494,15 +955,20 @@ def _print_summary(conn: object, batch_name: str) -> None:
     ).fetchall()
     if holdings:
         emit(MessageCode.BOIL_SUMMARY_HOLDINGS_HEADER)
+        per_unit_acb: dict[str, float] = {}
         for h in holdings:
             units_val = float(h["units"])
             cost_val = float(h["pool_cost"])
             per_unit = cost_val / units_val if units_val else 0.0
+            per_unit_acb[h["asset"]] = per_unit
             print(
                 f"    {h['asset']:<6} {units_val:>14.8f} units"
                 f"   ACB: {cost_val:>12,.2f} CAD"
                 f"   ({per_unit:>12,.2f} CAD/unit)"
             )
+
+        tax_year = repo.read_tax_year(conn)
+        _print_wallet_holdings(conn, per_unit_acb, tax_year)
 
     # Superficial losses — show details if any were found.
     sld_rows = conn.execute(

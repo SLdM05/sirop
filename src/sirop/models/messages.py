@@ -46,6 +46,13 @@ class MessageCode(StrEnum):
     TAP_FOLDER_FILE_UNKNOWN = "tap.folder.file_unknown"
     TAP_FOLDER_ALL_UNKNOWN = "tap.folder.all_unknown"
     TAP_FOLDER_ABORTED = "tap.folder.aborted"
+    TAP_WALLET_CONFLICT_ABORTED = "tap.wallet.conflict_aborted"
+    TAP_WALLETFOLDER_NO_SUBFOLDERS = "tap.walletfolder.no_subfolders"
+    TAP_WALLETFOLDER_HEADER = "tap.walletfolder.header"
+    TAP_WALLETFOLDER_SUBFOLDER_ITEM = "tap.walletfolder.subfolder_item"
+    TAP_WALLETFOLDER_SUBFOLDER_EMPTY = "tap.walletfolder.subfolder_empty"
+    TAP_WALLETFOLDER_NO_CSV_FOUND = "tap.walletfolder.no_csv_found"
+    TAP_WALLETFOLDER_ABORTED = "tap.walletfolder.aborted"
 
     # ── boil ──────────────────────────────────────────────────────────────────
     BOIL_ERROR_NOT_TAPPED = "boil.error.not_tapped"
@@ -62,9 +69,17 @@ class MessageCode(StrEnum):
     BOIL_TRANSFER_MATCH_UNMATCHED_WITHDRAWAL = "boil.transfer_match.unmatched_withdrawal"
     BOIL_TRANSFER_MATCH_UNMATCHED_DEPOSIT = "boil.transfer_match.unmatched_deposit"
     BOIL_WARNING_FUTURE_YEAR_DISPOSITIONS = "boil.warning.future_year_dispositions"
+    BOIL_ACB_POOL_UNDERRUN = "boil.acb.pool_underrun"
     BOIL_SUMMARY_COMPLETE = "boil.summary.complete"
     BOIL_SUMMARY_HOLDINGS_HEADER = "boil.summary.holdings_header"
+    BOIL_SUMMARY_WALLET_HEADER = "boil.summary.wallet_header"
     BOIL_SUMMARY_STIR_HINT = "boil.summary.stir_hint"
+    BOIL_AUDIT_WRITTEN = "boil.audit.written"
+    BOIL_AUDIT_ERROR_NOT_READY = "boil.audit.error.not_ready"
+    BOIL_GRAPH_MATCH_FOUND = "boil.graph.match_found"
+    BOIL_GRAPH_TRAVERSAL_UNAVAILABLE = "boil.graph.traversal_unavailable"
+    BOIL_GRAPH_PRIVACY_WARNING = "boil.graph.privacy_warning"
+    BOIL_GRAPH_PRIVACY_SKIPPED = "boil.graph.privacy_skipped"
 
     # ── stir ──────────────────────────────────────────────────────────────────
     STIR_ERROR_NOT_NORMALIZED = "stir.error.not_normalized"
@@ -73,6 +88,10 @@ class MessageCode(StrEnum):
     STIR_UNLINK_APPLIED = "stir.unlink_applied"
     STIR_CLEAR_APPLIED = "stir.clear_applied"
     STIR_EXIT = "stir.exit"
+    STIR_DESTINATION_SAVED = "stir.destination_saved"
+    STIR_ERROR_DESTINATION_NOT_BTC = "stir.error.destination_not_btc"
+    STIR_ERROR_DESTINATION_HAS_TXID = "stir.error.destination_has_txid"
+    STIR_ERROR_DESTINATION_INVALID_TXID = "stir.error.destination_invalid_txid"
 
     # ── list ──────────────────────────────────────────────────────────────────
     LIST_NO_BATCHES = "list.no_batches"

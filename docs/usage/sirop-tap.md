@@ -283,6 +283,33 @@ Detected format: Shakepay
 Tapped 31 transaction(s) from shakepay_trading.csv [Shakepay] into 'my2025tax'.
 ```
 
+**Two hardware wallets (both Sparrow) — conflict prompt on second tap:**
+
+When `--wallet` is omitted and the auto-derived wallet name already exists, sirop
+asks before appending. This prevents silently merging two different physical wallets
+into one, which would break transfer matching.
+
+```
+$ sirop tap ~/Downloads/ledger-cold.csv
+Detected format: Sparrow Wallet
+Tapped 18 transaction(s) from ledger-cold.csv [Sparrow Wallet] into 'my2025tax'.
+
+$ sirop tap ~/Downloads/trezor-hot.csv
+Detected format: Sparrow Wallet
+
+Wallet "sparrow" already exists. Append to it? [Y/n] (use --wallet NAME to create a new wallet) n
+Tap cancelled. Use --wallet NAME to import into a new wallet.
+
+$ sirop tap ~/Downloads/trezor-hot.csv --wallet trezor-hot
+Detected format: Sparrow Wallet
+Tapped 9 transaction(s) from trezor-hot.csv [Sparrow Wallet] into 'my2025tax'.
+```
+
+Answering `Y` or pressing Enter appends to the existing wallet (the default — correct
+when tapping multiple date-range exports from the same physical wallet). Answering `n`
+aborts with a hint to re-run with `--wallet`. Non-interactive stdin (EOFError) is
+treated as `Y` so scripted pipelines are unaffected.
+
 ---
 
 ## Error cases
@@ -296,6 +323,7 @@ Tapped 31 transaction(s) from shakepay_trading.csv [Shakepay] into 'my2025tax'.
 | CSV parse error (bad value) | `error: failed to parse <file>: Cannot parse AMOUNT '???' …` |
 | Folder with no CSV files | *(output)* `No CSV files found in <path>.` |
 | Folder where all files are unrecognised | *(output)* `No files could be identified — nothing to tap.` |
+| Wallet conflict declined | *(output)* `Tap cancelled. Use --wallet NAME to import into a new wallet.` |
 
 ---
 

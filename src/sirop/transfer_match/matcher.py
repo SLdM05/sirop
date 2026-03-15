@@ -14,8 +14,10 @@ Design notes
 ------------
 - **txid matching** is the primary matching signal — if both legs (withdrawal
   and deposit) carry the same on-chain txid, they are definitively paired.
-  Applies to: Shakepay ``crypto cashout`` / ``crypto purchase`` ↔ Sparrow.
-  Both Shakepay row types carry a real ``Blockchain Transaction ID``.
+  Note: Shakepay's 2025 export format removed the "Blockchain Transaction ID"
+  column, so Shakepay withdrawals no longer carry a real txid.  Their
+  Description column contains the recipient Bitcoin address instead, which
+  the Shakepay importer stores in ``notes`` (not ``txid``) for use by Pass 1.25.
 
 - **Amount + timestamp proximity** is the secondary (and only available)
   signal for sources that do not export the blockchain txid.  NDAX is the
@@ -47,21 +49,26 @@ from datetime import timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
+from sirop.config.settings import get_settings
 from sirop.models.disposition import IncomeEvent
 from sirop.models.enums import TransactionType
 from sirop.models.event import ClassifiedEvent
 from sirop.models.messages import MessageCode
+from sirop.transfer_match.graph_analysis import find_graph_matches, resolve_withdrawal_txids
 from sirop.utils.logging import get_logger
 from sirop.utils.messages import emit
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from sirop.models.override import TransferOverride
     from sirop.models.transaction import Transaction
+    from sirop.node.models import GraphMatch
 
 logger = get_logger(__name__)
 
 # Maximum time difference between a withdrawal and its matching deposit.
-MATCH_WINDOW_HOURS: int = 4
+MATCH_WINDOW_HOURS: int = 8
 
 # Relative tolerance for amount matching (e.g. 0.01 = 1% difference allowed).
 # Covers typical Bitcoin network fees relative to the transfer amount.
@@ -87,7 +94,9 @@ def match_transfers(  # noqa: PLR0912 PLR0915
     txs: list[Transaction],
     overrides: list[TransferOverride] | None = None,
     tax_year: int | None = None,
-) -> tuple[list[ClassifiedEvent], list[IncomeEvent]]:
+    graph_traversal_allowed: bool = True,
+    on_graph_progress: Callable[[int, int, int, int], None] | None = None,
+) -> tuple[list[ClassifiedEvent], list[IncomeEvent], list[GraphMatch]]:
     """Classify *txs* into taxable events and income sub-records.
 
     Parameters
@@ -98,6 +107,11 @@ def match_transfers(  # noqa: PLR0912 PLR0915
         Optional user-specified link/unlink decisions from the ``stir`` command.
         Forced links are applied before auto-matching; forced unlinks prevent
         specific pairs from being auto-matched.
+    graph_traversal_allowed:
+        When ``False``, Pass 1b (BTC UTXO graph traversal) is skipped even if
+        ``BTC_TRAVERSAL_MAX_HOPS > 0``.  Set to ``False`` when the configured
+        Mempool URL is a public host and the user has not confirmed the privacy
+        risk (interactively or via ``BTC_TRAVERSAL_ALLOW_PUBLIC=true``).
 
     Returns
     -------
@@ -166,6 +180,34 @@ def match_transfers(  # noqa: PLR0912 PLR0915
             wallet_label,
         )
 
+        # Emit a fee micro-disposal.  Prefer the user-recorded implied fee; fall
+        # back to the exchange-reported fee_crypto (same pattern as Pass 0b).
+        _ext_fee = (
+            ov.implied_fee_crypto
+            if ov.implied_fee_crypto > Decimal("0")
+            else (tx.fee_crypto if tx.fee_crypto and tx.fee_crypto > Decimal("0") else None)
+        )
+        if _ext_fee and tx.cad_value > Decimal("0"):
+            cad_rate = tx.cad_value / tx.amount if tx.amount else Decimal("0")
+            fee_proceeds = _ext_fee * cad_rate
+            fee_disposals.append(
+                ClassifiedEvent(
+                    id=0,
+                    vtx_id=tx.id,
+                    timestamp=tx.timestamp,
+                    event_type="fee_disposal",
+                    asset=tx.asset,
+                    amount=_ext_fee,
+                    cad_proceeds=fee_proceeds,
+                    cad_cost=None,
+                    cad_fee=None,
+                    txid=tx.txid,
+                    source=tx.source,
+                    is_taxable=True,
+                    wallet_id=tx.wallet_id,
+                )
+            )
+
     # --- Pass 0b: apply forced links ---
     for ov in overrides or []:
         if ov.action != "link":
@@ -216,6 +258,7 @@ def match_transfers(  # noqa: PLR0912 PLR0915
                     txid=outgoing.txid,
                     source=outgoing.source,
                     is_taxable=True,
+                    wallet_id=outgoing.wallet_id,
                 )
             )
         else:
@@ -238,6 +281,7 @@ def match_transfers(  # noqa: PLR0912 PLR0915
                         txid=outgoing.txid,
                         source=outgoing.source,
                         is_taxable=True,
+                        wallet_id=outgoing.wallet_id,
                     )
                 )
 
@@ -252,14 +296,35 @@ def match_transfers(  # noqa: PLR0912 PLR0915
         if match is None:
             continue
 
+        # Warn if both legs share the same wallet — likely coin consolidation,
+        # not a true inter-wallet transfer. Still treated as a transfer.
+        if (
+            tx.wallet_id is not None
+            and match.wallet_id is not None
+            and tx.wallet_id == match.wallet_id
+        ):
+            logger.warning(
+                "transfer_match: same-wallet transfer in '%s' (wallet_id=%d) —"
+                " possible coin consolidation; treating as transfer",
+                tx.source,
+                tx.wallet_id,
+            )
+
         # Mark both legs as paired.
         paired_ids.add(tx.id)
         paired_ids.add(match.id)
 
-        # Emit a fee micro-disposition if the withdrawal carried a network fee.
-        if tx.fee_crypto and tx.fee_crypto > Decimal("0") and tx.cad_value > Decimal("0"):
+        # Emit a fee micro-disposition for the amount that left the outgoing wallet
+        # but did not arrive at the incoming wallet (network fee, miner fee, or
+        # multi-payee output where only one leg is visible).
+        # Prefer the observed on-chain difference; fall back to exchange-reported fee.
+        _observed_diff = tx.amount - match.amount
+        _fee_amount = (
+            _observed_diff if _observed_diff > Decimal("0") else (tx.fee_crypto or Decimal("0"))
+        )
+        if _fee_amount > Decimal("0") and tx.cad_value > Decimal("0"):
             cad_rate = tx.cad_value / tx.amount if tx.amount else Decimal("0")
-            fee_proceeds = tx.fee_crypto * cad_rate
+            fee_proceeds = _fee_amount * cad_rate
             fee_disposals.append(
                 ClassifiedEvent(
                     id=0,
@@ -267,15 +332,151 @@ def match_transfers(  # noqa: PLR0912 PLR0915
                     timestamp=tx.timestamp,
                     event_type="fee_disposal",
                     asset=tx.asset,
-                    amount=tx.fee_crypto,
+                    amount=_fee_amount,
                     cad_proceeds=fee_proceeds,
                     cad_cost=None,
                     cad_fee=None,
                     txid=tx.txid,
                     source=tx.source,
                     is_taxable=True,
+                    wallet_id=tx.wallet_id,
                 )
             )
+
+    # --- Passes 1.25 and 1b: mempool-based transfer resolution ---
+    # Both contact the Mempool REST API and share the same privacy gate
+    # (BTC_TRAVERSAL_MAX_HOPS > 0 and caller-confirmed graph_traversal_allowed).
+    # Errors are caught so the pipeline degrades gracefully when the node is
+    # unreachable or BTC_TRAVERSAL_MAX_HOPS is not configured.
+    graph_matches: list[GraphMatch] = []
+    _settings = get_settings()
+    if _settings.btc_traversal_max_hops > 0 and graph_traversal_allowed:
+        # Pass 1.25 — address-based txid resolution.
+        # For Shakepay withdrawals where the Description held a Bitcoin address
+        # (e.g. "Bitcoin address bc1q…"), the importer stores that address in
+        # notes as "Sent to: bc1q…" and sets txid=None.  Here we query mempool
+        # for that address's transactions to discover the real on-chain txid,
+        # then match it against unmatched deposits by txid.
+        _addr_withdrawals = [
+            t
+            for t in sorted_txs
+            if t.tx_type in _OUTGOING and t.id not in paired_ids and "Sent to: " in (t.notes or "")
+        ]
+        if _addr_withdrawals:
+            try:
+                _resolved = resolve_withdrawal_txids(
+                    _addr_withdrawals,
+                    _settings.btc_mempool_url,
+                    _settings.btc_traversal_request_delay,
+                )
+            except Exception:
+                logger.warning("transfer_match: address-based txid resolution failed — skipping")
+                _resolved = {}
+            for _w in _addr_withdrawals:
+                _rtxid = _resolved.get(_w.id)
+                if not _rtxid or _w.id in paired_ids:
+                    continue
+                for _dep in sorted_txs:
+                    if _dep.id in paired_ids:
+                        continue
+                    if _dep.tx_type not in _INCOMING:
+                        continue
+                    if _dep.asset != _w.asset:
+                        continue
+                    if _dep.txid == _rtxid:
+                        paired_ids.add(_w.id)
+                        paired_ids.add(_dep.id)
+                        logger.info(
+                            "transfer_match: Pass 1.25 address-lookup match"
+                            " — withdrawal %d → deposit %d",
+                            _w.id,
+                            _dep.id,
+                        )
+                        _obs_diff = _w.amount - _dep.amount
+                        _fee_amt = (
+                            _obs_diff
+                            if _obs_diff > Decimal("0")
+                            else (_w.fee_crypto or Decimal("0"))
+                        )
+                        if _fee_amt > Decimal("0") and _w.cad_value > Decimal("0"):
+                            _cad_rate = _w.cad_value / _w.amount if _w.amount else Decimal("0")
+                            fee_disposals.append(
+                                ClassifiedEvent(
+                                    id=0,
+                                    vtx_id=_w.id,
+                                    timestamp=_w.timestamp,
+                                    event_type="fee_disposal",
+                                    asset=_w.asset,
+                                    amount=_fee_amt,
+                                    cad_proceeds=_fee_amt * _cad_rate,
+                                    cad_cost=None,
+                                    cad_fee=None,
+                                    txid=_w.txid,
+                                    source=_w.source,
+                                    is_taxable=True,
+                                    wallet_id=_w.wallet_id,
+                                )
+                            )
+                        break
+
+        # Pass 1b — BTC graph traversal for remaining unmatched txid transactions.
+        _unmatched_withdrawals = [
+            t for t in sorted_txs if t.tx_type in _OUTGOING and t.id not in paired_ids and t.txid
+        ]
+        _unmatched_deposits = [
+            t for t in sorted_txs if t.tx_type in _INCOMING and t.id not in paired_ids and t.txid
+        ]
+        if _unmatched_withdrawals or _unmatched_deposits:
+            try:
+                graph_matches = find_graph_matches(
+                    unmatched_withdrawals=_unmatched_withdrawals,
+                    unmatched_deposits=_unmatched_deposits,
+                    mempool_url=_settings.btc_mempool_url,
+                    max_hops=_settings.btc_traversal_max_hops,
+                    request_delay=_settings.btc_traversal_request_delay,
+                    on_progress=on_graph_progress,
+                )
+            except Exception:
+                logger.warning(
+                    "transfer_match: graph traversal raised an unexpected error — skipping"
+                )
+                emit(MessageCode.BOIL_GRAPH_TRAVERSAL_UNAVAILABLE)
+                graph_matches = []
+
+            for gm in graph_matches:
+                paired_ids.add(gm.deposit_db_id)
+                paired_ids.add(gm.withdrawal_db_id)
+                emit(
+                    MessageCode.BOIL_GRAPH_MATCH_FOUND,
+                    hops=gm.hops,
+                    direction=gm.direction,
+                    fee=format(gm.fee_crypto, "f"),
+                )
+                # Emit fee micro-disposal — same pattern as Pass 1.
+                withdrawal_tx = tx_by_id[gm.withdrawal_db_id]
+                if gm.fee_crypto > Decimal("0") and withdrawal_tx.cad_value > Decimal("0"):
+                    cad_rate = (
+                        withdrawal_tx.cad_value / withdrawal_tx.amount
+                        if withdrawal_tx.amount
+                        else Decimal("0")
+                    )
+                    fee_disposals.append(
+                        ClassifiedEvent(
+                            id=0,
+                            vtx_id=withdrawal_tx.id,
+                            timestamp=withdrawal_tx.timestamp,
+                            event_type="fee_disposal",
+                            asset=withdrawal_tx.asset,
+                            amount=gm.fee_crypto,
+                            cad_proceeds=gm.fee_crypto * cad_rate,
+                            cad_cost=None,
+                            cad_fee=None,
+                            txid=withdrawal_tx.txid,
+                            source=withdrawal_tx.source,
+                            is_taxable=True,
+                            wallet_id=withdrawal_tx.wallet_id,
+                        )
+                    )
 
     # --- Pass 2: convert remaining transactions to ClassifiedEvents ---
     events: list[ClassifiedEvent] = []
@@ -301,6 +502,7 @@ def match_transfers(  # noqa: PLR0912 PLR0915
                     txid=tx.txid,
                     source=tx.source,
                     is_taxable=False,
+                    wallet_id=tx.wallet_id,
                 )
             )
             continue
@@ -310,6 +512,31 @@ def match_transfers(  # noqa: PLR0912 PLR0915
             events.append(evt)
         if income is not None:
             income_events.append(income)
+
+        # Emit a fee micro-disposal for any crypto fee paid on this transaction.
+        # Matched transfer legs already get their fee_disposal in Pass 1.
+        # For buys, sells, and unmatched withdrawals/deposits the fee_crypto
+        # represents units of the asset that were spent (e.g. SOL paid as an
+        # NDAX TRADE/FEE or WITHDRAW/FEE row) and must be removed from the pool.
+        if tx.fee_crypto and tx.fee_crypto > Decimal("0") and tx.cad_value > Decimal("0"):
+            _cad_rate = tx.cad_value / tx.amount if tx.amount else Decimal("0")
+            fee_disposals.append(
+                ClassifiedEvent(
+                    id=0,
+                    vtx_id=tx.id,
+                    timestamp=tx.timestamp,
+                    event_type="fee_disposal",
+                    asset=tx.asset,
+                    amount=tx.fee_crypto,
+                    cad_proceeds=tx.fee_crypto * _cad_rate,
+                    cad_cost=None,
+                    cad_fee=None,
+                    txid=tx.txid,
+                    source=tx.source,
+                    is_taxable=True,
+                    wallet_id=tx.wallet_id,
+                )
+            )
 
     # Insert fee micro-disposals in chronological order.
     events.extend(fee_disposals)
@@ -328,7 +555,7 @@ def match_transfers(  # noqa: PLR0912 PLR0915
     if paired_ids:
         logger.info("%d transfer legs paired", len(paired_ids))
 
-    return events, income_events
+    return events, income_events, graph_matches
 
 
 # ---------------------------------------------------------------------------
@@ -452,6 +679,7 @@ def _classify(
             txid=tx.txid,
             source=tx.source,
             is_taxable=False,
+            wallet_id=tx.wallet_id,
         ),
         None,
     )
@@ -487,6 +715,7 @@ def _classify_acquisition(tx: Transaction, tax_year: int | None = None) -> Class
         txid=tx.txid,
         source=tx.source,
         is_taxable=tx.cad_value > Decimal("0"),
+        wallet_id=tx.wallet_id,
     )
 
 
@@ -507,6 +736,12 @@ def _classify_disposal(tx: Transaction, tax_year: int | None = None) -> Classifi
             asset=tx.asset,
             date=tx.timestamp.date(),
         )
+    # Use only the exchange-reported CAD fee.  Crypto fees (fee_crypto > 0) are
+    # emitted as separate fee_disposal events in the Pass 2 loop so that the ACB
+    # pool is correctly reduced by the fee units rather than just deriving a CAD
+    # deduction that leaves those units phantom in the pool.
+    fee_cad = tx.fee_cad or None
+
     return ClassifiedEvent(
         id=0,
         vtx_id=tx.id,
@@ -516,10 +751,11 @@ def _classify_disposal(tx: Transaction, tax_year: int | None = None) -> Classifi
         amount=tx.amount,
         cad_proceeds=tx.cad_value,
         cad_cost=None,
-        cad_fee=tx.fee_cad if tx.fee_cad else None,
+        cad_fee=fee_cad,
         txid=tx.txid,
         source=tx.source,
         is_taxable=tx.cad_value > Decimal("0"),
+        wallet_id=tx.wallet_id,
     )
 
 
@@ -539,6 +775,7 @@ def _classify_income(tx: Transaction) -> tuple[ClassifiedEvent, IncomeEvent]:
         txid=tx.txid,
         source=tx.source,
         is_taxable=True,
+        wallet_id=tx.wallet_id,
     )
     income = IncomeEvent(
         id=0,

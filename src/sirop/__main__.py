@@ -17,7 +17,7 @@ from sirop.cli.create import handle_create
 from sirop.cli.list_batches import handle_list
 from sirop.cli.stir import handle_stir
 from sirop.cli.switch import handle_switch
-from sirop.cli.tap import handle_tap
+from sirop.cli.tap import handle_tap, handle_tap_walletfolder
 from sirop.utils.logging import configure_logging
 
 
@@ -52,6 +52,18 @@ def _build_parser() -> argparse.ArgumentParser:
             "Wallet name to assign these transactions to (e.g. 'ledger-cold', 'shakepay-savings'). "
             "Defaults to the detected source format name. Use this to distinguish two accounts "
             "at the same exchange, or to label a hardware wallet before tapping its CSV."
+        ),
+    )
+    tap_p.add_argument(
+        "--walletfolder",
+        "--wf",
+        action="store_true",
+        dest="walletfolder",
+        default=False,
+        help=(
+            "Treat each immediate subfolder of the given directory as a separate wallet. "
+            "CSV files in each subfolder are imported under a wallet named after that subfolder. "
+            "Example: tap data/ --wf  imports data/ledger-cold/*.csv as wallet 'ledger-cold'."
         ),
     )
 
@@ -123,6 +135,27 @@ def _build_parser() -> argparse.ArgumentParser:
             "Choices: normalize, verify, transfer_match, boil, superficial_loss"
         ),
     )
+    boil_p.add_argument(
+        "--audit",
+        action="store_true",
+        default=False,
+        help=(
+            "After calculation, write a CSV ledger of all events and ACB math "
+            "to <DATA_DIR>/<batch>-audit.csv for manual verification in Excel."
+        ),
+    )
+    boil_p.add_argument(
+        "--allow-public-mempool",
+        dest="allow_public_mempool",
+        action="store_true",
+        default=False,
+        help=(
+            "Skip the interactive privacy prompt when BTC_MEMPOOL_URL points to a public "
+            "host. Use this in non-interactive environments after reviewing the privacy "
+            "implications (your txids will be sent to the public Mempool endpoint). "
+            "Equivalent to setting BTC_TRAVERSAL_ALLOW_PUBLIC=true in .env."
+        ),
+    )
 
     return parser
 
@@ -134,6 +167,8 @@ def main() -> None:
     configure_logging(verbose=args.verbose, debug=args.debug)
 
     if args.command == "tap":
+        if args.walletfolder:
+            sys.exit(handle_tap_walletfolder(args.file, args.source))
         sys.exit(handle_tap(args.file, args.source, getattr(args, "wallet", None)))
 
     elif args.command == "create":
@@ -158,7 +193,13 @@ def main() -> None:
         )
 
     elif args.command == "boil":
-        sys.exit(handle_boil(args.from_stage))
+        sys.exit(
+            handle_boil(
+                args.from_stage,
+                audit=args.audit,
+                allow_public_mempool=args.allow_public_mempool,
+            )
+        )
 
     else:
         parser.print_help()

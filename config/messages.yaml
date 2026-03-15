@@ -129,7 +129,7 @@ messages:
 
   tap.success:
     category: output
-    text: "Tapped {count} transaction(s) from {filename} [{fmt}] into '{batch}'.{skip_note}"
+    text: "Tapped {count} transaction(s) from {filename} [{fmt}] into '{batch}'.{wallet_note}{skip_note}"
 
   tap.folder.no_files:
     category: output
@@ -152,6 +152,34 @@ messages:
     text: "No files could be identified — nothing to tap."
 
   tap.folder.aborted:
+    category: output
+    text: "Tap cancelled."
+
+  tap.wallet.conflict_aborted:
+    category: output
+    text: "Tap cancelled. Use --wallet NAME to import into a new wallet."
+
+  tap.walletfolder.no_subfolders:
+    category: output
+    text: "No subfolders found in {path}."
+
+  tap.walletfolder.header:
+    category: output
+    text: "Found {count} wallet folder(s) in {path}:"
+
+  tap.walletfolder.subfolder_item:
+    category: output
+    text: "  {name}/  ({count} CSV file(s))"
+
+  tap.walletfolder.subfolder_empty:
+    category: output
+    text: "  {name}/  (no CSV files — will be skipped)"
+
+  tap.walletfolder.no_csv_found:
+    category: output
+    text: "No CSV files found in any subfolder — nothing to tap."
+
+  tap.walletfolder.aborted:
     category: output
     text: "Tap cancelled."
 
@@ -222,6 +250,11 @@ messages:
     code: W004
     text: "{count} disposal(s) dated after {tax_year}-12-31 — excluded from the {tax_year} report. Future-year acquisitions within the 30-day superficial loss window are still used for loss detection."
 
+  boil.acb.pool_underrun:
+    category: warning
+    code: W005
+    text: "ACB pool underrun for {asset} on {date} — attempted to dispose {attempted} but pool held only {available}. Pipeline continued with clamped value. Verify all imports are present and that transfers are correctly matched with 'sirop stir'."
+
   boil.summary.complete:
     category: output
     text: "\nBatch '{name}' pipeline complete."
@@ -230,9 +263,42 @@ messages:
     category: output
     text: "\n  Year-end holdings (cost basis):"
 
+  boil.summary.wallet_header:
+    category: output
+    text: "\n  {name}"
+
   boil.summary.stir_hint:
     category: output
     text: "  Use 'sirop stir' to link wallet transfers — {w} unmatched withdrawal(s) and {d} unmatched deposit(s)."
+
+  boil.audit.written:
+    category: output
+    text: "Audit CSV written → {path}  ({count} rows)"
+
+  boil.audit.error.not_ready:
+    category: error
+    code: E022
+    text: "Cannot write audit CSV: pipeline not complete. Run 'sirop boil' first."
+
+  boil.graph.match_found:
+    category: output
+    text: "Graph traversal matched transfer via {hops} hop(s) [{direction}] — fee {fee} BTC"
+
+  boil.graph.traversal_unavailable:
+    category: warning
+    code: W006
+    text: "BTC graph traversal failed — node unreachable or parse error; unmatched transfers treated as taxable. Check BTC_MEMPOOL_URL in .env."
+
+  boil.graph.privacy_warning:
+    category: warning
+    code: W007
+    text: "BTC_MEMPOOL_URL points to a public host. Graph traversal will send on-chain txids to {url} — the operator may log them and link your wallet activity to your IP address."
+
+  boil.graph.privacy_skipped:
+    category: warning
+    code: W008
+    text: "Graph traversal skipped — public Mempool endpoint not confirmed. Set BTC_TRAVERSAL_ALLOW_PUBLIC=true or use --allow-public-mempool to proceed."
+
 
   # ── stir ──────────────────────────────────────────────────────────────────
 
@@ -261,6 +327,25 @@ messages:
   stir.exit:
     category: output
     text: "Overrides saved. Run 'sirop boil --from transfer_match' to apply them."
+
+  stir.destination_saved:
+    category: output
+    text: "Destination txid saved for tx:{tx_id}. Run 'sirop boil --from transfer_match' to apply."
+
+  stir.error.destination_not_btc:
+    category: error
+    code: E022
+    text: "Transaction {tx_id} is {asset}, not BTC. Only BTC transactions can have a txid annotated."
+
+  stir.error.destination_has_txid:
+    category: error
+    code: E023
+    text: "Transaction {tx_id} already has a txid from its CSV import. Refusing to overwrite."
+
+  stir.error.destination_invalid_txid:
+    category: error
+    code: E024
+    text: "Invalid txid — must be exactly 64 lowercase hexadecimal characters."
 
   # ── list ──────────────────────────────────────────────────────────────────
 

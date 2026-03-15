@@ -36,12 +36,27 @@ _ROUNDING = Decimal("0.00000001")  # 8 decimal places
 
 
 class InsufficientUnitsError(Exception):
-    """Raised when a disposal exceeds the current pool balance.
+    """Kept for backwards-compatibility and tests.
 
-    This can occur if source data is incomplete (e.g. a sell was imported
-    without the corresponding buy, or a transfer was incorrectly treated
-    as a disposal).
+    No longer raised by the engine at runtime — pool underruns are now
+    handled as recoverable warnings (see ``PoolUnderrun``).
     """
+
+
+@dataclass(frozen=True)
+class PoolUnderrun:
+    """Structured record of a pool underrun detected during ACB calculation.
+
+    Returned by ``run()`` alongside the dispositions so the pipeline
+    coordinator can emit a user-facing warning without the engine calling
+    ``emit()`` directly.
+    """
+
+    asset: str
+    timestamp: datetime
+    event_type: str
+    attempted: Decimal
+    available: Decimal
 
 
 @dataclass(frozen=True)
@@ -55,7 +70,13 @@ class TaxRules:
 def run(
     events: list[ClassifiedEvent],
     tax_rules: TaxRules,
-) -> tuple[list[Disposition], list[ACBState]]:
+) -> tuple[
+    list[Disposition],
+    list[ACBState],
+    dict[str, ACBState],
+    dict[str, ClassifiedEvent],
+    list[PoolUnderrun],
+]:
     """Compute ACB and capital gains for all *events*.
 
     Parameters
@@ -69,15 +90,14 @@ def run(
 
     Returns
     -------
-    tuple[list[Disposition], list[ACBState]]
-        - First element: one ``Disposition`` per disposal event.
-        - Second element: ACB pool snapshots — one per disposal event,
-          in the same order.  The repository writes these to ``acb_state``.
-
-    Raises
-    ------
-    InsufficientUnitsError
-        When a disposal tries to sell more units than the pool holds.
+    Five-element tuple:
+        - ``list[Disposition]`` — one per disposal event.
+        - ``list[ACBState]`` — pool snapshots after each disposal (same order).
+        - ``dict[str, ACBState]`` — final pool state per asset.
+        - ``dict[str, ClassifiedEvent]`` — last processed event per asset
+          (used for year-end holdover snapshots).
+        - ``list[PoolUnderrun]`` — any pool underruns detected (empty when
+          all imports and transfer matches are correct).
     """
     # Per-asset ACB pools.  Keyed by asset symbol (e.g. "BTC").
     pools: dict[str, ACBState] = {}
@@ -85,8 +105,12 @@ def run(
     # Track acquisition years per asset so we can report "Various" when needed.
     acquisition_years: dict[str, set[int]] = {}
 
+    # Track the last event processed per asset for holdover snapshot event_id.
+    last_event: dict[str, ClassifiedEvent] = {}
+
     dispositions: list[Disposition] = []
     acb_states: list[ACBState] = []
+    underruns: list[PoolUnderrun] = []
 
     for event in sorted(events, key=lambda e: e.timestamp):
         asset = event.asset
@@ -100,12 +124,14 @@ def run(
         if event.event_type in {"buy", "income"}:
             pool = _process_acquisition(event, pool, acquisition_years[asset])
             pools[asset] = pool
+            last_event[asset] = event
 
         elif event.event_type in {"sell", "fee_disposal", "spend"}:
-            disp, new_pool = _process_disposal(event, pool, acquisition_years[asset])
+            disp, new_pool = _process_disposal(event, pool, acquisition_years[asset], underruns)
             pools[asset] = new_pool
             dispositions.append(disp)
             acb_states.append(new_pool)
+            last_event[asset] = event
 
         else:
             # Non-taxable events (transfers, fiat, other) are silently skipped.
@@ -117,7 +143,7 @@ def run(
         len(dispositions),
         len(pools),
     )
-    return dispositions, acb_states
+    return dispositions, acb_states, pools, last_event, underruns
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +200,7 @@ def _process_disposal(
     event: ClassifiedEvent,
     pool: ACBState,
     acq_years: set[int],
+    underruns: list[PoolUnderrun],
 ) -> tuple[Disposition, ACBState]:
     """Calculate gain/loss for a disposal event and return (Disposition, new pool).
 
@@ -190,14 +217,27 @@ def _process_disposal(
     # Guard against over-disposal — can indicate missing import data.
     tolerance = Decimal("0.00000001")  # allow for tiny floating-point drift
     if units > pool.total_units + tolerance:
-        raise InsufficientUnitsError(
-            f"Cannot dispose of {units} {event.asset}: "
-            f"pool only holds {pool.total_units} units. "
-            "Check that all buy transactions have been imported."
+        logger.warning(
+            "acb: pool underrun for %s on %s — attempted %s, available %s (%s); clamping",
+            event.asset,
+            event.timestamp.date(),
+            units,
+            pool.total_units,
+            event.event_type,
         )
-
-    # Clamp to pool size to handle dust-level rounding.
-    units = min(units, pool.total_units)
+        underruns.append(
+            PoolUnderrun(
+                asset=event.asset,
+                timestamp=event.timestamp,
+                event_type=event.event_type,
+                attempted=units,
+                available=pool.total_units,
+            )
+        )
+        units = pool.total_units
+    else:
+        # Clamp to pool size to handle dust-level rounding.
+        units = min(units, pool.total_units)
 
     acb_of_disposed = (pool.acb_per_unit_cad * units).quantize(_ROUNDING)
     gain_loss = proceeds - acb_of_disposed - selling_fees

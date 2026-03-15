@@ -14,7 +14,7 @@ from typing import Final
 
 # Bump this when the schema changes. The migration guard reads this value
 # and refuses to open a file whose schema_version doesn't match.
-SCHEMA_VERSION: Final[int] = 6
+SCHEMA_VERSION: Final[int] = 10
 
 # All pipeline stage names in execution order.
 PIPELINE_STAGES: Final[tuple[str, ...]] = (
@@ -125,7 +125,8 @@ CREATE TABLE IF NOT EXISTS raw_transactions (
     spot_rate           TEXT,               -- Decimal string or NULL (Shakepay spread calc)
     txid                TEXT,               -- blockchain txid or NULL
     extra_json          TEXT,               -- JSON blob for source-specific fields
-    wallet_id           INTEGER REFERENCES wallets(id)  -- v5: source wallet
+    wallet_id           INTEGER REFERENCES wallets(id),  -- v5: source wallet
+    notes               TEXT    NOT NULL DEFAULT ''  -- v9: label/annotation (e.g. Sparrow "Label")
 )
 """
 
@@ -182,7 +183,8 @@ CREATE TABLE IF NOT EXISTS verified_transactions (
     counterpart_id      INTEGER REFERENCES verified_transactions(id),
     node_verified       INTEGER NOT NULL DEFAULT 0,  -- 0=false, 1=true
     block_height        INTEGER,            -- NULL unless node_verified=1
-    confirmations       INTEGER             -- NULL unless node_verified=1
+    confirmations       INTEGER,            -- NULL unless node_verified=1
+    wallet_id           INTEGER REFERENCES wallets(id)  -- v7: source wallet
 )
 """
 
@@ -200,7 +202,8 @@ CREATE TABLE IF NOT EXISTS classified_events (
     cad_fee         TEXT,               -- Decimal string or NULL
     txid            TEXT,
     source          TEXT    NOT NULL,   -- origin exchange/wallet for traceability
-    is_taxable      INTEGER NOT NULL DEFAULT 1  -- 0=transfer, excluded from ACB engine
+    is_taxable      INTEGER NOT NULL DEFAULT 1,  -- 0=transfer, excluded from ACB engine
+    wallet_id       INTEGER REFERENCES wallets(id)  -- v7: source wallet FK
 )
 """
 
@@ -288,6 +291,27 @@ CREATE TABLE IF NOT EXISTS transfer_overrides (
 )
 """
 
+_GRAPH_TRANSFER_PAIRS_DDL = """
+CREATE TABLE IF NOT EXISTS graph_transfer_pairs (
+    withdrawal_id       INTEGER NOT NULL REFERENCES transactions(id),
+    deposit_id          INTEGER NOT NULL REFERENCES transactions(id),
+    hops                INTEGER NOT NULL,
+    direction           TEXT    NOT NULL,   -- 'backward' | 'forward'
+    fee_crypto          TEXT    NOT NULL,   -- Decimal string
+    deposit_vout_count  INTEGER NOT NULL DEFAULT 0,   -- v9: outputs on deposit tx
+    deposit_vin_count   INTEGER NOT NULL DEFAULT 0,   -- v9: inputs on deposit tx
+    PRIMARY KEY (withdrawal_id, deposit_id)
+)
+"""
+
+_TRANSACTION_TXID_OVERRIDES_DDL = """
+CREATE TABLE IF NOT EXISTS transaction_txid_overrides (
+    transaction_id  INTEGER PRIMARY KEY REFERENCES transactions(id),
+    txid            TEXT    NOT NULL,   -- 64-char lowercase hex blockchain txid
+    created_at      TEXT    NOT NULL    -- ISO 8601 UTC
+)
+"""
+
 _AUDIT_LOG_DDL = """
 CREATE TABLE IF NOT EXISTS audit_log (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -336,6 +360,8 @@ _ALL_DDL: Final[tuple[str, ...]] = (
     _DISPOSITIONS_ADJUSTED_DDL,
     _INCOME_EVENTS_DDL,
     _TRANSFER_OVERRIDES_DDL,
+    _GRAPH_TRANSFER_PAIRS_DDL,
+    _TRANSACTION_TXID_OVERRIDES_DDL,
     _AUDIT_LOG_DDL,
 )
 
@@ -421,5 +447,79 @@ def migrate_to_v6(conn: sqlite3.Connection) -> None:
     prices (USD and CAD) fetched from public APIs.  Because it is a brand-new
     table, ``CREATE TABLE IF NOT EXISTS`` inside ``create_tables`` is sufficient
     and no column-level ALTER TABLE statements are required.
+    """
+    create_tables(conn)
+
+
+def migrate_to_v7(conn: sqlite3.Connection) -> None:
+    """Apply v7 schema migrations to an existing batch file.
+
+    Idempotent — safe to call on fresh databases and already-migrated ones.
+    v7 adds ``wallet_id`` (FK → wallets) to ``verified_transactions`` and
+    ``classified_events`` so wallet identity is preserved all the way to the
+    ACB-engine inputs instead of being dropped at the verify stage.
+    """
+    with conn:
+        vtx_cols = {r[1] for r in conn.execute("PRAGMA table_info(verified_transactions)")}
+        if "wallet_id" not in vtx_cols:
+            conn.execute(
+                "ALTER TABLE verified_transactions"
+                " ADD COLUMN wallet_id INTEGER REFERENCES wallets(id)"
+            )
+
+        ce_cols = {r[1] for r in conn.execute("PRAGMA table_info(classified_events)")}
+        if "wallet_id" not in ce_cols:
+            conn.execute(
+                "ALTER TABLE classified_events ADD COLUMN wallet_id INTEGER REFERENCES wallets(id)"
+            )
+
+
+def migrate_to_v8(conn: sqlite3.Connection) -> None:
+    """Apply v8 schema migrations to an existing batch file.
+
+    Idempotent — safe to call on fresh databases and already-migrated ones.
+    v8 adds ``graph_transfer_pairs`` to persist the matched-pair identity and
+    hop metadata from graph-traversal matching so ``sirop stir`` can display
+    them.  Because it is a brand-new table, CREATE TABLE IF NOT EXISTS inside
+    ``create_tables`` is sufficient and no ALTER TABLE statements are required.
+    """
+    create_tables(conn)
+
+
+def migrate_to_v9(conn: sqlite3.Connection) -> None:
+    """Apply v9 schema migrations to an existing batch file.
+
+    Idempotent — safe to call on fresh databases and already-migrated ones.
+    v9 adds:
+    - ``raw_transactions.notes`` — label/annotation from wallet CSV (e.g. Sparrow "Label")
+    - ``graph_transfer_pairs.deposit_vout_count`` — output count of deposit tx
+    - ``graph_transfer_pairs.deposit_vin_count`` — input count of deposit tx
+    """
+    create_tables(conn)
+    with conn:
+        raw_cols = {r[1] for r in conn.execute("PRAGMA table_info(raw_transactions)")}
+        if "notes" not in raw_cols:
+            conn.execute("ALTER TABLE raw_transactions ADD COLUMN notes TEXT NOT NULL DEFAULT ''")
+        gtp_cols = {r[1] for r in conn.execute("PRAGMA table_info(graph_transfer_pairs)")}
+        if "deposit_vout_count" not in gtp_cols:
+            conn.execute(
+                "ALTER TABLE graph_transfer_pairs"
+                " ADD COLUMN deposit_vout_count INTEGER NOT NULL DEFAULT 0"
+            )
+        if "deposit_vin_count" not in gtp_cols:
+            conn.execute(
+                "ALTER TABLE graph_transfer_pairs"
+                " ADD COLUMN deposit_vin_count INTEGER NOT NULL DEFAULT 0"
+            )
+
+
+def migrate_to_v10(conn: sqlite3.Connection) -> None:
+    """Apply v10 schema migrations to an existing batch file.
+
+    Idempotent — safe to call on fresh databases and already-migrated ones.
+    v10 adds ``transaction_txid_overrides`` — a user-supplied blockchain txid
+    for transactions whose CSV export did not include one (e.g. NDAX withdrawals).
+    Because it is a brand-new table, CREATE TABLE IF NOT EXISTS inside
+    ``create_tables`` is sufficient and no ALTER TABLE statements are required.
     """
     create_tables(conn)

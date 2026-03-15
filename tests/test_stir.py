@@ -14,7 +14,13 @@ from decimal import Decimal
 
 import pytest
 
-from sirop.cli.stir import _cmd_external, _compute_implied_fee, _validate_wallet_name
+from sirop.cli.stir import (
+    _apply_txid_overrides,
+    _build_state,
+    _compute_implied_fee,
+    _parse_fee_amount,
+    _validate_wallet_name,
+)
 from sirop.db import repositories as repo
 from sirop.db.schema import create_tables, migrate_to_v5
 from sirop.models.enums import TransactionType
@@ -38,6 +44,8 @@ def _tx(  # noqa: PLR0913
     offset_hours: int = 0,
     source: str = "test",
     cad_value: str = "500",
+    fee_crypto: str = "0",
+    fee_cad: str = "0",
 ) -> Transaction:
     return Transaction(
         id=tx_id,
@@ -47,8 +55,8 @@ def _tx(  # noqa: PLR0913
         asset=asset,
         amount=Decimal(amount),
         cad_value=Decimal(cad_value),
-        fee_cad=Decimal("0"),
-        fee_crypto=Decimal("0"),
+        fee_cad=Decimal(fee_cad),
+        fee_crypto=Decimal(fee_crypto),
         txid=txid,
         is_transfer=False,
         counterpart_id=None,
@@ -339,7 +347,7 @@ class TestMatcherForcedLink:
         in_tx = _tx(2, TransactionType.DEPOSIT, amount="0.05", offset_hours=48, cad_value="3000")
         # These won't auto-match (amount mismatch + too far apart).
         override = _make_override(1, 2, "link")
-        events, _income = match_transfers([out_tx, in_tx], overrides=[override])
+        events, _income, _ = match_transfers([out_tx, in_tx], overrides=[override])
 
         transfer_events = [e for e in events if e.event_type == "transfer"]
         assert len(transfer_events) == 2  # noqa: PLR2004
@@ -355,7 +363,7 @@ class TestMatcherForcedLink:
             cad_value="30000",
         )
         override = _make_override(1, 2, "link")
-        events, _ = match_transfers([out_tx, in_tx], overrides=[override])
+        events, _, _ = match_transfers([out_tx, in_tx], overrides=[override])
 
         transfer_events = [e for e in events if e.event_type == "transfer"]
         assert len(transfer_events) == 2  # noqa: PLR2004
@@ -366,7 +374,7 @@ class TestMatcherForcedLink:
         in_tx = _tx(2, TransactionType.DEPOSIT, amount="0.01", cad_value="498")
         # User has set implied_fee = 0.00005 (sent - received)
         override = _make_override(1, 2, "link", implied_fee="0.00005")
-        events, _ = match_transfers([out_tx, in_tx], overrides=[override])
+        events, _, _ = match_transfers([out_tx, in_tx], overrides=[override])
 
         fee_events = [e for e in events if e.event_type == "fee_disposal"]
         assert len(fee_events) == 1
@@ -385,7 +393,7 @@ class TestMatcherForcedLink:
             _make_override(1, 3, "link"),
             _make_override(2, 3, "link"),
         ]
-        events, _ = match_transfers([out1, out2, in1], overrides=overrides)
+        events, _, _ = match_transfers([out1, out2, in1], overrides=overrides)
 
         # out1 and in1 are a forced-link transfer pair.
         transfers = [e for e in events if e.event_type == "transfer"]
@@ -409,7 +417,7 @@ class TestMatcherExternalOverrides:
         """A withdrawal marked external-out becomes a non-taxable 'external' event."""
         out_tx = _tx(1, TransactionType.WITHDRAWAL, amount="0.01", cad_value="500")
         override = _make_override(1, None, "external-out", external_wallet="ledger")
-        events, _ = match_transfers([out_tx], overrides=[override])
+        events, _, _ = match_transfers([out_tx], overrides=[override])
 
         ext_events = [e for e in events if e.event_type == "external"]
         assert len(ext_events) == 1
@@ -420,7 +428,7 @@ class TestMatcherExternalOverrides:
         """A deposit marked external-in becomes a non-taxable 'external' event."""
         in_tx = _tx(2, TransactionType.DEPOSIT, amount="0.05", cad_value="2500")
         override = _make_override(2, None, "external-in", external_wallet="old-exchange")
-        events, _ = match_transfers([in_tx], overrides=[override])
+        events, _, _ = match_transfers([in_tx], overrides=[override])
 
         ext_events = [e for e in events if e.event_type == "external"]
         assert len(ext_events) == 1
@@ -433,7 +441,7 @@ class TestMatcherExternalOverrides:
         )
         in_tx = _tx(2, TransactionType.DEPOSIT, txid="abc123fake", amount="0.01", cad_value="500")
         override = _make_override(1, None, "external-out")
-        events, _ = match_transfers([out_tx, in_tx], overrides=[override])
+        events, _, _ = match_transfers([out_tx, in_tx], overrides=[override])
 
         # out_tx (id:1) is external; in_tx (id:2) is unmatched → buy
         ext_events = [e for e in events if e.event_type == "external"]
@@ -456,7 +464,7 @@ class TestMatcherForcedUnlink:
         in_tx = _tx(2, TransactionType.DEPOSIT, txid="abc123fake", amount="0.01", cad_value="500")
 
         override = _make_override(1, 2, "unlink")
-        events, _ = match_transfers([out_tx, in_tx], overrides=[override])
+        events, _, _ = match_transfers([out_tx, in_tx], overrides=[override])
 
         # Both should be taxable (sell + buy), not transfers.
         taxable = [e for e in events if e.is_taxable]
@@ -471,7 +479,7 @@ class TestMatcherForcedUnlink:
         in_tx = _tx(2, TransactionType.DEPOSIT, amount="0.01", offset_hours=1, cad_value="500")
 
         override = _make_override(1, 2, "unlink")
-        events, _ = match_transfers([out_tx, in_tx], overrides=[override])
+        events, _, _ = match_transfers([out_tx, in_tx], overrides=[override])
 
         taxable = [e for e in events if e.is_taxable]
         assert len(taxable) == 2  # noqa: PLR2004
@@ -483,7 +491,7 @@ class TestMatcherForcedUnlink:
 
         # Reversed order compared to the default (out, in) convention.
         override = _make_override(2, 1, "unlink")
-        events, _ = match_transfers([out_tx, in_tx], overrides=[override])
+        events, _, _ = match_transfers([out_tx, in_tx], overrides=[override])
 
         taxable = [e for e in events if e.is_taxable]
         assert len(taxable) == 2  # noqa: PLR2004
@@ -500,7 +508,7 @@ class TestMatcherNoOverrides:
         out_tx = _tx(1, TransactionType.WITHDRAWAL, txid="feedcafe", amount="0.01", cad_value="500")
         in_tx = _tx(2, TransactionType.DEPOSIT, txid="feedcafe", amount="0.01", cad_value="500")
 
-        events, _ = match_transfers([out_tx, in_tx])
+        events, _, _ = match_transfers([out_tx, in_tx])
         transfers = [e for e in events if e.event_type == "transfer"]
         assert len(transfers) == 2  # noqa: PLR2004
 
@@ -508,7 +516,7 @@ class TestMatcherNoOverrides:
         out_tx = _tx(1, TransactionType.WITHDRAWAL, amount="0.01", cad_value="500")
         in_tx = _tx(2, TransactionType.DEPOSIT, amount="0.01", offset_hours=1, cad_value="500")
 
-        events, _ = match_transfers([out_tx, in_tx])
+        events, _, _ = match_transfers([out_tx, in_tx])
         transfers = [e for e in events if e.event_type == "transfer"]
         assert len(transfers) == 2  # noqa: PLR2004
 
@@ -517,9 +525,64 @@ class TestMatcherNoOverrides:
         out_tx = _tx(1, TransactionType.WITHDRAWAL, txid="cafe0000", amount="0.01", cad_value="500")
         in_tx = _tx(2, TransactionType.DEPOSIT, txid="cafe0000", amount="0.01", cad_value="500")
 
-        events_none, _ = match_transfers([out_tx, in_tx], overrides=None)
-        events_empty, _ = match_transfers([out_tx, in_tx], overrides=[])
+        events_none, _, _ = match_transfers([out_tx, in_tx], overrides=None)
+        events_empty, _, _ = match_transfers([out_tx, in_tx], overrides=[])
         assert len(events_none) == len(events_empty)
+
+    def test_txid_match_amount_diff_no_fee_crypto_creates_fee_disposal(self) -> None:
+        """txid match with amount diff and no fee_crypto → fee_disposal from diff."""
+        out_tx = _tx(1, TransactionType.WITHDRAWAL, txid="abc123", amount="0.01", cad_value="600")
+        in_tx = _tx(2, TransactionType.DEPOSIT, txid="abc123", amount="0.0099")
+
+        events, _, _ = match_transfers([out_tx, in_tx])
+        fee_events = [e for e in events if e.event_type == "fee_disposal"]
+        assert len(fee_events) == 1
+        assert fee_events[0].amount == Decimal("0.0001")
+        assert fee_events[0].is_taxable is True
+
+    def test_txid_match_equal_amounts_fee_crypto_creates_fee_disposal(self) -> None:
+        """txid match with equal amounts and fee_crypto set → fee_disposal from fee_crypto."""
+        out_tx = _tx(
+            1,
+            TransactionType.WITHDRAWAL,
+            txid="abc123",
+            amount="0.01",
+            cad_value="600",
+            fee_crypto="0.0001",
+        )
+        in_tx = _tx(2, TransactionType.DEPOSIT, txid="abc123", amount="0.01")
+
+        events, _, _ = match_transfers([out_tx, in_tx])
+        fee_events = [e for e in events if e.event_type == "fee_disposal"]
+        assert len(fee_events) == 1
+        assert fee_events[0].amount == Decimal("0.0001")
+
+    def test_txid_match_observed_diff_preferred_over_fee_crypto(self) -> None:
+        """txid match: observed amount diff is used instead of fee_crypto when diff > 0."""
+        # fee_crypto says 0.0001 but on-chain diff is 0.00015
+        out_tx = _tx(
+            1,
+            TransactionType.WITHDRAWAL,
+            txid="abc123",
+            amount="0.01",
+            cad_value="600",
+            fee_crypto="0.0001",
+        )
+        in_tx = _tx(2, TransactionType.DEPOSIT, txid="abc123", amount="0.00985")
+
+        events, _, _ = match_transfers([out_tx, in_tx])
+        fee_events = [e for e in events if e.event_type == "fee_disposal"]
+        assert len(fee_events) == 1
+        assert fee_events[0].amount == Decimal("0.00015")
+
+    def test_txid_match_equal_amounts_no_fee_no_disposal(self) -> None:
+        """txid match with equal amounts and no fee_crypto → no fee_disposal emitted."""
+        out_tx = _tx(1, TransactionType.WITHDRAWAL, txid="abc123", amount="0.01", cad_value="600")
+        in_tx = _tx(2, TransactionType.DEPOSIT, txid="abc123", amount="0.01")
+
+        events, _, _ = match_transfers([out_tx, in_tx])
+        fee_events = [e for e in events if e.event_type == "fee_disposal"]
+        assert len(fee_events) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -606,147 +669,377 @@ class TestValidateWalletName:
 
 
 # ---------------------------------------------------------------------------
-# _cmd_external — wallet name validation + multi-ID batch assignment
+# _parse_fee_amount — validation for the untracked-wallet fee prompt
 # ---------------------------------------------------------------------------
 
 
-def _external_call(
-    conn: sqlite3.Connection,
-    txs: list[Transaction],
-    parts: list[str],
-    batch_name: str = "testbatch",
-) -> object:
-    """Helper: invoke _cmd_external with a pre-built conn and tx list."""
-    tx_ids = {t.id for t in txs}
-    return _cmd_external(conn, parts, tx_ids, batch_name, txs, wallets=[], tax_year=None)
+class TestParseFeeAmount:
+    def test_valid_fee(self) -> None:
+        fee, err = _parse_fee_amount("0.00005", "BTC", Decimal("0.01"))
+        assert fee == Decimal("0.00005")
+        assert err == ""
+
+    def test_non_numeric_rejected(self) -> None:
+        fee, err = _parse_fee_amount("abc", "BTC", Decimal("0.01"))
+        assert err != ""
+        assert fee == Decimal("0")
+
+    def test_zero_rejected(self) -> None:
+        fee, err = _parse_fee_amount("0", "BTC", Decimal("0.01"))
+        assert err != ""
+
+    def test_negative_rejected(self) -> None:
+        fee, err = _parse_fee_amount("-0.001", "BTC", Decimal("0.01"))
+        assert err != ""
+
+    def test_fee_equal_to_amount_rejected(self) -> None:
+        fee, err = _parse_fee_amount("0.01", "BTC", Decimal("0.01"))
+        assert err != ""
+
+    def test_fee_greater_than_amount_rejected(self) -> None:
+        fee, err = _parse_fee_amount("0.02", "BTC", Decimal("0.01"))
+        assert err != ""
+
+    def test_fee_just_below_amount_accepted(self) -> None:
+        fee, err = _parse_fee_amount("0.00999999", "BTC", Decimal("0.01"))
+        assert err == ""
+        assert fee == Decimal("0.00999999")
 
 
-class TestCmdExternal:
-    def test_valid_single_id_marks_override(self) -> None:
+# ---------------------------------------------------------------------------
+# Matcher — fee micro-disposal from external overrides
+# ---------------------------------------------------------------------------
+
+
+class TestMatcherExternalFeeDisposal:
+    def test_external_out_with_fee_emits_fee_disposal(self) -> None:
+        """external-out with implied_fee_crypto > 0 emits a taxable fee_disposal."""
+        out_tx = _tx(1, TransactionType.WITHDRAWAL, amount="0.01", cad_value="500")
+        ov = _make_override(1, None, action="external-out", implied_fee="0.00005")
+        events, _, _ = match_transfers([out_tx], overrides=[ov])
+
+        fee_events = [e for e in events if e.event_type == "fee_disposal"]
+        assert len(fee_events) == 1
+        assert fee_events[0].amount == Decimal("0.00005")
+        assert fee_events[0].is_taxable is True
+
+    def test_external_in_with_fee_emits_fee_disposal(self) -> None:
+        """external-in with implied_fee_crypto > 0 also emits a fee_disposal."""
+        in_tx = _tx(2, TransactionType.DEPOSIT, amount="0.01", cad_value="500")
+        ov = _make_override(2, None, action="external-in", implied_fee="0.0001")
+        events, _, _ = match_transfers([in_tx], overrides=[ov])
+
+        fee_events = [e for e in events if e.event_type == "fee_disposal"]
+        assert len(fee_events) == 1
+        assert fee_events[0].amount == Decimal("0.0001")
+
+    def test_external_out_without_fee_no_fee_disposal(self) -> None:
+        """external-out with zero implied_fee_crypto emits no fee_disposal."""
+        out_tx = _tx(1, TransactionType.WITHDRAWAL, amount="0.01", cad_value="500")
+        ov = _make_override(1, None, action="external-out", implied_fee="0")
+        events, _, _ = match_transfers([out_tx], overrides=[ov])
+
+        fee_events = [e for e in events if e.event_type == "fee_disposal"]
+        assert fee_events == []
+
+    def test_external_fee_disposal_cad_proceeds_computed(self) -> None:
+        """CAD proceeds on the fee disposal = fee_amount * (cad_value / amount)."""
+        out_tx = _tx(1, TransactionType.WITHDRAWAL, amount="0.01", cad_value="500")
+        # rate = 500 / 0.01 = 50000 CAD/BTC; fee = 0.0001; proceeds = 5 CAD
+        ov = _make_override(1, None, action="external-out", implied_fee="0.0001")
+        events, _, _ = match_transfers([out_tx], overrides=[ov])
+
+        fee_evt = next(e for e in events if e.event_type == "fee_disposal")
+        assert fee_evt.cad_proceeds == Decimal("5")
+
+    def test_external_event_itself_is_non_taxable(self) -> None:
+        """The external marker event remains non-taxable even when a fee is present."""
+        out_tx = _tx(1, TransactionType.WITHDRAWAL, amount="0.01", cad_value="500")
+        ov = _make_override(1, None, action="external-out", implied_fee="0.00005")
+        events, _, _ = match_transfers([out_tx], overrides=[ov])
+
+        ext_events = [e for e in events if e.event_type == "external"]
+        assert len(ext_events) == 1
+        assert ext_events[0].is_taxable is False
+
+    def test_external_out_no_implied_fee_falls_back_to_fee_crypto(self) -> None:
+        """When implied_fee_crypto=0 but tx.fee_crypto > 0, fee_crypto is used."""
+        # Simulate a Sparrow withdrawal marked external-out where user chose [N]
+        # in the transfer wizard but the transaction already carries a fee.
+        out_tx = _tx(
+            1,
+            TransactionType.WITHDRAWAL,
+            amount="0.5005",
+            cad_value="30030",
+            fee_crypto="0.0005",
+        )
+        ov = _make_override(1, None, action="external-out", implied_fee="0")
+        events, _, _ = match_transfers([out_tx], overrides=[ov])
+
+        fee_events = [e for e in events if e.event_type == "fee_disposal"]
+        assert len(fee_events) == 1
+        assert fee_events[0].amount == Decimal("0.0005")
+        assert fee_events[0].is_taxable is True
+        # cad_proceeds = 0.0005 * (30030 / 0.5005) ≈ 30
+        assert fee_events[0].cad_proceeds == pytest.approx(Decimal("30"), rel=Decimal("0.01"))
+
+    def test_external_out_no_implied_fee_no_fee_crypto_no_disposal(self) -> None:
+        """When both implied_fee_crypto and tx.fee_crypto are zero, no fee_disposal emitted."""
+        out_tx = _tx(1, TransactionType.WITHDRAWAL, amount="0.01", cad_value="500")
+        ov = _make_override(1, None, action="external-out", implied_fee="0")
+        events, _, _ = match_transfers([out_tx], overrides=[ov])
+
+        assert [e for e in events if e.event_type == "fee_disposal"] == []
+
+
+class TestClassifyDisposalFeeCadDerivation:
+    """Unmatched withdrawal cad_fee behavior and fee_crypto → fee_disposal."""
+
+    def test_unmatched_withdrawal_fee_crypto_emits_fee_disposal(self) -> None:
+        """fee_crypto > 0 on an unmatched withdrawal must produce a fee_disposal event.
+
+        Previously fee_crypto set cad_fee on the sell event.  Now it generates a
+        separate fee_disposal so the ACB pool is correctly reduced by the fee units.
+        rate = 30030 / 0.5005 ≈ 60000 CAD/BTC; fee = 0.0005 BTC → ~30 CAD proceeds.
+        """
+        out_tx = _tx(
+            1,
+            TransactionType.WITHDRAWAL,
+            amount="0.5005",
+            cad_value="30030",
+            fee_crypto="0.0005",
+            fee_cad="0",
+        )
+        events, _, _ = match_transfers([out_tx])
+
+        fee_disposals = [e for e in events if e.event_type == "fee_disposal"]
+        assert len(fee_disposals) == 1
+        fd = fee_disposals[0]
+        assert fd.amount == Decimal("0.0005")
+        assert fd.cad_proceeds is not None and fd.cad_proceeds > Decimal("0")
+
+    def test_unmatched_withdrawal_fee_crypto_cad_fee_is_none(self) -> None:
+        """When fee is expressed in crypto (not CAD), the sell event's cad_fee is None."""
+        out_tx = _tx(
+            1,
+            TransactionType.WITHDRAWAL,
+            amount="0.5005",
+            cad_value="30030",
+            fee_crypto="0.0005",
+            fee_cad="0",
+        )
+        events, _, _ = match_transfers([out_tx])
+
+        sell_events = [e for e in events if e.event_type == "sell"]
+        assert len(sell_events) == 1
+        assert sell_events[0].cad_fee is None
+
+    def test_unmatched_withdrawal_fee_cad_preserved(self) -> None:
+        """When fee_cad is provided it is passed through on the sell event."""
+        out_tx = _tx(
+            1,
+            TransactionType.WITHDRAWAL,
+            amount="0.5005",
+            cad_value="30030",
+            fee_crypto="0",
+            fee_cad="25",
+        )
+        events, _, _ = match_transfers([out_tx])
+
+        sell_events = [e for e in events if e.event_type == "sell"]
+        assert len(sell_events) == 1
+        assert sell_events[0].cad_fee == Decimal("25")
+
+    def test_unmatched_withdrawal_no_fee_no_cad_fee(self) -> None:
+        """When both fee_crypto and fee_cad are zero, cad_fee on sell is None."""
+        out_tx = _tx(1, TransactionType.WITHDRAWAL, amount="0.01", cad_value="500")
+        events, _, _ = match_transfers([out_tx])
+
+        sell_events = [e for e in events if e.event_type == "sell"]
+        assert len(sell_events) == 1
+        assert sell_events[0].cad_fee is None
+
+    def test_buy_with_fee_crypto_emits_fee_disposal(self) -> None:
+        """A buy transaction with fee_crypto > 0 must produce a fee_disposal event.
+
+        NDAX SOL buy: rate = 500 / 0.25 = 2000 CAD/SOL; fee = 0.0005 SOL → 1 CAD proceeds.
+        """
+        buy_tx = _tx(
+            1,
+            TransactionType.BUY,
+            asset="SOL",
+            amount="0.25",
+            cad_value="500",
+            fee_crypto="0.0005",
+        )
+        events, _, _ = match_transfers([buy_tx])
+
+        fee_disposals = [e for e in events if e.event_type == "fee_disposal"]
+        assert len(fee_disposals) == 1
+        fd = fee_disposals[0]
+        assert fd.asset == "SOL"
+        assert fd.amount == Decimal("0.0005")
+        assert fd.cad_proceeds is not None and fd.cad_proceeds > Decimal("0")
+
+    def test_buy_without_fee_crypto_no_fee_disposal(self) -> None:
+        """A buy with no crypto fee must not produce a spurious fee_disposal."""
+        buy_tx = _tx(1, TransactionType.BUY, asset="SOL", amount="0.25", cad_value="500")
+        events, _, _ = match_transfers([buy_tx])
+
+        assert [e for e in events if e.event_type == "fee_disposal"] == []
+
+
+# ---------------------------------------------------------------------------
+# Destination txid override visibility
+# ---------------------------------------------------------------------------
+
+
+class TestTxidOverrideVisibility:
+    """Guard: destination txid overrides must be visible to stir's matching logic.
+
+    stir calls _apply_txid_overrides before _build_state; boil patches txids
+    before match_transfers.  Both must produce consistent pair classification —
+    if boil treats a pair as a non-taxable transfer, stir must show it as
+    resolved, not as an unmatched sell/buy.
+    """
+
+    def test_apply_patches_null_txid(self) -> None:
+        """Withdrawal with txid=None gets patched from the override table."""
         conn = _make_conn()
-        txs = [_tx(1, TransactionType.WITHDRAWAL)]
-        _seed_transactions(conn, txs)
+        w = _tx(1, TransactionType.WITHDRAWAL)  # txid=None by default
+        _seed_transactions(conn, [w])
+        repo.write_transaction_txid_override(conn, 1, "a" * 64)
 
-        result = _external_call(conn, txs, ["external", "1", "cold-vault"])
+        result = _apply_txid_overrides(conn, [w])
 
-        assert result is not None
-        overrides = repo.read_transfer_overrides(conn)
-        assert len(overrides) == 1
-        assert overrides[0].tx_id_a == 1
-        assert overrides[0].action == "external-out"
-        assert overrides[0].external_wallet == "cold-vault"
+        assert result[0].txid == "a" * 64
 
-    def test_single_deposit_becomes_external_in(self) -> None:
+    def test_apply_does_not_overwrite_csv_txid(self) -> None:
+        """A transaction whose txid came from the CSV is never overwritten."""
         conn = _make_conn()
-        txs = [_tx(2, TransactionType.DEPOSIT)]
-        _seed_transactions(conn, txs)
+        csv_txid = "b" * 64
+        w = _tx(1, TransactionType.WITHDRAWAL, txid=csv_txid)
+        _seed_transactions(conn, [w])
+        repo.write_transaction_txid_override(conn, 1, "a" * 64)
 
-        result = _external_call(conn, txs, ["external", "2", "exchange-old"])
+        result = _apply_txid_overrides(conn, [w])
 
-        assert result is not None
-        overrides = repo.read_transfer_overrides(conn)
-        assert overrides[0].action == "external-in"
-        assert overrides[0].external_wallet == "exchange-old"
+        assert result[0].txid == csv_txid  # unchanged
 
-    def test_two_ids_both_marked(self) -> None:
+    def test_apply_returns_list_unchanged_when_no_overrides(self) -> None:
+        """Empty override table → transactions returned with txid=None."""
         conn = _make_conn()
-        txs = [
-            _tx(10, TransactionType.WITHDRAWAL),
-            _tx(20, TransactionType.DEPOSIT),
+        w = _tx(1, TransactionType.WITHDRAWAL)
+
+        result = _apply_txid_overrides(conn, [w])
+
+        assert result[0].txid is None
+
+    def test_build_state_matches_pair_via_patched_txid(self) -> None:
+        """Core regression: after txid patch, _build_state shows the pair as resolved.
+
+        Amounts are too different for amount-proximity matching (0.00001 vs 1.0 BTC),
+        so without the txid patch the withdrawal stays unmatched.  With the patch,
+        Pass 1 exact txid match fires and the pair appears in state.auto_pairs.
+        """
+        deposit_txid = "a" * 64
+        # Wildly different amounts → amount-proximity match impossible
+        withdrawal = _tx(1, TransactionType.WITHDRAWAL, amount="0.00001", cad_value="1")
+        deposit = _tx(
+            2, TransactionType.DEPOSIT, amount="1.0", cad_value="100000", txid=deposit_txid
+        )
+
+        # Without patch: withdrawal unmatched
+        state_raw = _build_state([withdrawal, deposit], overrides=[])
+        assert len(state_raw.unmatched_out) == 1
+        assert len(state_raw.auto_pairs) == 0
+
+        # With patch: Pass 1 exact txid match resolves the pair
+        patched = dataclasses.replace(withdrawal, txid=deposit_txid)
+        state_patched = _build_state([patched, deposit], overrides=[])
+        assert len(state_patched.auto_pairs) == 1
+        assert len(state_patched.unmatched_out) == 0
+        assert len(state_patched.unmatched_in) == 0
+
+    def test_apply_then_build_state_end_to_end(self) -> None:
+        """End-to-end: _apply_txid_overrides → _build_state finds the pair.
+
+        This is the exact sequence stir._run_stir performs after the fix.
+        Failure here means a new destination override will NOT be visible in
+        stir until after boil runs.
+        """
+        conn = _make_conn()
+        deposit_txid = "c" * 64
+        withdrawal = _tx(1, TransactionType.WITHDRAWAL, amount="0.00001", cad_value="1")
+        deposit = _tx(
+            2, TransactionType.DEPOSIT, amount="1.0", cad_value="100000", txid=deposit_txid
+        )
+        _seed_transactions(conn, [withdrawal, deposit])
+        repo.write_transaction_txid_override(conn, 1, deposit_txid)
+
+        patched_txs = _apply_txid_overrides(conn, [withdrawal, deposit])
+        state = _build_state(patched_txs, overrides=[])
+
+        assert len(state.auto_pairs) == 1
+        assert len(state.unmatched_out) == 0
+
+
+# ---------------------------------------------------------------------------
+# Graph-pair pre-pass consolidation
+# ---------------------------------------------------------------------------
+
+
+class TestBuildStateGraphPairsConsolidation:
+    """Pre-pass must register ALL withdrawal inputs to a consolidation deposit.
+
+    Real-world case: three NDAX withdrawals (tx 7, 8, 12) are all direct inputs
+    to one Sparrow consolidation deposit (tx 15).  graph_transfer_pairs stores
+    three rows, each sharing the same deposit_id.  Without the fix, only the
+    first withdrawal (lowest PK) is registered — the others land in unmatched_out.
+    """
+
+    def _graph_pair(
+        self,
+        w_tx: Transaction,
+        d_tx: Transaction,
+        hops: int = 1,
+    ) -> tuple[Transaction, Transaction, int, str, Decimal, int, int]:
+        return (w_tx, d_tx, hops, "backward", Decimal("0.00000097"), 1, 3)
+
+    def test_all_consolidation_withdrawals_in_graph_pairs(self) -> None:
+        """All three withdrawals appear in state.graph_pairs, none in unmatched_out."""
+        w1 = _tx(12, TransactionType.WITHDRAWAL, amount="0.0003992")
+        w2 = _tx(7, TransactionType.WITHDRAWAL, amount="0.0003992")
+        w3 = _tx(8, TransactionType.WITHDRAWAL, amount="0.0002994")
+        d = _tx(15, TransactionType.DEPOSIT, amount="0.00109513")
+
+        graph_pairs = [
+            self._graph_pair(w1, d),
+            self._graph_pair(w2, d),
+            self._graph_pair(w3, d),
         ]
-        _seed_transactions(conn, txs)
 
-        result = _external_call(conn, txs, ["external", "10", "20", "legacy-cold"])
+        state = _build_state([w1, w2, w3, d], overrides=[], graph_pairs=graph_pairs)
 
-        assert result is not None
-        overrides = repo.read_transfer_overrides(conn)
-        assert len(overrides) == 2  # noqa: PLR2004
-        by_tx = {ov.tx_id_a: ov for ov in overrides}
-        assert by_tx[10].action == "external-out"
-        assert by_tx[20].action == "external-in"
-        assert by_tx[10].external_wallet == "legacy-cold"
-        assert by_tx[20].external_wallet == "legacy-cold"
+        assert len(state.graph_pairs) == 3  # noqa: PLR2004
+        assert len(state.unmatched_out) == 0
+        assert len(state.unmatched_in) == 0
+        withdrawal_ids = {m[0].id for m in state.graph_pairs}
+        assert withdrawal_ids == {7, 8, 12}
 
-    def test_three_ids_all_marked_same_wallet(self) -> None:
-        conn = _make_conn()
-        txs = [
-            _tx(1, TransactionType.WITHDRAWAL),
-            _tx(2, TransactionType.DEPOSIT),
-            _tx(3, TransactionType.WITHDRAWAL),
-        ]
-        _seed_transactions(conn, txs)
+    def test_deposit_not_re_claimed_by_pass1(self) -> None:
+        """Deposit already in graph_pairs is not also matched by Pass 1."""
+        shared_txid = "d" * 64
+        w1 = _tx(1, TransactionType.WITHDRAWAL, amount="0.50000000")
+        w2 = _tx(2, TransactionType.WITHDRAWAL, amount="0.50000000", txid=shared_txid)
+        d = _tx(10, TransactionType.DEPOSIT, amount="0.99800000", txid=shared_txid)
 
-        result = _external_call(conn, txs, ["external", "1", "2", "3", "multi-wallet"])
+        # Only w1 is in graph_pairs; w2 shares txid with d (Pass 1 candidate).
+        graph_pairs = [self._graph_pair(w1, d)]
 
-        assert result is not None
-        overrides = repo.read_transfer_overrides(conn)
-        assert len(overrides) == 3  # noqa: PLR2004
-        wallet_names = {ov.external_wallet for ov in overrides}
-        assert wallet_names == {"multi-wallet"}
+        state = _build_state([w1, w2, d], overrides=[], graph_pairs=graph_pairs)
 
-    def test_wallet_name_with_space_rejected(self) -> None:
-        """Spaces in wallet name must be rejected; no override written."""
-        conn = _make_conn()
-        txs = [_tx(1, TransactionType.WITHDRAWAL)]
-        _seed_transactions(conn, txs)
-
-        result = _external_call(conn, txs, ["external", "1", "bad", "name"])
-
-        assert result is None
-        assert repo.read_transfer_overrides(conn) == []
-
-    def test_wallet_name_with_special_char_rejected(self) -> None:
-        conn = _make_conn()
-        txs = [_tx(1, TransactionType.WITHDRAWAL)]
-        _seed_transactions(conn, txs)
-
-        result = _external_call(conn, txs, ["external", "1", "bad!name"])
-
-        assert result is None
-        assert repo.read_transfer_overrides(conn) == []
-
-    def test_empty_wallet_name_accepted(self) -> None:
-        """An empty wallet name (user opted out of naming) is allowed."""
-        conn = _make_conn()
-        txs = [_tx(1, TransactionType.WITHDRAWAL)]
-        _seed_transactions(conn, txs)
-
-        result = _external_call(conn, txs, ["external", "1", ""])
-
-        # Empty string token: not an integer, so wallet_parts = [""]
-        # " ".join([""]) = "" → passes validation (empty string OK)
-        assert result is not None
-        overrides = repo.read_transfer_overrides(conn)
-        assert overrides[0].external_wallet == ""
-
-    def test_unknown_integer_second_arg_errors(self) -> None:
-        """An integer that is not a known tx_id triggers an error, not a wallet name."""
-        conn = _make_conn()
-        txs = [_tx(1, TransactionType.WITHDRAWAL)]
-        _seed_transactions(conn, txs)
-
-        result = _external_call(conn, txs, ["external", "1", "9999", "cold"])
-
-        assert result is None
-        assert repo.read_transfer_overrides(conn) == []
-
-    def test_first_id_not_found_errors(self) -> None:
-        conn = _make_conn()
-        txs = [_tx(1, TransactionType.WITHDRAWAL)]
-        _seed_transactions(conn, txs)
-
-        result = _external_call(conn, txs, ["external", "99", "cold"])
-
-        assert result is None
-        assert repo.read_transfer_overrides(conn) == []
-
-    def test_unsupported_tx_type_errors(self) -> None:
-        """BUY/SELL/TRADE types cannot be marked as external."""
-        conn = _make_conn()
-        txs = [_tx(1, TransactionType.BUY)]
-        _seed_transactions(conn, txs)
-
-        result = _external_call(conn, txs, ["external", "1", "cold"])
-
-        assert result is None
-        assert repo.read_transfer_overrides(conn) == []
+        # d must not be double-counted: not in both graph_pairs and auto_pairs.
+        deposit_ids_in_graph = {m[1].id for m in state.graph_pairs}
+        deposit_ids_in_auto = {m[1].id for m in state.auto_pairs}
+        assert d.id not in deposit_ids_in_auto or d.id not in deposit_ids_in_graph

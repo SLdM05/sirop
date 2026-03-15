@@ -14,7 +14,8 @@ pairs and lets you:
 - **Force-unlink** a pair that was incorrectly matched.
 - **Mark external transfers** — withdrawals to, or deposits from, wallets you
   haven't imported (cold storage, a gift, etc.) — so they aren't treated as
-  taxable sells or buys.
+  taxable sells or buys. An optional network fee can be recorded so `boil`
+  emits a `fee_disposal` event for the transferred amount.
 
 Overrides are written to the `transfer_overrides` table in the active `.sirop`
 file. They survive `sirop boil --from transfer_match` — you set them once and
@@ -30,8 +31,6 @@ they persist through every subsequent re-run.
 sirop stir [--list]
 sirop stir --link <id1> <id2> [--fee AMOUNT]
 sirop stir --unlink <id1> <id2>
-sirop stir --external-out <id> [--wallet NAME]
-sirop stir --external-in <id> [--wallet NAME]
 sirop stir --clear <id>
 ```
 
@@ -44,10 +43,10 @@ sirop stir --clear <id>
 | `--link <id1> <id2>` | Force-link two transactions as a transfer pair |
 | `--fee AMOUNT` | With `--link`: implied on-chain fee (sent minus received, in asset units). Emitted as a `fee_disposal` event at boil time. |
 | `--unlink <id1> <id2>` | Prevent the auto-matcher from pairing these two transactions |
-| `--external-out <id>` | Mark a withdrawal as going to an untracked external wallet |
-| `--external-in <id>` | Mark a deposit as arriving from an untracked external wallet |
-| `--wallet NAME` | With `--external-*`: label for the external wallet (e.g. `"cold-storage"`). Must be 1–64 characters, start with a letter or digit, and contain only letters, digits, hyphens, and underscores. No spaces. |
 | `--clear <id>` | Remove all overrides that involve this transaction ID |
+
+External wallet marking is done through the interactive `transfer` wizard (REPL only —
+no non-interactive flag equivalent). See [Interactive mode](#interactive-mode) below.
 
 Transaction IDs (`id1`, `id2`, `id`) are the `id` values from the `transactions`
 table — shown in `stir --list` output and in the interactive display.
@@ -86,11 +85,12 @@ stir> _
 
 | Command | Effect |
 |---------|--------|
-| `transfer <id> [<id> ...]` | Guided wizard: link a withdrawal to its matching deposit (or vice versa). Accepts one or more IDs — runs the wizard for each in sequence. |
+| `transfer <id> [<id> ...]` | Guided wizard: link a withdrawal to its matching deposit (or vice versa), or mark it as going to/coming from an untracked wallet (no CSV available). Accepts one or more IDs — runs the wizard for each in sequence. |
 | `link <id1> <id2>` | Force-link two transactions as a transfer pair. Prompts for implied fee. |
 | `unlink <id1> <id2>` | Block the auto-matcher from pairing these two. |
-| `external <id> [<id2> …] [wallet_name]` | Mark one or more withdrawals/deposits as going to or coming from an untracked external wallet. Accepts any number of transaction IDs followed by an optional wallet name. Each transaction's direction (out/in) is resolved independently. |
 | `clear <id>` | Remove all overrides that involve this transaction. |
+| `list` | Refresh the unmatched transactions display. |
+| `view` | Open the full transfer state in a pager (all sections). |
 | `help` | Show command reference. |
 | `quit` | Exit. Overrides already written are saved. |
 
@@ -125,8 +125,8 @@ taxable events (sell or buy) when `boil` runs.
 
 Withdrawals with no matching deposit — either not yet imported, or genuinely
 external. These will be treated as **sells** at boil time unless you:
-- `stir link` them to a matching deposit in another source, or
-- `stir --external-out` them if they went to a wallet you don't intend to import.
+- Use `transfer <id>` → tracked wallet to link them to a matching deposit in another source, or
+- Use `transfer <id>` → untracked wallet if they went to a wallet you don't intend to import.
 
 ---
 
@@ -134,10 +134,24 @@ external. These will be treated as **sells** at boil time unless you:
 
 ### `transfer` — guided wizard for unmatched transactions
 
-Use in the REPL to interactively pair an unmatched withdrawal or deposit with
-its counterpart in another source. The wizard walks you through picking the
-counterpart wallet and transaction, validates that no asset units are created
-from nothing, and records the implied on-chain fee if sent > received.
+Use in the REPL to interactively resolve an unmatched withdrawal or deposit.
+The wizard presents two paths:
+
+**Tracked wallet (CSV available)**
+Picks the counterpart transaction from an imported source. The wizard lists
+candidate transactions, validates that no asset units are created from nothing,
+and records the implied on-chain fee when sent > received.
+
+**Untracked wallet (no CSV available)**
+Marks the transaction as external (replaces the former `external` command).
+After selecting this path the wizard asks for an optional wallet name and then:
+
+- **[N] No fee to record** — implies `fee = 0`. Use when the exchange covered
+  the fee or it was already embedded in the spread.
+- **[F] Enter fee amount** — prompts for an exact fee in asset units. The value
+  must be positive and strictly less than the transaction amount. The fee is
+  stored as `implied_fee_crypto` and becomes a `fee_disposal` event at `boil`
+  time (a micro-disposition taxable at the asset's CAD value on transfer date).
 
 ```
 stir> transfer 41
@@ -199,31 +213,41 @@ Both transactions will re-enter the auto-matcher pass but the specific pair
 (12, 34) will be blocked. If neither matches anything else, both become
 unmatched events (sell or buy).
 
-### `external-out` — withdrawal to an untracked wallet
+### External transfers — untracked wallet path in `transfer`
 
-Use for withdrawals to cold storage, a hardware wallet you haven't imported,
-or any wallet outside this batch.
+Use the `transfer` wizard to handle withdrawals to cold storage, a hardware
+wallet you haven't imported, or deposits from prior-year holdings or gifts.
+When prompted, choose **"[untracked wallet — no CSV available]"** and enter an
+optional wallet name (e.g. `cold-storage`).
 
-```bash
-sirop stir --external-out 41 --wallet "cold-storage"
+**External-out** (withdrawal to untracked wallet): the transaction is excluded
+from taxable events. **No ACB is deducted.** The assets remain in your cost
+pool — you account for them when you sell from that wallet in a future batch.
+
+**External-in** (deposit from untracked wallet): excluded from taxable events,
+but the CAD value at receipt establishes ACB for those units.
+
+For both directions, the wizard then asks whether to record a network fee:
+
+```
+stir> transfer 41
+
+  Transfer wizard — transaction 41:
+  ...
+  [untracked wallet — no CSV available]
+
+  Wallet name (optional, e.g. cold-storage):  cold-storage
+
+  Network fee for this transfer?
+    [N] No fee to record
+    [F] Enter fee amount manually
+  Choice: F
+  Fee amount (BTC): 0.00003000
+  Fee recorded — will become a fee micro-disposal at boil time.
 ```
 
-The transaction is excluded from taxable events. **No ACB is deducted.** The
-BTC is still in your pool — you'll account for it when you eventually sell from
-that wallet (which should be a separate batch or a future tap of that wallet's
-export).
-
-### `external-in` — deposit from an untracked wallet
-
-Use for deposits from a wallet you haven't imported (gift received, transfer
-from prior-year holdings, etc.).
-
-```bash
-sirop stir --external-in 87 --wallet "prior-year-cold-storage"
-```
-
-The deposit is excluded from taxable events but its CAD value at receipt
-establishes ACB for those units.
+There are no `--external-out` / `--external-in` CLI flags. External marking
+is REPL-only via `transfer`.
 
 ### `clear` — remove all overrides for a transaction
 
@@ -241,8 +265,7 @@ Removes every override where `tx_id_a = 41` or `tx_id_b = 41`. Run
 ```
 sirop tap <files>           # import all sources
 sirop stir --list           # review auto-detected pairs
-sirop stir --link ...       # fix mismatches (if any)
-sirop stir --external-out ..# mark external withdrawals (if any)
+sirop stir                  # interactive: fix mismatches, mark external wallets
 sirop boil                  # run tax calculations with overrides applied
 ```
 
@@ -281,6 +304,8 @@ error [E020]: Batch 'my2025tax' has not been normalized yet.
 | Transaction ID not found | `error [E021]: Transaction id 99 not found in the active batch.` |
 | Link: different assets | `error: cannot link tx:3 (BTC) with tx:41 (ETH) — asset mismatch.` |
 | Link: receive > send | `error: implied fee is negative — received amount exceeds sent amount.` |
+| Fee ≤ 0 | `error: fee must be greater than zero.` |
+| Fee ≥ tx amount | `error: fee cannot equal or exceed the transaction amount.` |
 
 ---
 
