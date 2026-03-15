@@ -527,8 +527,11 @@ def _build_state(  # noqa: PLR0912 PLR0915
     paired_ids: set[int] = set()
 
     # Pre-pass: mark graph-traversal-matched pairs as paired so Pass 1 skips them.
+    # Only block on w_tx.id — a consolidation deposit legitimately appears in multiple
+    # pairs (one per withdrawal input), so blocking on d_tx.id would drop all but the
+    # first withdrawal and send them to unmatched_out.
     for w_tx, d_tx, hops, direction, fee, vout_count, vin_count in graph_pairs or []:
-        if w_tx.id in paired_ids or d_tx.id in paired_ids:
+        if w_tx.id in paired_ids:
             continue
         paired_ids.add(w_tx.id)
         paired_ids.add(d_tx.id)

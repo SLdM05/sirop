@@ -310,3 +310,219 @@ class TestEdgeCases:
             matches = find_graph_matches([w], [d], MEMPOOL_URL, max_hops=3)
 
         assert matches == []
+
+
+# ---------------------------------------------------------------------------
+# Consolidation (many-to-one) tests
+# ---------------------------------------------------------------------------
+
+
+class TestConsolidationMatch:
+    """A single Sparrow deposit funded by multiple NDAX withdrawal UTXOs.
+
+    Real-world scenario confirmed in data/test2025.sirop: three NDAX
+    withdrawals (amounts 0.0003992, 0.0002994, 0.0003992 BTC) were all
+    inputs to one Sparrow consolidation transaction (0.00109513 BTC received).
+    The previous 1-to-1 backward pass only matched one withdrawal; the other
+    two fell to Pass 2 and were incorrectly classified as ``sell``.
+    """
+
+    def test_three_withdrawals_one_deposit_all_matched(self) -> None:
+        """All three withdrawal inputs to a consolidation deposit are matched."""
+        w1_txid = "aaa" + "0" * 61
+        w2_txid = "bbb" + "0" * 61
+        w3_txid = "ccc" + "0" * 61
+        deposit_txid = "ddd" + "0" * 61
+
+        w1 = _withdrawal(db_id=1, txid=w1_txid, amount="0.0003992")
+        w2 = _withdrawal(db_id=2, txid=w2_txid, amount="0.0002994")
+        w3 = _withdrawal(db_id=3, txid=w3_txid, amount="0.0003992")
+        # Deposit receives slightly less than sum of inputs (miner fee deducted).
+        d = _deposit(db_id=10, txid=deposit_txid, amount="0.00109513")
+
+        tx_map = {
+            deposit_txid: _on_chain_tx(deposit_txid, [w1_txid, w2_txid, w3_txid]),
+        }
+
+        with (
+            patch(
+                "sirop.transfer_match.graph_analysis.fetch_tx",
+                side_effect=lambda url, txid: tx_map.get(txid),
+            ),
+            patch(
+                "sirop.transfer_match.graph_analysis.fetch_outspends",
+                return_value=[],
+            ),
+        ):
+            matches = find_graph_matches([w1, w2, w3], [d], MEMPOOL_URL, max_hops=1)
+
+        assert len(matches) == 3  # noqa: PLR2004
+        withdrawal_ids = {m.withdrawal_db_id for m in matches}
+        assert withdrawal_ids == {1, 2, 3}
+        deposit_ids = {m.deposit_db_id for m in matches}
+        assert deposit_ids == {10}
+        assert all(m.direction == "backward" for m in matches)
+        assert all(m.hops == 1 for m in matches)
+
+    def test_consolidation_fee_proportional(self) -> None:
+        """Total fee is split proportionally by each withdrawal's input share."""
+        w1_txid = "aaa" + "0" * 61
+        w2_txid = "bbb" + "0" * 61
+        deposit_txid = "ddd" + "0" * 61
+
+        # w1 contributes 0.6 BTC, w2 contributes 0.4 BTC; total = 1.0 BTC.
+        # Deposit receives 0.999 BTC → total fee = 0.001 BTC.
+        # w1 fee share = 0.001 * 0.6 = 0.0006 BTC
+        # w2 fee share = 0.001 * 0.4 = 0.0004 BTC
+        w1 = _withdrawal(db_id=1, txid=w1_txid, amount="0.60000000")
+        w2 = _withdrawal(db_id=2, txid=w2_txid, amount="0.40000000")
+        d = _deposit(db_id=10, txid=deposit_txid, amount="0.99900000")
+
+        tx_map = {deposit_txid: _on_chain_tx(deposit_txid, [w1_txid, w2_txid])}
+
+        with (
+            patch(
+                "sirop.transfer_match.graph_analysis.fetch_tx",
+                side_effect=lambda url, txid: tx_map.get(txid),
+            ),
+            patch(
+                "sirop.transfer_match.graph_analysis.fetch_outspends",
+                return_value=[],
+            ),
+        ):
+            matches = find_graph_matches([w1, w2], [d], MEMPOOL_URL, max_hops=1)
+
+        assert len(matches) == 2  # noqa: PLR2004
+        fee_by_withdrawal = {m.withdrawal_db_id: m.fee_crypto for m in matches}
+        assert fee_by_withdrawal[1] == Decimal("0.00060000")
+        assert fee_by_withdrawal[2] == Decimal("0.00040000")
+
+    def test_consolidation_fee_zero_when_deposit_exceeds_sum(self) -> None:
+        """Fee clamped to zero for each withdrawal if deposit > sum of inputs."""
+        w1_txid = "aaa" + "0" * 61
+        w2_txid = "bbb" + "0" * 61
+        deposit_txid = "ddd" + "0" * 61
+
+        w1 = _withdrawal(db_id=1, txid=w1_txid, amount="0.05000000")
+        w2 = _withdrawal(db_id=2, txid=w2_txid, amount="0.05000000")
+        # Deposit larger than total inputs — impossible on-chain but we guard against it.
+        d = _deposit(db_id=10, txid=deposit_txid, amount="0.20000000")
+
+        tx_map = {deposit_txid: _on_chain_tx(deposit_txid, [w1_txid, w2_txid])}
+
+        with (
+            patch(
+                "sirop.transfer_match.graph_analysis.fetch_tx",
+                side_effect=lambda url, txid: tx_map.get(txid),
+            ),
+            patch(
+                "sirop.transfer_match.graph_analysis.fetch_outspends",
+                return_value=[],
+            ),
+        ):
+            matches = find_graph_matches([w1, w2], [d], MEMPOOL_URL, max_hops=1)
+
+        assert len(matches) == 2  # noqa: PLR2004
+        assert all(m.fee_crypto == Decimal("0") for m in matches)
+
+    def test_unrelated_deposit_not_matched_to_consolidation_withdrawals(self) -> None:
+        """Withdrawals not in target set are not incorrectly claimed."""
+        w1_txid = "aaa" + "0" * 61
+        w2_txid = "bbb" + "0" * 61
+        unrelated_txid = "eee" + "0" * 61
+        deposit_txid = "ddd" + "0" * 61
+
+        w1 = _withdrawal(db_id=1, txid=w1_txid, amount="0.10000000")
+        w2 = _withdrawal(db_id=2, txid=w2_txid, amount="0.10000000")
+        d = _deposit(db_id=10, txid=deposit_txid, amount="0.19900000")
+
+        # Deposit inputs include w1, an unrelated tx, but NOT w2.
+        tx_map = {deposit_txid: _on_chain_tx(deposit_txid, [w1_txid, unrelated_txid])}
+
+        with (
+            patch(
+                "sirop.transfer_match.graph_analysis.fetch_tx",
+                side_effect=lambda url, txid: tx_map.get(txid),
+            ),
+            patch(
+                "sirop.transfer_match.graph_analysis.fetch_outspends",
+                return_value=[],
+            ),
+        ):
+            matches = find_graph_matches([w1, w2], [d], MEMPOOL_URL, max_hops=1)
+
+        assert len(matches) == 1
+        assert matches[0].withdrawal_db_id == 1
+
+    def test_hop1_only_when_mixed_hops(self) -> None:
+        """Hop=1 inputs take priority; hop>1 ancestors are left unmatched."""
+        w1_txid = "aaa" + "0" * 61
+        w2_txid = "bbb" + "0" * 61
+        w3_txid = "ccc" + "0" * 61
+        intermediate_txid = "iii" + "0" * 61
+        deposit_txid = "ddd" + "0" * 61
+
+        # deposit has two direct inputs (w1, w2) and one hop=3 indirect ancestor (w3).
+        # w3 is reachable via: deposit → intermediate → w3 (hop=2)
+        w1 = _withdrawal(db_id=1, txid=w1_txid, amount="0.10000000")
+        w2 = _withdrawal(db_id=2, txid=w2_txid, amount="0.10000000")
+        w3 = _withdrawal(db_id=3, txid=w3_txid, amount="0.05000000")
+        d = _deposit(db_id=10, txid=deposit_txid, amount="0.19900000")
+
+        tx_map = {
+            deposit_txid: _on_chain_tx(deposit_txid, [w1_txid, w2_txid, intermediate_txid]),
+            intermediate_txid: _on_chain_tx(intermediate_txid, [w3_txid]),
+        }
+
+        with (
+            patch(
+                "sirop.transfer_match.graph_analysis.fetch_tx",
+                side_effect=lambda url, txid: tx_map.get(txid),
+            ),
+            patch(
+                "sirop.transfer_match.graph_analysis.fetch_outspends",
+                return_value=[],
+            ),
+        ):
+            matches = find_graph_matches([w1, w2, w3], [d], MEMPOOL_URL, max_hops=3)
+
+        # Only hop=1 inputs (w1, w2) should be matched; w3 stays free.
+        assert len(matches) == 2  # noqa: PLR2004
+        withdrawal_ids = {m.withdrawal_db_id for m in matches}
+        assert withdrawal_ids == {1, 2}
+        assert all(m.hops == 1 for m in matches)
+
+    def test_multihop_1to1_when_no_direct_inputs(self) -> None:
+        """When no hop=1 inputs exist, only the first multi-hop result is taken (1-to-1)."""
+        w1_txid = "aaa" + "0" * 61
+        w2_txid = "bbb" + "0" * 61
+        intermediate1_txid = "iii" + "0" * 61
+        intermediate2_txid = "jjj" + "0" * 61
+        deposit_txid = "ddd" + "0" * 61
+
+        # deposit has two intermediate inputs, each leading to a different withdrawal.
+        w1 = _withdrawal(db_id=1, txid=w1_txid, amount="0.10000000")
+        w2 = _withdrawal(db_id=2, txid=w2_txid, amount="0.10000000")
+        d = _deposit(db_id=10, txid=deposit_txid, amount="0.19900000")
+
+        tx_map = {
+            deposit_txid: _on_chain_tx(deposit_txid, [intermediate1_txid, intermediate2_txid]),
+            intermediate1_txid: _on_chain_tx(intermediate1_txid, [w1_txid]),
+            intermediate2_txid: _on_chain_tx(intermediate2_txid, [w2_txid]),
+        }
+
+        with (
+            patch(
+                "sirop.transfer_match.graph_analysis.fetch_tx",
+                side_effect=lambda url, txid: tx_map.get(txid),
+            ),
+            patch(
+                "sirop.transfer_match.graph_analysis.fetch_outspends",
+                return_value=[],
+            ),
+        ):
+            matches = find_graph_matches([w1, w2], [d], MEMPOOL_URL, max_hops=2)
+
+        # Only 1 match — first multi-hop result wins; second is left free.
+        assert len(matches) == 1
+        assert matches[0].hops == 2  # noqa: PLR2004

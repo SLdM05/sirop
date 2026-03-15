@@ -59,6 +59,8 @@ from sirop.utils.logging import get_logger
 from sirop.utils.messages import emit
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from sirop.models.override import TransferOverride
     from sirop.models.transaction import Transaction
     from sirop.node.models import GraphMatch
@@ -93,6 +95,7 @@ def match_transfers(  # noqa: PLR0912 PLR0915
     overrides: list[TransferOverride] | None = None,
     tax_year: int | None = None,
     graph_traversal_allowed: bool = True,
+    on_graph_progress: Callable[[int, int, int, int], None] | None = None,
 ) -> tuple[list[ClassifiedEvent], list[IncomeEvent], list[GraphMatch]]:
     """Classify *txs* into taxable events and income sub-records.
 
@@ -431,6 +434,7 @@ def match_transfers(  # noqa: PLR0912 PLR0915
                     mempool_url=_settings.btc_mempool_url,
                     max_hops=_settings.btc_traversal_max_hops,
                     request_delay=_settings.btc_traversal_request_delay,
+                    on_progress=on_graph_progress,
                 )
             except Exception:
                 logger.warning(

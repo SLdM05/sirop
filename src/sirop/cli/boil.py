@@ -443,12 +443,21 @@ def _run_transfer_match(conn: object, *, graph_traversal_allowed: bool = True) -
             for t in txs
         ]
 
-    with spinner("Classifying events…"):
+    with spinner("Classifying events…") as _status:
+
+        def _graph_progress(api_calls: int, done: int, total: int, found: int) -> None:
+            noun = "match" if found == 1 else "matches"
+            _status.update(
+                f"Traversing UTXO graph… "
+                f"[{done}/{total} · {api_calls} API calls · {found} {noun} found]"
+            )
+
         events, income_evts, graph_matches = matcher.match_transfers(
             txs,
             overrides=overrides,
             tax_year=tax_year,
             graph_traversal_allowed=graph_traversal_allowed,
+            on_graph_progress=_graph_progress,
         )
     repo.write_graph_transfer_pairs(conn, graph_matches)
 

@@ -982,3 +982,64 @@ class TestTxidOverrideVisibility:
 
         assert len(state.auto_pairs) == 1
         assert len(state.unmatched_out) == 0
+
+
+# ---------------------------------------------------------------------------
+# Graph-pair pre-pass consolidation
+# ---------------------------------------------------------------------------
+
+
+class TestBuildStateGraphPairsConsolidation:
+    """Pre-pass must register ALL withdrawal inputs to a consolidation deposit.
+
+    Real-world case: three NDAX withdrawals (tx 7, 8, 12) are all direct inputs
+    to one Sparrow consolidation deposit (tx 15).  graph_transfer_pairs stores
+    three rows, each sharing the same deposit_id.  Without the fix, only the
+    first withdrawal (lowest PK) is registered — the others land in unmatched_out.
+    """
+
+    def _graph_pair(
+        self,
+        w_tx: Transaction,
+        d_tx: Transaction,
+        hops: int = 1,
+    ) -> tuple[Transaction, Transaction, int, str, Decimal, int, int]:
+        return (w_tx, d_tx, hops, "backward", Decimal("0.00000097"), 1, 3)
+
+    def test_all_consolidation_withdrawals_in_graph_pairs(self) -> None:
+        """All three withdrawals appear in state.graph_pairs, none in unmatched_out."""
+        w1 = _tx(12, TransactionType.WITHDRAWAL, amount="0.0003992")
+        w2 = _tx(7, TransactionType.WITHDRAWAL, amount="0.0003992")
+        w3 = _tx(8, TransactionType.WITHDRAWAL, amount="0.0002994")
+        d = _tx(15, TransactionType.DEPOSIT, amount="0.00109513")
+
+        graph_pairs = [
+            self._graph_pair(w1, d),
+            self._graph_pair(w2, d),
+            self._graph_pair(w3, d),
+        ]
+
+        state = _build_state([w1, w2, w3, d], overrides=[], graph_pairs=graph_pairs)
+
+        assert len(state.graph_pairs) == 3  # noqa: PLR2004
+        assert len(state.unmatched_out) == 0
+        assert len(state.unmatched_in) == 0
+        withdrawal_ids = {m[0].id for m in state.graph_pairs}
+        assert withdrawal_ids == {7, 8, 12}
+
+    def test_deposit_not_re_claimed_by_pass1(self) -> None:
+        """Deposit already in graph_pairs is not also matched by Pass 1."""
+        shared_txid = "d" * 64
+        w1 = _tx(1, TransactionType.WITHDRAWAL, amount="0.50000000")
+        w2 = _tx(2, TransactionType.WITHDRAWAL, amount="0.50000000", txid=shared_txid)
+        d = _tx(10, TransactionType.DEPOSIT, amount="0.99800000", txid=shared_txid)
+
+        # Only w1 is in graph_pairs; w2 shares txid with d (Pass 1 candidate).
+        graph_pairs = [self._graph_pair(w1, d)]
+
+        state = _build_state([w1, w2, d], overrides=[], graph_pairs=graph_pairs)
+
+        # d must not be double-counted: not in both graph_pairs and auto_pairs.
+        deposit_ids_in_graph = {m[1].id for m in state.graph_pairs}
+        deposit_ids_in_auto = {m[1].id for m in state.auto_pairs}
+        assert d.id not in deposit_ids_in_auto or d.id not in deposit_ids_in_graph

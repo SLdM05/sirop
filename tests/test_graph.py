@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from sirop.node.graph import backward_traverse, forward_traverse
+from sirop.node.graph import backward_traverse, backward_traverse_all, forward_traverse
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -181,6 +181,132 @@ class TestBackwardTraverse:
             max_hops=3,
         )
         assert result == ("withdrawal_tx", 1)
+
+
+# ---------------------------------------------------------------------------
+# backward_traverse_all
+# ---------------------------------------------------------------------------
+
+
+class TestBackwardTraverseAll:
+    def test_returns_empty_when_no_match(self) -> None:
+        tx_map = {
+            "deposit_tx": _make_tx("deposit_tx", vin_txids=["unrelated_tx"]),
+        }
+        result = backward_traverse_all(
+            start_txid="deposit_tx",
+            target_txids={"withdrawal_tx"},
+            fetch_tx=_make_fetch_tx(tx_map),
+            max_hops=3,
+        )
+        assert result == []
+
+    def test_returns_single_match(self) -> None:
+        """Behaves like backward_traverse when there is exactly one ancestor."""
+        tx_map = {
+            "deposit_tx": _make_tx("deposit_tx", vin_txids=["w1"]),
+        }
+        result = backward_traverse_all(
+            start_txid="deposit_tx",
+            target_txids={"w1"},
+            fetch_tx=_make_fetch_tx(tx_map),
+            max_hops=1,
+        )
+        assert result == [("w1", 1)]
+
+    def test_returns_all_matching_direct_inputs(self) -> None:
+        """Consolidation: deposit has three withdrawal inputs — all returned."""
+        tx_map = {
+            "deposit_tx": _make_tx("deposit_tx", vin_txids=["w1", "w2", "w3"]),
+        }
+        result = backward_traverse_all(
+            start_txid="deposit_tx",
+            target_txids={"w1", "w2", "w3"},
+            fetch_tx=_make_fetch_tx(tx_map),
+            max_hops=1,
+        )
+        assert set(result) == {("w1", 1), ("w2", 1), ("w3", 1)}
+
+    def test_partial_match_among_inputs(self) -> None:
+        """Only inputs that are in target_txids are returned."""
+        tx_map = {
+            "deposit_tx": _make_tx("deposit_tx", vin_txids=["w1", "noise", "w2"]),
+        }
+        result = backward_traverse_all(
+            start_txid="deposit_tx",
+            target_txids={"w1", "w2"},
+            fetch_tx=_make_fetch_tx(tx_map),
+            max_hops=1,
+        )
+        assert set(result) == {("w1", 1), ("w2", 1)}
+
+    def test_matches_at_different_depths(self) -> None:
+        """Returns matches at multiple hop depths in one traversal."""
+        # w1 is a direct input (hop=1); w2 is one hop further (hop=2).
+        tx_map = {
+            "deposit_tx": _make_tx("deposit_tx", vin_txids=["w1", "intermediate"]),
+            "intermediate": _make_tx("intermediate", vin_txids=["w2"]),
+        }
+        result = backward_traverse_all(
+            start_txid="deposit_tx",
+            target_txids={"w1", "w2"},
+            fetch_tx=_make_fetch_tx(tx_map),
+            max_hops=2,
+        )
+        assert set(result) == {("w1", 1), ("w2", 2)}
+
+    def test_max_hops_zero_returns_empty(self) -> None:
+        tx_map = {
+            "deposit_tx": _make_tx("deposit_tx", vin_txids=["w1"]),
+        }
+        result = backward_traverse_all(
+            start_txid="deposit_tx",
+            target_txids={"w1"},
+            fetch_tx=_make_fetch_tx(tx_map),
+            max_hops=0,
+        )
+        assert result == []
+
+    def test_does_not_traverse_past_matched_ancestor(self) -> None:
+        """Matched nodes are not enqueued, so deeper ancestors are not found."""
+        # w1's own parent is also a withdrawal — but we should not traverse past w1.
+        tx_map = {
+            "deposit_tx": _make_tx("deposit_tx", vin_txids=["w1"]),
+            "w1": _make_tx("w1", vin_txids=["deeper_w"]),
+        }
+        result = backward_traverse_all(
+            start_txid="deposit_tx",
+            target_txids={"w1", "deeper_w"},
+            fetch_tx=_make_fetch_tx(tx_map),
+            max_hops=3,
+        )
+        # Only w1 (hop=1) should be found; deeper_w is behind w1 and we stop there.
+        assert set(result) == {("w1", 1)}
+
+    def test_cycle_safe(self) -> None:
+        """Cycles do not cause infinite loops."""
+        tx_map = {
+            "deposit_tx": _make_tx("deposit_tx", vin_txids=["cycle_a"]),
+            "cycle_a": _make_tx("cycle_a", vin_txids=["cycle_b"]),
+            "cycle_b": _make_tx("cycle_b", vin_txids=["cycle_a"]),
+        }
+        result = backward_traverse_all(
+            start_txid="deposit_tx",
+            target_txids={"withdrawal_tx"},
+            fetch_tx=_make_fetch_tx(tx_map),
+            max_hops=10,
+        )
+        assert result == []
+
+    def test_fetch_returns_none_gracefully(self) -> None:
+        tx_map: dict[str, OnChainTx] = {}
+        result = backward_traverse_all(
+            start_txid="deposit_tx",
+            target_txids={"w1"},
+            fetch_tx=_make_fetch_tx(tx_map),
+            max_hops=3,
+        )
+        assert result == []
 
 
 # ---------------------------------------------------------------------------

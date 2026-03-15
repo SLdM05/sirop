@@ -100,6 +100,69 @@ def backward_traverse(
     return None
 
 
+def backward_traverse_all(
+    start_txid: str,
+    target_txids: set[str],
+    fetch_tx: Callable[[str], OnChainTx | None],
+    max_hops: int,
+) -> list[tuple[str, int]]:
+    """BFS backward from *start_txid*, returning ALL matching ancestor txids.
+
+    Identical to :func:`backward_traverse` except it does not stop at the
+    first match — it collects every target txid reachable within *max_hops*
+    and returns them all.  Used for consolidation transactions where a single
+    deposit is funded by multiple withdrawals.
+
+    Parameters
+    ----------
+    start_txid:
+        The txid of the deposit transaction to start from.
+    target_txids:
+        Set of withdrawal txids to search for in the ancestry tree.
+    fetch_tx:
+        Callable that returns an ``OnChainTx`` for a given txid, or
+        ``None`` if the transaction cannot be fetched.
+    max_hops:
+        Maximum number of parent layers to explore.
+
+    Returns
+    -------
+    List of ``(matched_txid, hops)`` tuples, one per reachable target.
+    Empty list when no match is found within the hop limit.
+    """
+    if max_hops <= 0:
+        return []
+
+    results: list[tuple[str, int]] = []
+    queue: deque[tuple[str, int]] = deque([(start_txid, 0)])
+    visited: set[str] = {start_txid}
+
+    while queue:
+        current_txid, depth = queue.popleft()
+
+        if depth >= max_hops:
+            continue
+
+        tx = fetch_tx(current_txid)
+        if tx is None:
+            continue
+
+        for parent_txid in tx.vin_txids:
+            if parent_txid in visited:
+                continue
+            visited.add(parent_txid)
+
+            hop_distance = depth + 1
+            if parent_txid in target_txids:
+                results.append((parent_txid, hop_distance))
+                # Do not enqueue matched ancestors — we don't need to traverse
+                # deeper from a confirmed match.
+            elif hop_distance < max_hops:
+                queue.append((parent_txid, hop_distance))
+
+    return results
+
+
 def forward_traverse(
     start_txid: str,
     target_txids: set[str],
