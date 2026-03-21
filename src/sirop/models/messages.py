@@ -100,3 +100,9 @@ class MessageCode(StrEnum):
     # ── switch ────────────────────────────────────────────────────────────────
     SWITCH_ERROR_BATCH_NOT_FOUND = "switch.error.batch_not_found"
     SWITCH_ACTIVATED = "switch.activated"
+
+    # ── pour ──────────────────────────────────────────────────────────────────
+    POUR_ERROR_NO_ACTIVE = "pour.error.no_active"
+    POUR_ERROR_NOT_READY = "pour.error.not_ready"
+    POUR_REPORT_WRITTEN = "pour.report_written"
+    POUR_DETAIL_WRITTEN = "pour.detail_written"

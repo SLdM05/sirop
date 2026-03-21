@@ -367,3 +367,23 @@ messages:
   switch.activated:
     category: output
     text: "Active batch: {name}"
+
+  # ── pour ──────────────────────────────────────────────────────────────────
+
+  pour.error.no_active:
+    category: error
+    code: E025
+    text: "No active batch. Run `sirop create <name>` first."
+
+  pour.error.not_ready:
+    category: error
+    code: E026
+    text: "The superficial loss stage has not completed for batch '{name}'. Run `sirop boil` first."
+
+  pour.report_written:
+    category: output
+    text: "Tax report written to {path}"
+
+  pour.detail_written:
+    category: output
+    text: "Detail backup written to {path}"

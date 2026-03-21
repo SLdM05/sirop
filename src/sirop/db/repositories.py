@@ -433,6 +433,33 @@ def write_income_events(conn: sqlite3.Connection, events: list[IncomeEvent]) -> 
     return updated
 
 
+def read_income_events(conn: sqlite3.Connection) -> list[IncomeEvent]:
+    """Deserialize all rows from ``income_events`` into ``IncomeEvent`` dataclasses."""
+    rows = conn.execute(
+        """
+        SELECT id, vtx_id, timestamp, asset, units, income_type, fmv_cad, source
+        FROM income_events
+        ORDER BY timestamp
+        """
+    ).fetchall()
+
+    result: list[IncomeEvent] = []
+    for row in rows:
+        result.append(
+            IncomeEvent(
+                id=row["id"],
+                vtx_id=row["vtx_id"],
+                timestamp=datetime.fromisoformat(row["timestamp"]),
+                asset=row["asset"],
+                units=Decimal(row["units"]),
+                income_type=row["income_type"],
+                fmv_cad=Decimal(row["fmv_cad"]),
+                source=row["source"],
+            )
+        )
+    return result
+
+
 def read_classified_events(conn: sqlite3.Connection) -> list[ClassifiedEvent]:
     """Deserialize taxable rows from ``classified_events`` into dataclasses.
 
@@ -639,6 +666,40 @@ def write_holdover_acb_states(
             )
 
 
+def read_acb_state_final(conn: sqlite3.Connection) -> list[ACBState]:
+    """Return the latest ``acb_state`` snapshot per asset with remaining units > 0.
+
+    Selects the row with the highest ``id`` for each asset, then filters to
+    assets where ``CAST(units AS REAL) > 0``.
+    """
+    rows = conn.execute(
+        """
+        SELECT asset, pool_cost, units
+        FROM acb_state
+        WHERE id IN (
+            SELECT MAX(id) FROM acb_state GROUP BY asset
+        )
+        AND CAST(units AS REAL) > 0
+        ORDER BY asset
+        """
+    ).fetchall()
+
+    result: list[ACBState] = []
+    for row in rows:
+        total_units = Decimal(row["units"])
+        total_acb_cad = Decimal(row["pool_cost"])
+        acb_per_unit_cad = total_acb_cad / total_units if total_units else Decimal("0")
+        result.append(
+            ACBState(
+                asset=row["asset"],
+                total_units=total_units,
+                total_acb_cad=total_acb_cad,
+                acb_per_unit_cad=acb_per_unit_cad,
+            )
+        )
+    return result
+
+
 def read_dispositions(conn: sqlite3.Connection) -> list[Disposition]:
     """Deserialize all rows from ``dispositions`` into ``Disposition`` dataclasses."""
     rows = conn.execute(
@@ -749,6 +810,46 @@ def write_adjusted_dispositions(
                 )
             )
     return updated
+
+
+def read_adjusted_dispositions(conn: sqlite3.Connection) -> list[AdjustedDisposition]:
+    """Deserialize all rows from ``dispositions_adjusted`` into dataclasses."""
+    rows = conn.execute(
+        """
+        SELECT id, disposition_id, timestamp, asset, units, proceeds, acb_of_disposed,
+               selling_fees, gain_loss, is_superficial_loss, superficial_loss_denied,
+               allowable_loss, adjusted_gain_loss, adjusted_acb_of_repurchase,
+               disposition_type, year_acquired
+        FROM dispositions_adjusted
+        ORDER BY timestamp
+        """
+    ).fetchall()
+
+    result: list[AdjustedDisposition] = []
+    for row in rows:
+        result.append(
+            AdjustedDisposition(
+                id=row["id"],
+                disposition_id=row["disposition_id"],
+                timestamp=datetime.fromisoformat(row["timestamp"]),
+                asset=row["asset"],
+                units=Decimal(row["units"]),
+                proceeds_cad=Decimal(row["proceeds"]),
+                acb_of_disposed_cad=Decimal(row["acb_of_disposed"]),
+                selling_fees_cad=Decimal(row["selling_fees"]),
+                gain_loss_cad=Decimal(row["gain_loss"]),
+                is_superficial_loss=bool(row["is_superficial_loss"]),
+                superficial_loss_denied_cad=Decimal(row["superficial_loss_denied"]),
+                allowable_loss_cad=Decimal(row["allowable_loss"]),
+                adjusted_gain_loss_cad=Decimal(row["adjusted_gain_loss"]),
+                adjusted_acb_of_repurchase_cad=Decimal(row["adjusted_acb_of_repurchase"])
+                if row["adjusted_acb_of_repurchase"] is not None
+                else None,
+                disposition_type=row["disposition_type"],
+                year_acquired=row["year_acquired"],
+            )
+        )
+    return result
 
 
 # ---------------------------------------------------------------------------

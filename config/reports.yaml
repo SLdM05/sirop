@@ -1,0 +1,17 @@
+# Report output configuration for `sirop pour`.
+# Form labels and line numbers referenced by src/sirop/reports/formatter.py.
+
+output_filename_template: "{batch}-{tax_year}-tax-report.md"
+
+federal:
+  form: "Schedule 3"
+  t1_line: 12700
+  crypto_description: "Cryptocurrency (Bitcoin and other digital assets)"
+
+quebec:
+  capital_gains_form: "Schedule G"
+  tp1_line: 139
+  mandatory_form: "TP-21.4.39-V"
+  tp1_checkbox_line: 24
+  penalty_per_day: 10
+  penalty_max: 2500

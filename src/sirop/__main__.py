@@ -15,6 +15,7 @@ from pathlib import Path
 from sirop.cli.boil import handle_boil
 from sirop.cli.create import handle_create
 from sirop.cli.list_batches import handle_list
+from sirop.cli.pour import handle_pour
 from sirop.cli.stir import handle_stir
 from sirop.cli.switch import handle_switch
 from sirop.cli.tap import handle_tap, handle_tap_walletfolder
@@ -25,6 +26,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="sirop",
         description="Quebec crypto tax calculator — boil your gains, grade your season.",
+        epilog=(
+            "Tip: if you have an existing .sirop file but no active batch set, "
+            "run `sirop switch <name>` (where <name> is the filename without .sirop) "
+            "to make it active."
+        ),
     )
     parser.add_argument(
         "--verbose", action="store_true", help="Show sensitive values in log output"
@@ -157,6 +163,20 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    # ── pour ──────────────────────────────────────────────────────────────────
+    pour_p = sub.add_parser(
+        "pour",
+        help="Generate a Markdown tax report for the active batch (Schedule 3, TP-21.4.39-V)",
+    )
+    pour_p.add_argument(
+        "--output-dir",
+        dest="output_dir",
+        type=Path,
+        metavar="DIR",
+        default=None,
+        help="Override output directory (default: OUTPUT_DIR from .env)",
+    )
+
     return parser
 
 
@@ -200,6 +220,9 @@ def main() -> None:
                 allow_public_mempool=args.allow_public_mempool,
             )
         )
+
+    elif args.command == "pour":
+        sys.exit(handle_pour(output_dir_override=args.output_dir))
 
     else:
         parser.print_help()
