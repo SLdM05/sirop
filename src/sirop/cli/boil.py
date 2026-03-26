@@ -38,7 +38,7 @@ from sirop.node.privacy import is_private_node_url
 from sirop.normalizer import normalizer
 from sirop.transfer_match import matcher
 from sirop.utils.boc import BoCRateError, fill_rate_gaps, prefetch_rates
-from sirop.utils.crypto_prices import prefetch_crypto_prices, prefetch_crypto_prices_by_range
+from sirop.utils.crypto_prices import prefetch_crypto_prices
 from sirop.utils.logging import StageContext, get_logger
 from sirop.utils.messages import emit, spinner
 from sirop.utils.price_cache import copy_prices_into_batch, open_price_cache, sync_prices_to_cache
@@ -301,15 +301,7 @@ def _prefetch_crypto_prices_bulk(
     *,
     boc_already_attributed: bool = False,
 ) -> None:
-    """Prefetch crypto CAD prices for all no-fiat transactions.
-
-    Strategy (two passes):
-    1. Range pass — one CoinGecko ``/market_chart/range`` call per unique
-       asset covers the full date span.  O(N_assets) HTTP calls instead of
-       O(N_dates x N_assets).
-    2. Per-date fallback — handles any dates the range response did not cover
-       (CoinGecko gaps, very recent dates, unsupported assets).  Mempool.space
-       is preferred for BTC in this pass.
+    """Prefetch BTC CAD prices for all no-fiat transactions via Mempool.space.
 
     Results are cached in SQLite so the normalizer never hits the network for
     these prices.
@@ -337,29 +329,17 @@ def _prefetch_crypto_prices_bulk(
 
     emit(MessageCode.BOIL_NORMALIZE_PREFETCH_CRYPTO, count=len(unique_pairs))
 
-    asset_date_groups: dict[str, list[date]] = {}
-    for asset, d in unique_pairs:
-        asset_date_groups.setdefault(asset, []).append(d)
-
     total = len(unique_pairs)
     with spinner(f"Fetching crypto prices… [0/{total}]") as status:
-        # Pass 1: range-based bulk fetch (one CoinGecko call per unique asset).
-        _range_written, range_cg = prefetch_crypto_prices_by_range(conn, asset_date_groups)
 
-        # Pass 2: per-date fallback; callback keeps the spinner counter current.
         def _progress(done: int, _total: int) -> None:
             status.update(f"Fetching crypto prices… [{done}/{_total}]")
 
-        _per_total, per_cg, mempool_count = prefetch_crypto_prices(
-            conn, unique_pairs, progress_cb=_progress
-        )
+        _fetched, mempool_count = prefetch_crypto_prices(conn, unique_pairs, progress_cb=_progress)
 
-    coingecko_count = range_cg + per_cg
-    if coingecko_count > 0:
-        emit(MessageCode.BOIL_NORMALIZE_COINGECKO_ATTRIBUTION)
     if mempool_count > 0:
         emit(MessageCode.BOIL_NORMALIZE_MEMPOOL_ATTRIBUTION)
-    if (coingecko_count > 0 or mempool_count > 0) and not boc_already_attributed:
+    if mempool_count > 0 and not boc_already_attributed:
         emit(MessageCode.BOIL_NORMALIZE_BOC_ATTRIBUTION)
 
 

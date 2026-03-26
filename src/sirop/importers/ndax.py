@@ -66,6 +66,9 @@ class NDAXImporter(BaseImporter):
         # Maps lowercased primary TYPE string → handler strategy name.
         # Populated from the ``group_handlers`` section of the YAML by from_yaml().
         self._type_to_handler: dict[str, str] = {}
+        # Crypto assets that are allowed through the filter — all others are
+        # skipped with a warning.  Populated from allowed_crypto_assets in YAML.
+        self._allowed_crypto_assets: frozenset[str] = frozenset({"BTC"})
 
     # ------------------------------------------------------------------
     # Public
@@ -82,6 +85,10 @@ class NDAXImporter(BaseImporter):
         for handler_name, primary_types in raw.get("group_handlers", {}).items():
             for pt in primary_types:
                 importer._type_to_handler[str(pt)] = str(handler_name)
+
+        allowed = raw.get("allowed_crypto_assets")
+        if allowed:
+            importer._allowed_crypto_assets = frozenset(str(a).upper() for a in allowed)
 
         return importer
 
@@ -110,7 +117,7 @@ class NDAXImporter(BaseImporter):
             results.extend(self._parse_group(ts_key, group_rows))
 
         results.sort(key=lambda t: t.timestamp)
-        return results
+        return self._filter_btc_only(results)
 
     # ------------------------------------------------------------------
     # Grouping
@@ -461,6 +468,35 @@ class NDAXImporter(BaseImporter):
             raw_row=dict(sent),
         )
         return [received_tx, sent_tx]
+
+    # ------------------------------------------------------------------
+    # BTC-only filter
+    # ------------------------------------------------------------------
+
+    # Fiat currencies that are always allowed regardless of allowed_crypto_assets.
+    _FIAT_CURRENCIES: frozenset[str] = frozenset({"CAD", "USD"})
+
+    def _filter_btc_only(self, results: list[RawTransaction]) -> list[RawTransaction]:
+        """Drop any RawTransaction whose asset is not in allowed_crypto_assets or fiat.
+
+        Emits one warning per unique skipped asset symbol (not per row).
+        """
+        allowed = self._allowed_crypto_assets | self._FIAT_CURRENCIES
+        skipped: dict[str, int] = {}
+        kept: list[RawTransaction] = []
+        for tx in results:
+            asset = tx.asset.upper()
+            if asset in allowed:
+                kept.append(tx)
+            else:
+                skipped[asset] = skipped.get(asset, 0) + 1
+        for asset, count in sorted(skipped.items()):
+            logger.warning(
+                "ndax: skipping %d non-BTC row(s) for asset %s — sirop is BTC-only",
+                count,
+                asset,
+            )
+        return kept
 
     # ------------------------------------------------------------------
     # Helpers

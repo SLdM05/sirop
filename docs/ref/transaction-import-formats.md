@@ -24,7 +24,7 @@
 ### Export Mechanics
 
 Shakepay splits transaction history into **multiple CSV files** by currency type:
-- Crypto transactions (BTC/ETH activity)
+- Bitcoin transactions (BTC activity)
 - CAD transactions
 - USD transactions (if applicable)
 
@@ -46,7 +46,7 @@ Date,Amount Debited,Asset Debited,Amount Credited,Asset Credited,Market Value,Ma
 |--------|------|-------|
 | `Date` | ISO 8601 datetime | Format: `2022-09-10T00:36:12+00`. The timezone offset is always `+00` (UTC). Parse with timezone awareness. |
 | `Amount Debited` | decimal or empty | Positive number. Empty if this transaction has no debit leg. |
-| `Asset Debited` | string or empty | ISO currency code (`CAD`, `BTC`, `ETH`) or empty. |
+| `Asset Debited` | string or empty | ISO currency code (`CAD`, `BTC`) or empty. Non-BTC crypto rows are skipped by the importer. |
 | `Amount Credited` | decimal or empty | Positive number. Empty if this transaction has no credit leg. |
 | `Asset Credited` | string or empty | ISO currency code or empty. |
 | `Market Value` | decimal or empty | Shakepay's computed market value at trade time. **Do not use for ACB.** Not a Bank of Canada rate. |
@@ -312,7 +312,7 @@ ASSET,ASSET_CLASS,AMOUNT,BALANCE,TYPE,TX_ID,DATE
 
 | Column | Type | Notes |
 |--------|------|-------|
-| `ASSET` | string | Asset ticker: `BTC`, `ETH`, `CAD`, etc. |
+| `ASSET` | string | Asset ticker: `BTC`, `CAD`, etc. Non-BTC crypto rows (e.g. ETH, SOL) are skipped by the importer with a warning. |
 | `ASSET_CLASS` | string | `FIAT` or `CRYPTO`. Used to distinguish fiat legs from crypto legs in a trade group. |
 | `AMOUNT` | decimal | **Signed.** Positive = credit (received). Negative = debit (sent). Parse as `Decimal`. |
 | `BALANCE` | decimal | Running balance of this asset after this row. Informational — not used for calculations. |
