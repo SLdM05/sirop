@@ -48,7 +48,7 @@ One caveat: the **Alternative Minimum Tax (AMT)** reforms from January 1, 2024, 
 
 ## 3. ACB calculation: the weighted-average method
 
-The CRA mandates the **Adjusted Cost Base (ACB)** method — a running weighted-average cost across all identical units of a cryptocurrency. **FIFO and LIFO are not permitted** for identical properties in Canada. Each cryptocurrency (BTC, ETH, etc.) maintains its own separate ACB pool.
+The CRA mandates the **Adjusted Cost Base (ACB)** method — a running weighted-average cost across all identical units of a cryptocurrency. **FIFO and LIFO are not permitted** for identical properties in Canada. Each cryptocurrency maintains its own separate ACB pool.
 
 ### Core formulas
 
@@ -123,7 +123,7 @@ denied_loss = total_loss * (superficial_portion / units_sold)
 allowable_loss = total_loss - denied_loss
 ```
 
-**"Identical property" for crypto** means the same token regardless of exchange or wallet. BTC on Shakepay and BTC on NDAX are identical. BTC and ETH are not identical. The rule applies across all wallets and affiliated persons.
+**"Identical property" for crypto** means the same token regardless of exchange or wallet. BTC on Shakepay and BTC on NDAX are identical. The rule applies across all wallets and affiliated persons.
 
 ---
 
@@ -135,7 +135,7 @@ Quebec **generally follows identical substantive rules** to the CRA for crypto t
 
 This form is **mandatory for anyone who owned, received, disposed of, or used cryptoassets** during the tax year — even if you merely held crypto with no transactions. It was introduced for the 2024 tax year onward.
 
-The form requires reporting **by type of cryptoasset** (separate entries for BTC, ETH, etc.) and includes:
+The form requires reporting **by type of cryptoasset** and includes:
 
 - **Part 1**: Identification
 - **Part 2**: Information on cryptoasset holdings (balances)
@@ -230,7 +230,7 @@ Koinly uses the CRA-required ACB method, accounts for the superficial loss rule,
 REQUIRED_FIELDS = {
     'date': 'Transaction timestamp (UTC or with timezone)',
     'type': 'buy | sell | trade | transfer | income | fee',
-    'asset': 'Cryptocurrency symbol (BTC, ETH, etc.)',
+    'asset': 'Cryptocurrency symbol (e.g. BTC)',
     'amount': 'Quantity of crypto',
     'cad_value': 'Fair market value in CAD at transaction time',
     'fee_amount': 'Fee quantity (if any)',

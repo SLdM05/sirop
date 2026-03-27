@@ -40,6 +40,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from typing import Any
+
+import yaml
 
 from sirop.importers.base import BaseImporter, InvalidCSVFormatError, load_importer_config
 from sirop.models.importer import ImporterConfig
@@ -89,6 +92,9 @@ class ShakepayImporter(BaseImporter):
         super().__init__(config)
         # Frozenset for O(1) membership checks: "is this currency fiat?"
         self._fiat_currencies: frozenset[str] = frozenset(config.fiat_currencies)
+        # Crypto assets that are allowed through the filter — all others are
+        # skipped with a warning.  Populated from allowed_crypto_assets in YAML.
+        self._allowed_crypto_assets: frozenset[str] = frozenset({"BTC"})
 
     # ------------------------------------------------------------------
     # Factory
@@ -97,8 +103,13 @@ class ShakepayImporter(BaseImporter):
     @classmethod
     def from_yaml(cls, yaml_path: Path) -> "ShakepayImporter":
         """Construct a ``ShakepayImporter`` from a YAML config file."""
+        raw: dict[str, Any] = yaml.safe_load(yaml_path.read_text())
         config = load_importer_config(yaml_path, source_name=yaml_path.stem)
-        return cls(config)
+        importer = cls(config)
+        allowed = raw.get("allowed_crypto_assets")
+        if allowed:
+            importer._allowed_crypto_assets = frozenset(str(a).upper() for a in allowed)
+        return importer
 
     # ------------------------------------------------------------------
     # Public
@@ -137,7 +148,33 @@ class ShakepayImporter(BaseImporter):
                 results.append(tx)
 
         results.sort(key=lambda t: t.timestamp)
-        return results
+        return self._filter_btc_only(results)
+
+    # ------------------------------------------------------------------
+    # BTC-only filter
+    # ------------------------------------------------------------------
+
+    def _filter_btc_only(self, results: list[RawTransaction]) -> list[RawTransaction]:
+        """Drop any RawTransaction whose asset is not in allowed_crypto_assets or fiat.
+
+        Emits one warning per unique skipped asset symbol (not per row).
+        """
+        allowed = self._allowed_crypto_assets | self._fiat_currencies
+        skipped: dict[str, int] = {}
+        kept: list[RawTransaction] = []
+        for tx in results:
+            asset = tx.asset.upper()
+            if asset in allowed:
+                kept.append(tx)
+            else:
+                skipped[asset] = skipped.get(asset, 0) + 1
+        for asset, count in sorted(skipped.items()):
+            logger.warning(
+                "shakepay: skipping %d non-BTC row(s) for asset %s — sirop is BTC-only",
+                count,
+                asset,
+            )
+        return kept
 
     # ------------------------------------------------------------------
     # Row-level dispatch

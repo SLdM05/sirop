@@ -74,7 +74,7 @@ AUTO-MATCHED PAIRS (4)
   — reason: shared txid 2222...
 
 UNMATCHED WITHDRAWALS (1)  ← will be treated as SELLS unless linked
-  tx:41 [ndax]     2024-09-03 14:22  withdrawal  ETH  2.5
+  tx:41 [ndax]     2024-09-03 14:22  withdrawal  BTC  0.025
 
 ACTIVE OVERRIDES (0)
 
@@ -302,7 +302,7 @@ error [E020]: Batch 'my2025tax' has not been normalized yet.
 | No active batch | `error: no active batch. Run 'sirop create <name>' first.` |
 | Batch not normalized | `error [E020]: Batch '…' has not been normalized yet. Run 'sirop boil' first.` |
 | Transaction ID not found | `error [E021]: Transaction id 99 not found in the active batch.` |
-| Link: different assets | `error: cannot link tx:3 (BTC) with tx:41 (ETH) — asset mismatch.` |
+| Link: different assets | `error: cannot link tx:3 (BTC) with tx:41 (CAD) — asset mismatch.` |
 | Link: receive > send | `error: implied fee is negative — received amount exceeds sent amount.` |
 | Fee ≤ 0 | `error: fee must be greater than zero.` |
 | Fee ≥ tx amount | `error: fee cannot equal or exceed the transaction amount.` |

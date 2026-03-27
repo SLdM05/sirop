@@ -56,10 +56,6 @@ class Settings(BaseSettings):
     # 0.25 keeps requests under 250/min — the documented safe ceiling.
     btc_traversal_request_delay: float = 0.0
 
-    # ── External APIs ─────────────────────────────────────────────────────────
-
-    coingecko_api_key: str = ""
-
     # ── Price cache ───────────────────────────────────────────────────────────
 
     asset_price_cache: bool = False

@@ -152,7 +152,7 @@ and cross-source transfer matching logic for Shakepay ↔ Sparrow.
 - **Poetry** for dependency management and virtualenv (`pyproject.toml`)
 - `decimal.Decimal` for all money (never float)
 - Bank of Canada Valet API for FX rates (no key required)
-- Mempool.space + CoinGecko public APIs for historical crypto prices (no key required)
+- Mempool.space public API for historical BTC prices (no key required, BTC-only)
 - SQLite via `sqlite3` (stdlib) for pipeline persistence (one `.sirop` file per batch)
 - Bitcoin Core RPC or Mempool REST API for node verification
 - `ruff` for linting and formatting
@@ -233,7 +233,7 @@ config/
 │   ├── ndax.yaml          # Column mappings, date format, transaction type map
 │   ├── sparrow.yaml       # Column mappings, date format
 │   └── koinly.yaml        # Column mappings, date format, transaction type map
-├── currencies.yaml        # Supported currencies: BoC API series codes (fiat) and CoinGecko IDs + Mempool flags (crypto)
+├── currencies.yaml        # Supported currencies: BoC API series codes (fiat) and Mempool flag (BTC only)
 └── reports.yaml           # Output form field mappings, line numbers
 ```
 

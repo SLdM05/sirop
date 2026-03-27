@@ -218,10 +218,6 @@ messages:
     category: output
     text: "  Fetching market prices for {count} date(s)…"
 
-  boil.normalize.coingecko_attribution:
-    category: output
-    text: "  Powered by CoinGecko API — https://www.coingecko.com/en/api"
-
   boil.normalize.boc_attribution:
     category: output
     text: "  Bank of Canada exchange rates — https://www.bankofcanada.ca/rates/exchange/"
