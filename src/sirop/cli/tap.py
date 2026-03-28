@@ -42,6 +42,7 @@ from sirop.importers.detector import FormatDetector
 from sirop.importers.ndax import NDAXImporter
 from sirop.importers.shakepay import ShakepayImporter
 from sirop.importers.sparrow import SparrowImporter
+from sirop.importers.xpub import XpubImporter
 from sirop.models.messages import MessageCode
 from sirop.models.raw import RawTransaction
 from sirop.utils.logging import get_logger
@@ -54,10 +55,14 @@ _BUILTIN_CONFIG_DIR = Path("config/importers")
 
 # Registry: source_name → factory callable (classmethod bound to the class).
 # Adding a new importer: implement the class, add its from_yaml here.
-_IMPORTER_REGISTRY: dict[str, Callable[[Path], BaseImporter]] = {
+# XpubImporter is not a BaseImporter subclass (it uses parse_multi, not parse),
+# so the registry value type is widened to Any for its entry; the xpub path is
+# dispatched via _run_tap_xpub before the registry is consulted.
+_IMPORTER_REGISTRY: dict[str, Callable[[Path], BaseImporter | XpubImporter]] = {
     "ndax": NDAXImporter.from_yaml,
     "shakepay": ShakepayImporter.from_yaml,
     "sparrow": SparrowImporter.from_yaml,
+    "xpub": XpubImporter.from_yaml,
 }
 
 
@@ -259,6 +264,55 @@ def _handle_tap_folder(
     return overall_rc
 
 
+def _run_tap_xpub(
+    file_path: Path,
+    settings: Settings,
+    batch_name: str,
+) -> int:
+    """Handle ``sirop tap <file.yaml> --source xpub`` — multi-wallet path."""
+    xpub_config_path = Path("config/importers/xpub.yaml")
+    importer = XpubImporter.from_yaml(xpub_config_path)
+
+    try:
+        wallet_txs = importer.parse_multi(file_path, settings)
+    except ValueError as exc:
+        emit(MessageCode.TAP_XPUB_ERROR_INVALID_YAML, path=str(file_path), detail=str(exc))
+        return 1
+
+    total_inserted = 0
+    total_skipped = 0
+    for wallet_name, txs in wallet_txs.items():
+        if not txs:
+            continue
+        inserted, skipped = _write_to_batch(
+            batch_name, settings, txs, wallet_name, auto_created=False, source="xpub"
+        )
+        total_inserted += inserted
+        total_skipped += skipped
+        logger.debug("xpub wallet %r: inserted=%d skipped=%d", wallet_name, inserted, skipped)
+
+    if total_inserted == 0:
+        emit(
+            MessageCode.TAP_NOTHING_NEW,
+            filename=file_path.name,
+            fmt="xpub",
+            count=total_skipped,
+            batch=batch_name,
+        )
+    else:
+        skip_note = f" ({total_skipped} duplicate(s) skipped)" if total_skipped else ""
+        emit(
+            MessageCode.TAP_SUCCESS,
+            count=total_inserted,
+            filename=file_path.name,
+            fmt="xpub",
+            batch=batch_name,
+            wallet_note="",
+            skip_note=skip_note,
+        )
+    return 0
+
+
 def _run_tap(file_path: Path, source: str | None, wallet: str | None, settings: Settings) -> int:
     """Core tap logic; raises ``_TapError`` on any user-facing error."""
     # ── 1. Active batch ───────────────────────────────────────────────────────
@@ -268,6 +322,11 @@ def _run_tap(file_path: Path, source: str | None, wallet: str | None, settings: 
 
     if not file_path.exists():
         raise _TapError(MessageCode.TAP_ERROR_FILE_NOT_FOUND, path=file_path)
+
+    # --- xpub YAML wallet-definition shortcut -----------------------------------
+    if file_path.suffix in {".yaml", ".yml"} or source == "xpub":
+        return _run_tap_xpub(file_path, settings, batch_name)
+    # --- existing CSV flow below ------------------------------------------------
 
     # ── 2. Read CSV headers (header row only — no data rows yet) ─────────────
     headers = _read_headers(file_path)
