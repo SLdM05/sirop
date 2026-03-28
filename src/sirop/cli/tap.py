@@ -55,14 +55,13 @@ _BUILTIN_CONFIG_DIR = Path("config/importers")
 
 # Registry: source_name → factory callable (classmethod bound to the class).
 # Adding a new importer: implement the class, add its from_yaml here.
-# XpubImporter is not a BaseImporter subclass (it uses parse_multi, not parse),
-# so the registry value type is widened to Any for its entry; the xpub path is
-# dispatched via _run_tap_xpub before the registry is consulted.
-_IMPORTER_REGISTRY: dict[str, Callable[[Path], BaseImporter | XpubImporter]] = {
+# XpubImporter is dispatched via _run_tap_xpub before this registry is consulted,
+# so it is intentionally absent — keeping it here would be dead code and would
+# widen the value type unnecessarily.
+_IMPORTER_REGISTRY: dict[str, Callable[[Path], BaseImporter]] = {
     "ndax": NDAXImporter.from_yaml,
     "shakepay": ShakepayImporter.from_yaml,
     "sparrow": SparrowImporter.from_yaml,
-    "xpub": XpubImporter.from_yaml,
 }
 
 
@@ -278,6 +277,20 @@ def _run_tap_xpub(
     except ValueError as exc:
         emit(MessageCode.TAP_XPUB_ERROR_INVALID_YAML, path=str(file_path), detail=str(exc))
         return 1
+    except Exception as exc:  # scan failures (network, derivation errors)
+        # parse_multi already emits TAP_XPUB_ERROR_SCAN_FAILED per wallet; just return 1
+        logger.debug("xpub scan failed: %s", exc)
+        return 1
+
+    if not wallet_txs:
+        emit(
+            MessageCode.TAP_NOTHING_NEW,
+            filename=file_path.name,
+            fmt="xpub",
+            count=0,
+            batch=batch_name,
+        )
+        return 0
 
     total_inserted = 0
     total_skipped = 0
@@ -344,6 +357,12 @@ def _run_tap(file_path: Path, source: str | None, wallet: str | None, settings: 
     )
     if detected_source is None:
         return 1  # helpers already emitted the error
+
+    # Safety valve: if detection resolves to "xpub" via CSV fingerprinting
+    # (unlikely, but possible with custom importer configs), route to the
+    # dedicated xpub handler rather than falling through to the CSV path.
+    if detected_source == "xpub":
+        return _run_tap_xpub(file_path, settings, batch_name)
 
     # ── 4. Load importer and parse ────────────────────────────────────────────
     factory = _IMPORTER_REGISTRY.get(detected_source)
