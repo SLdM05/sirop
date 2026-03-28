@@ -108,7 +108,9 @@ def test_scan_single_receive() -> None:
     """One receive on external index 0, gap_limit=3 stops after 3 consecutive empty."""
     tx = _confirmed_receive("aaa" + "0" * 61, _ADDR_0_0, _RECEIVE_VALUE_SATS, 1_700_000_000)
 
-    def fake_fetch(base_url: str, address: str, private: bool) -> list[Any]:
+    def fake_fetch(
+        base_url: str, address: str, private: bool, request_delay: float = 0.0
+    ) -> list[Any]:
         return [tx] if address == _ADDR_0_0 else []
 
     with patch("sirop.node.address_scanner._fetch_address_txs", side_effect=fake_fetch):
@@ -126,7 +128,9 @@ def test_scan_send_includes_fee() -> None:
         "bbb" + "0" * 61, _ADDR_0_0, _SEND_VALUE_SATS, _SEND_FEE_SATS, 1_700_000_001
     )
 
-    def fake_fetch(base_url: str, address: str, private: bool) -> list[Any]:
+    def fake_fetch(
+        base_url: str, address: str, private: bool, request_delay: float = 0.0
+    ) -> list[Any]:
         return [tx] if address == _ADDR_0_0 else []
 
     with patch("sirop.node.address_scanner._fetch_address_txs", side_effect=fake_fetch):
@@ -141,7 +145,9 @@ def test_scan_deduplication_across_branches() -> None:
     """Same txid seen on both branches → appears only once."""
     tx = _confirmed_receive("ccc" + "0" * 61, _ADDR_0_0, 50_000, 1_700_000_002)
 
-    def fake_fetch(base_url: str, address: str, private: bool) -> list[Any]:
+    def fake_fetch(
+        base_url: str, address: str, private: bool, request_delay: float = 0.0
+    ) -> list[Any]:
         return [tx] if address == _ADDR_0_0 else []
 
     with patch("sirop.node.address_scanner._fetch_address_txs", side_effect=fake_fetch):
@@ -157,7 +163,9 @@ def test_scan_gap_limit_stops_derivation() -> None:
     tx = _confirmed_receive("ddd" + "0" * 61, _ADDR_0_0, 10_000, 1_700_000_003)
     addresses_checked: list[str] = []
 
-    def fake_fetch(base_url: str, address: str, private: bool) -> list[Any]:
+    def fake_fetch(
+        base_url: str, address: str, private: bool, request_delay: float = 0.0
+    ) -> list[Any]:
         addresses_checked.append(address)
         return [tx] if address == _ADDR_0_0 else []
 

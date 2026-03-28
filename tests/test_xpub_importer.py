@@ -64,7 +64,8 @@ def importer() -> XpubImporter:
 def fake_settings() -> MagicMock:
     s = MagicMock()
     s.btc_mempool_url = "https://mempool.space/api"
-    s.btc_traversal_allow_public = True  # skip privacy prompt in tests
+    s.btc_traversal_allow_public = True  # skip privacy block in tests
+    s.btc_traversal_request_delay = 0.0
     return s
 
 
@@ -115,6 +116,27 @@ def test_parse_multi_txid_preserved(
     txids = {t.txid for t in result["test-wallet"]}
     assert "aaa" + "0" * 61 in txids
     assert "bbb" + "0" * 61 in txids
+
+
+def test_public_endpoint_blocked_by_default(importer: XpubImporter, tmp_wallet_def: Path) -> None:
+    """Public Mempool URL must be rejected unless btc_traversal_allow_public=True."""
+    s = MagicMock()
+    s.btc_mempool_url = "https://mempool.space/api"
+    s.btc_traversal_allow_public = False
+    s.btc_traversal_request_delay = 0.0
+    with pytest.raises(ValueError, match="private Mempool node"):
+        importer.parse_multi(tmp_wallet_def, s)
+
+
+def test_private_endpoint_allowed(importer: XpubImporter, tmp_wallet_def: Path) -> None:
+    """Local Mempool URL must be allowed without any flag."""
+    s = MagicMock()
+    s.btc_mempool_url = "http://localhost:3006/api"
+    s.btc_traversal_allow_public = False
+    s.btc_traversal_request_delay = 0.0
+    with patch("sirop.importers.xpub.scan_wallet", return_value=_FAKE_SCANNED):
+        result = importer.parse_multi(tmp_wallet_def, s)
+    assert "test-wallet" in result
 
 
 def test_missing_wallets_key_raises(

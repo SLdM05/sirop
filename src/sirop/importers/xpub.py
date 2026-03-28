@@ -71,8 +71,21 @@ class XpubImporter:
         entries = self._load_wallet_entries(path)
         mempool_url: str = settings.btc_mempool_url
         allow_public: bool = getattr(settings, "btc_traversal_allow_public", False)
+        request_delay: float = float(getattr(settings, "btc_traversal_request_delay", 0.0))
 
-        if not is_private_node_url(mempool_url) and not allow_public:
+        if not is_private_node_url(mempool_url):
+            if not allow_public:
+                # Hard block — address scanning leaks wallet structure to a public host.
+                # Unlike price lookups (which send only dates/assets), address scanning
+                # sends derived Bitcoin addresses that directly identify the user's wallet.
+                # Require a private node unless the user explicitly opts in.
+                raise ValueError(
+                    f"xpub address scanning requires a private Mempool node. "
+                    f"BTC_MEMPOOL_URL={mempool_url!r} is a public endpoint. "
+                    f"Set BTC_MEMPOOL_URL to a local node, or set "
+                    f"BTC_TRAVERSAL_ALLOW_PUBLIC=true to override."
+                )
+            # allow_public=True — warn once then proceed.
             total_addresses = sum(len(e.branches) * (e.gap_limit + 1) for e in entries)
             emit(
                 MessageCode.TAP_XPUB_PRIVACY_WARNING,
@@ -95,6 +108,7 @@ class XpubImporter:
                     entry.xpub,
                     entry.branches,
                     entry.gap_limit,
+                    request_delay,
                 )
             except Exception as exc:
                 emit(

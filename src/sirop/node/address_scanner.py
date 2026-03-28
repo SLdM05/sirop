@@ -72,8 +72,17 @@ def scan_wallet(
     xpub: str,
     branches: list[int],
     gap_limit: int,
+    request_delay: float = 0.0,
 ) -> list[ScannedTx]:
-    """Derive addresses and scan tx history with gap-limit logic via Mempool API."""
+    """Derive addresses and scan tx history with gap-limit logic via Mempool API.
+
+    Parameters
+    ----------
+    request_delay:
+        Seconds to sleep between each address HTTP request. Sourced from
+        ``BTC_TRAVERSAL_REQUEST_DELAY`` in settings. Use 0.05-0.1 for public
+        endpoints to avoid rate limiting; 0.0 is fine for a local node.
+    """
     for b in branches:
         if b not in (0, 1):
             raise ValueError(f"Invalid branch {b!r} — must be 0 (external) or 1 (internal)")
@@ -89,7 +98,7 @@ def scan_wallet(
         while gap < gap_limit:
             addr = derive_address(xpub, branch, idx)
             all_addresses.add(addr)
-            addr_txs = _fetch_address_txs(mempool_url, addr, private)
+            addr_txs = _fetch_address_txs(mempool_url, addr, private, request_delay)
             if addr_txs:
                 for raw_tx in addr_txs:
                     raw_txs[raw_tx["txid"]] = raw_tx
@@ -139,11 +148,15 @@ def scan_wallet(
 _RETRY_DELAY = 2
 
 
-def _fetch_address_txs(base_url: str, address: str, private: bool) -> list[Any]:
+def _fetch_address_txs(
+    base_url: str, address: str, private: bool, request_delay: float = 0.0
+) -> list[Any]:
     """Fetch raw tx objects from GET /address/{address}/txs with pagination."""
     url = f"{base_url.rstrip('/')}/address/{address}/txs"
     all_txs: list[Any] = []
     while url:
+        if request_delay > 0:
+            time.sleep(request_delay)
         page = _get_json(url, private)
         if not isinstance(page, list):
             break
