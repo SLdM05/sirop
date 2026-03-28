@@ -461,3 +461,67 @@ The following requirements apply to all importers regardless of source.
 8. **Recipient address convention.** If an exchange or wallet exports the **recipient Bitcoin address** (not the on-chain txid) for an outgoing transfer, store it in `notes` as `"Sent to: <addr>"` and set `txid = None`. This enables Pass 1.25 address-based txid resolution in the transfer matcher, which queries `GET /api/address/{addr}/txs` to find the real txid and match it against a Sparrow deposit. The Shakepay importer (`shakepay.py`) is the reference implementation: it detects `"Bitcoin address bc1q…"` in the Description column and applies this convention automatically.
 
 9. **Label / annotation field.** Any wallet importer (Sparrow, Electrum, Blue Wallet, etc.) that exports a user-editable label column **must** read it via the `label` key in its YAML column mapping and pass the value to `RawTransaction.notes`. This enables `sirop stir` to display the label as context for each transaction. If no `label` key exists in the config, `notes` defaults to `""`. See `config/importers/sparrow.yaml` for the reference YAML declaration and `src/sirop/importers/sparrow.py` for the implementation.
+
+---
+
+## xpub Wallet Definition (source: `xpub`)
+
+**File type:** YAML (`.yaml` or `.yml`)
+**Auto-detected:** yes — `sirop tap` detects `.yaml` suffix and routes to the xpub importer
+**Explicit flag:** `sirop tap wallets.yaml --source xpub`
+
+### File schema
+
+```yaml
+source: xpub       # required; identifies this as an xpub wallet definition
+
+wallets:
+  - name: <str>           # required — wallet name in the sirop batch database
+    xpub: <str>           # required — account-level zpub / ypub / xpub
+    gap_limit: <int>      # optional — consecutive empty addresses before stop (default: 20)
+    branches: [0, 1]      # optional — HD branches to scan (default: both)
+    label: <str>          # optional — free-text annotation stored in wallet record
+```
+
+### Supported key types
+
+| Prefix | Address type        | HD standard |
+|--------|---------------------|-------------|
+| `zpub` | P2WPKH (bech32)     | BIP84       |
+| `ypub` | P2SH-P2WPKH         | BIP49       |
+| `xpub` | P2PKH (legacy)      | BIP44       |
+
+### Derivation
+
+Given account xpub at path `m/purpose'/coin'/account'`, child addresses are derived at
+`m/.../branch/index` where `branch=0` is external (receive) and `branch=1` is internal (change).
+
+### Gap limit
+
+Scanning stops when `gap_limit` consecutive address indices have no transaction history on
+the Mempool API. Default is 20 (BIP44 standard). Increase to 50–100 for JoinMarket wallets
+where coinjoin rounds create wide gaps in address usage.
+
+### JoinMarket note
+
+JoinMarket uses 10 HD branches by default (5 mixing depths × 2 branches each). Each branch
+has its own xpub at path `m/84'/0'/n'/branch`. A single xpub only covers one branch. To
+import all JoinMarket activity, export all relevant xpubs from `joinmarket wallet-tool.py`
+and list each in the YAML with a distinct wallet name.
+
+### Transaction mapping
+
+| Mempool data        | sirop field             |
+|---------------------|-------------------------|
+| `net_sats > 0`      | `transaction_type = deposit` |
+| `net_sats < 0`      | `transaction_type = withdrawal` |
+| `fee` (spending tx) | `fee_amount` in BTC     |
+| `status.block_time` | `timestamp` (UTC)       |
+| `txid`              | `txid`                  |
+
+### Privacy
+
+All derived Bitcoin addresses are sent to the configured `BTC_MEMPOOL_URL`. Use a private
+node (e.g. `BTC_MEMPOOL_URL=http://localhost:8332`) to avoid disclosing your wallet to a
+public endpoint. If a public URL is configured, sirop emits warning `[W009]` before scanning.
+Set `BTC_TRAVERSAL_ALLOW_PUBLIC=true` to suppress the warning in scripted/CI runs.

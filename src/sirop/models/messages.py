@@ -105,3 +105,13 @@ class MessageCode(StrEnum):
     POUR_ERROR_NOT_READY = "pour.error.not_ready"
     POUR_REPORT_WRITTEN = "pour.report_written"
     POUR_DETAIL_WRITTEN = "pour.detail_written"
+
+    # xpub importer
+    TAP_XPUB_PRIVACY_WARNING = "tap.xpub.privacy_warning"
+    TAP_XPUB_SCANNING = "tap.xpub.scanning"
+    TAP_XPUB_SCAN_COMPLETE = "tap.xpub.scan_complete"
+    TAP_XPUB_NO_TRANSACTIONS = "tap.xpub.no_transactions"
+    TAP_XPUB_ERROR_INVALID_YAML = "tap.xpub.error.invalid_yaml"
+    TAP_XPUB_ERROR_MISSING_WALLETS_KEY = "tap.xpub.error.missing_wallets_key"
+    TAP_XPUB_ERROR_INVALID_WALLET_ENTRY = "tap.xpub.error.invalid_wallet_entry"
+    TAP_XPUB_ERROR_SCAN_FAILED = "tap.xpub.error.scan_failed"
