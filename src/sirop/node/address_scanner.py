@@ -8,8 +8,9 @@ import ssl
 import time
 import urllib.request
 from dataclasses import dataclass
+from typing import Any
 
-from bip_utils import (
+from bip_utils import (  # type: ignore[import-untyped]
     Bip44,
     Bip44Changes,
     Bip44Coins,
@@ -54,15 +55,15 @@ def derive_address(xpub: str, branch: int, index: int) -> str:
     if prefix == "zpub":
         change = Bip44Changes.CHAIN_EXT if branch == 0 else Bip44Changes.CHAIN_INT
         ctx = Bip84.FromExtendedKey(xpub, Bip84Coins.BITCOIN)
-        return ctx.Change(change).AddressIndex(index).PublicKey().ToAddress()
+        return str(ctx.Change(change).AddressIndex(index).PublicKey().ToAddress())
     if prefix == "ypub":
         change = Bip44Changes.CHAIN_EXT if branch == 0 else Bip44Changes.CHAIN_INT
         ctx = Bip49.FromExtendedKey(xpub, Bip49Coins.BITCOIN)
-        return ctx.Change(change).AddressIndex(index).PublicKey().ToAddress()
+        return str(ctx.Change(change).AddressIndex(index).PublicKey().ToAddress())
     if prefix == "xpub":
         change = Bip44Changes.CHAIN_EXT if branch == 0 else Bip44Changes.CHAIN_INT
         ctx = Bip44.FromExtendedKey(xpub, Bip44Coins.BITCOIN)
-        return ctx.Change(change).AddressIndex(index).PublicKey().ToAddress()
+        return str(ctx.Change(change).AddressIndex(index).PublicKey().ToAddress())
     raise ValueError(f"Unsupported xpub prefix: {prefix!r} — expected zpub, ypub, or xpub")
 
 
@@ -80,7 +81,7 @@ def scan_wallet(
     private = is_private_node_url(mempool_url)
 
     all_addresses: set[str] = set()
-    raw_txs: dict[str, dict] = {}
+    raw_txs: dict[str, Any] = {}
 
     for branch in branches:
         gap = 0
@@ -138,10 +139,10 @@ def scan_wallet(
 _RETRY_DELAY = 2
 
 
-def _fetch_address_txs(base_url: str, address: str, private: bool) -> list[dict]:
+def _fetch_address_txs(base_url: str, address: str, private: bool) -> list[Any]:
     """Fetch raw tx objects from GET /address/{address}/txs with pagination."""
     url = f"{base_url.rstrip('/')}/address/{address}/txs"
-    all_txs: list[dict] = []
+    all_txs: list[Any] = []
     while url:
         page = _get_json(url, private)
         if not isinstance(page, list):
