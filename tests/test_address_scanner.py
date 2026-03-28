@@ -39,3 +39,20 @@ def test_derive_zpub_internal_index_0() -> None:
 def test_unsupported_prefix_raises() -> None:
     with pytest.raises(ValueError, match="Unsupported xpub prefix"):
         derive_address("badpub6rFR7y4Q2AijF" + "x" * 80, branch=0, index=0)
+
+
+# BIP49 test vector — ypub from "12 abandon" mnemonic at m/49'/0'/0'
+def test_derive_ypub_external_index_0() -> None:
+    # Derive the ypub from the "12 abandon" mnemonic first, then test derivation
+    from bip_utils import Bip39SeedGenerator, Bip49, Bip49Coins
+
+    mnemonic = (
+        "abandon abandon abandon abandon abandon abandon "
+        "abandon abandon abandon abandon abandon about"
+    )
+    seed = Bip39SeedGenerator(mnemonic).Generate()
+    ctx = Bip49.FromSeed(seed, Bip49Coins.BITCOIN)
+    ypub = ctx.Purpose().Coin().Account(0).PublicKey().ToExtended()
+    addr = derive_address(ypub, branch=0, index=0)
+    # verify it looks like a P2SH address
+    assert addr.startswith("3"), f"Expected P2SH (3...) address, got {addr!r}"

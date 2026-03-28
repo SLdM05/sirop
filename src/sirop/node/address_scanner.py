@@ -33,8 +33,8 @@ class ScannedTx:
     """One transaction observed on a derived address."""
 
     txid: str
-    net_sats: int  # positive = received, negative = spent
-    fee_sats: int  # on-chain fee (0 when net_sats > 0)
+    net_sats: int  # satoshis — integers by protocol definition (no float risk)
+    fee_sats: int  # satoshis — converted to Decimal in XpubImporter._to_raw_transaction
     block_time: int  # Unix timestamp; 0 for unconfirmed
     confirmed: bool
 
@@ -73,6 +73,10 @@ def scan_wallet(
     gap_limit: int,
 ) -> list[ScannedTx]:
     """Derive addresses and scan tx history with gap-limit logic via Mempool API."""
+    for b in branches:
+        if b not in (0, 1):
+            raise ValueError(f"Invalid branch {b!r} — must be 0 (external) or 1 (internal)")
+
     private = is_private_node_url(mempool_url)
 
     all_addresses: set[str] = set()
@@ -125,8 +129,10 @@ def scan_wallet(
         )
         logger.debug("scanned tx %s net_sats=%d", txid, net_sats)
 
-    result.sort(key=lambda t: (not t.confirmed, t.block_time if t.confirmed else float("inf")))
-    return result
+    # Confirmed txs first (sorted by block_time asc), then unconfirmed.
+    confirmed_txs = sorted((t for t in result if t.confirmed), key=lambda t: t.block_time)
+    unconfirmed_txs = [t for t in result if not t.confirmed]
+    return confirmed_txs + unconfirmed_txs
 
 
 _RETRY_DELAY = 2
@@ -156,6 +162,7 @@ def _get_json(url: str, private: bool) -> object:
     if private:
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
+        logger.debug("address_scanner: SSL verification disabled for private URL %s", url)
 
     for attempt in range(2):
         try:
@@ -165,6 +172,7 @@ def _get_json(url: str, private: bool) -> object:
             if exc.code == _HTTP_NOT_FOUND:
                 return []
             if exc.code >= _HTTP_SERVER_ERROR and attempt == 0:
+                logger.debug("HTTP 5xx from %s, retrying in %ds", url, _RETRY_DELAY)
                 time.sleep(_RETRY_DELAY)
                 continue
             logger.debug("HTTP %d for %s", exc.code, url)
