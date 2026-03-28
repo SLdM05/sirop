@@ -1,9 +1,34 @@
 # Exchange & Wallet Export Format Specifications
 
-**Document purpose:** Defines the CSV schemas for each data source sirop must parse. Claude Code must implement importers that conform exactly to these specifications. Do not infer column semantics from column names alone — read the notes for each field carefully.
+**Document purpose:** Defines the schemas for each data source sirop can import. Claude Code must implement importers that conform exactly to these specifications. Do not infer column semantics from column names alone — read the notes for each field carefully.
 
-**Sources covered:** Shakepay, Sparrow Wallet, NDAX
+**Sources covered:** Shakepay, Sparrow Wallet, NDAX, xpub/ypub/zpub wallet definitions
 **Sources pending:** Koinly (separate document)
+
+---
+
+## Quick Reference — `sirop tap` Usage
+
+```bash
+# CSV imports (auto-detected by file content)
+sirop tap shakepay_btc.csv
+sirop tap sparrow_export.csv
+sirop tap ndax_ledger.csv
+
+# xpub wallet-definition YAML — imports multiple named wallets at once
+sirop tap my_wallets.yaml
+
+# Same, explicit source flag (required if file is not .yaml/.yml)
+sirop tap my_wallets.yaml --source xpub
+
+# JoinMarket — one YAML with all 10 branch xpubs, each as a distinct wallet
+sirop tap joinmarket_wallets.yaml
+```
+
+The xpub importer **requires a private Mempool node** (`BTC_MEMPOOL_URL` in `.env`).
+Address scanning sends derived Bitcoin addresses to the configured endpoint — use a
+local node to avoid disclosing your wallet to a public service. Set
+`BTC_TRAVERSAL_ALLOW_PUBLIC=true` only if you have accepted the privacy implications.
 
 > **NDAX** is implemented (`NDAXImporter`, `config/importers/ndax.yaml`).
 > The AlphaPoint Ledgers format spec is documented at the end of this file.

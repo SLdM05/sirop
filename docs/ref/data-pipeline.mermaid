@@ -100,6 +100,7 @@ flowchart TD
     ND[/"NDAX CSV"/]:::source
     SW[/"Sparrow CSV"/]:::source
     KN[/"Koinly CSV"/]:::source
+    XPUB[/"xpub wallet-definition YAML<br/><i>zpub · ypub · xpub</i><br/><i>one file, many named wallets</i>"/]:::source
 
     %% ═══════════════════════════════════════════
     %% STAGE 1 — tap  (import)
@@ -109,15 +110,19 @@ flowchart TD
     IMP_ND["NDAX Importer<br/><i>config-driven parser</i>"]:::importer
     IMP_SW["Sparrow Importer<br/><i>config-driven parser</i>"]:::importer
     IMP_KN["Koinly Importer<br/><i>config-driven parser</i>"]:::importer
+    IMP_XPUB["xpub Importer<br/><i>BIP84 / BIP49 / BIP44 derivation</i><br/><i>gap-limit address scan</i><br/><i>parse_multi → one wallet per xpub entry</i><br/><i>requires private Mempool node</i>"]:::importer
     YAML_IMP[("Importer YAML<br/>configs")]:::external
+    MEMPOOL_TAP[("Mempool REST API<br/><i>GET /address/{addr}/txs</i><br/><i>tap-time only — address scanning</i><br/><i>rate-limited by BTC_TRAVERSAL_REQUEST_DELAY</i><br/><i>privacy-gated — private node required</i>")]:::external
 
     SP --> IMP_SP
     ND --> IMP_ND
     SW --> IMP_SW
     KN --> IMP_KN
-    YAML_IMP -.-> IMP_SP & IMP_ND & IMP_SW & IMP_KN
+    XPUB --> IMP_XPUB
+    YAML_IMP -.-> IMP_SP & IMP_ND & IMP_SW & IMP_KN & IMP_XPUB
+    MEMPOOL_TAP -.->|"address tx history · BTC_MEMPOOL_URL"| IMP_XPUB
 
-    IMP_SP & IMP_ND & IMP_SW & IMP_KN -->|"via repo → atomic write"| T_RAW
+    IMP_SP & IMP_ND & IMP_SW & IMP_KN & IMP_XPUB -->|"via repo → atomic write"| T_RAW
 
     %% ═══════════════════════════════════════════
     %% STAGE 2 — normalize
