@@ -91,11 +91,16 @@ Date,Amount Debited,Asset Debited,Amount Credited,Asset Credited,Market Value,Ma
 | `crypto cashout` | BTC withdrawal to external wallet | **Potential disposition.** Treat as a transfer unless the destination is your own wallet (verify via node/Sparrow match). Does not trigger gain/loss if self-transfer. |
 | `fiat funding` | CAD deposit from bank | No tax event. |
 | `crypto purchase` | BTC deposit from external wallet | Acquire at ACB from originating transaction. |
-| `shakingsats` | Shakepay rewards (BTC earned) | **Income event.** Fair market value in CAD at receipt is income; becomes ACB of acquired BTC. |
-| `other` | Miscellaneous credit (e.g. referral bonus) | **Income event** if BTC or CAD credited. Confirm case by case. |
+| `shakingsats` | ShakingSats daily BTC loyalty reward (pre-2025 export name) | **Reward event** → canonical type `reward_shake`. Tax treatment is configurable: default is **discount** (ACB=$0, not income); can be set to **income** (FMV as ACB). See `config/tax_rules.yaml` `reward_treatment`. |
+| `reward` | ShakingSats daily BTC loyalty reward (2025 export name) | Same as `shakingsats` → `reward_shake`. |
+| `shakesquads` | Shakesquads loyalty program BTC reward | **Reward event** → canonical type `reward_shake`. Same configurable treatment as `shakingsats`. |
+| `card_cashback` | Shakepay Card BTC cashback on purchases | **Reward event** → canonical type `reward_cashback`. Default treatment: **discount** (ACB=$0, not income). Strongest discount analogy — directly parallels personal credit card cashback. |
+| `other` | Miscellaneous credit (e.g. referral bonus in CAD) | **Out of scope** for BTC-only rows (CAD referral payouts are skipped). Unknown BTC `other` rows are flagged for manual review. |
 | `peer transfer` | Shakepay-to-Shakepay transfers | Treat as internal transfer; no disposition. |
 
 > **Note:** The transaction type list above is derived from empirical data. Additional types may exist. The importer must not crash on unknown types — log a warning and flag for manual review.
+>
+> **Reward tax treatment:** `reward_shake` and `reward_cashback` are distinct canonical types introduced in sirop. Their treatment (discount vs income) is controlled by the `reward_treatment` section of `config/tax_rules.yaml`. Under **discount** treatment, the BTC enters the ACB pool at $0 cost (no income recognition, full proceeds become capital gain on disposal). Under **income** treatment, FMV at receipt is recognised as income and becomes the ACB. Shakepay's own help centre states rewards are "not taxable at receipt"; CRA has issued no specific ruling on crypto reward cashback.
 
 ### BTC Quantity Precision
 

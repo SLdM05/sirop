@@ -415,6 +415,15 @@ This table is the source for:
 The same event also appears in `classified_events` as an acquisition
 (with `cad_cost = fmv_cad`) so the ACB engine picks up the cost basis.
 
+> **Reward discount treatment:** Shakepay reward subtypes (`reward_shake`,
+> `reward_cashback`) may be treated as purchase discounts instead of income,
+> controlled by `reward_treatment` in `config/tax_rules.yaml`. Under discount
+> treatment **no row is written to `income_events`** — the reward is excluded
+> from income reporting entirely. The BTC still appears in `classified_events`
+> as an acquisition with `cad_cost = 0`, so the ACB pool grows in units but
+> not in cost. The treatment is resolved at `boil` time from config; it is not
+> persisted as a column in `income_events` or `classified_events`.
+
 ### `dispositions`
 
 Written by: **`boil`** (ACB engine)
