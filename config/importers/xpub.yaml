@@ -1,0 +1,15 @@
+# config/importers/xpub.yaml
+# Internal sirop importer configuration for xpub wallet definitions.
+# This file sets defaults. The user's wallet-definition YAML supplies the xpubs.
+
+name: "xpub wallet"
+source_name: "xpub"
+
+defaults:
+  gap_limit: 20          # consecutive empty addresses before scan stops
+  max_gap_limit: 200     # hard ceiling enforced at validation time
+  branches: [0, 1]       # 0 = external (receive), 1 = internal (change)
+
+# Fingerprint key used to auto-detect user YAML files passed to `sirop tap`.
+fingerprint_key: "source"
+fingerprint_value: "xpub"

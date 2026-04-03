@@ -2,7 +2,7 @@
 
 Canadian bitcoin tax calculator. Computes capital gains, ACB, and
 superficial losses from exchange and wallet exports. Produces Schedule 3, Schedule G,
-and the Quebec TP-21.4.39-V form.
+and the Quebec TP-21.4.39-V form as Markdown reports.
 
 ---
 
@@ -78,12 +78,18 @@ sirop boil
 # 4. Sometimes you will need to adjust your transfer pairs (wallet-to-wallet moves)
 sirop stir
 
-# 5. Output your tax forms (PLANNED)
+# 5. Generate your tax reports
 sirop pour
 ```
 
-After `boil`, the `.sirop` batch file contains fully computed dispositions and
-superficial-loss-adjusted gains, ready for `pour` (report generation).
+`pour` writes two Markdown files to `OUTPUT_DIR` (default `./output`):
+
+- `{batch}-{year}-tax-report.md` — filing summary: the numbers to enter on Schedule 3,
+  TP-21.4.39-V, and your T1/TP-1-V return
+- `{batch}-{year}-tax-detail.md` — audit backup: full per-event income log,
+  superficial loss detail, and year-end ACB carry-forward
+
+Both are plain text Markdown, not PDFs. Open in any text editor or Markdown viewer.
 
 ---
 
@@ -93,12 +99,12 @@ superficial-loss-adjusted gains, ready for `pour` (report generation).
 - [tap — import exchange and wallet transactions](docs/usage/sirop-tap.md)
 - [stir — review and confirm transfer pairs](docs/usage/sirop-stir.md)
 - [boil — run the tax calculation pipeline](docs/usage/sirop-boil.md)
+- [pour — generate tax reports](docs/usage/sirop-pour.md)
 
 ---
 
 ## Planned
 
-- **`pour` command** — export Schedule 3, Schedule G, and TP-21.4.39-V to PDF and CSV
 - **`grade` command** — batch status and pipeline overview
 - **Textual TUI** — interactive transaction browser, ACB state viewer, and batch switcher
 - **Bitcoin node verification** — confirm on-chain transaction details via Bitcoin Core RPC

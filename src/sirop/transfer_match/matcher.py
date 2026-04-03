@@ -452,8 +452,9 @@ def match_transfers(  # noqa: PLR0912 PLR0915
                     direction=gm.direction,
                     fee=format(gm.fee_crypto, "f"),
                 )
-                # Emit fee micro-disposal — same pattern as Pass 1.
                 withdrawal_tx = tx_by_id[gm.withdrawal_db_id]
+                deposit_tx = tx_by_id[gm.deposit_db_id]
+                # Emit fee micro-disposal — same pattern as Pass 1.
                 if gm.fee_crypto > Decimal("0") and withdrawal_tx.cad_value > Decimal("0"):
                     cad_rate = (
                         withdrawal_tx.cad_value / withdrawal_tx.amount
@@ -475,6 +476,36 @@ def match_transfers(  # noqa: PLR0912 PLR0915
                             source=withdrawal_tx.source,
                             is_taxable=True,
                             wallet_id=withdrawal_tx.wallet_id,
+                        )
+                    )
+                # If deposit > withdrawal, the surplus BTC entered the tracked wallet
+                # from an intermediate untracked source.  Emit a provisional buy so the
+                # ACB pool records a cost basis for it.  The user can resolve this by
+                # adding the intermediate wallet via `sirop tap` and re-running boil —
+                # the event will then be reclassified as a transfer.
+                surplus = deposit_tx.amount - withdrawal_tx.amount
+                if surplus > Decimal("0") and deposit_tx.cad_value > Decimal("0"):
+                    dep_cad_rate = (
+                        deposit_tx.cad_value / deposit_tx.amount
+                        if deposit_tx.amount
+                        else Decimal("0")
+                    )
+                    fee_disposals.append(
+                        ClassifiedEvent(
+                            id=0,
+                            vtx_id=deposit_tx.id,
+                            timestamp=deposit_tx.timestamp,
+                            event_type="buy",
+                            asset=deposit_tx.asset,
+                            amount=surplus,
+                            cad_proceeds=None,
+                            cad_cost=surplus * dep_cad_rate,
+                            cad_fee=None,
+                            txid=deposit_tx.txid,
+                            source=deposit_tx.source,
+                            is_taxable=True,
+                            is_provisional=True,
+                            wallet_id=deposit_tx.wallet_id,
                         )
                     )
 

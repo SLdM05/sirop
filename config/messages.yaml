@@ -218,10 +218,6 @@ messages:
     category: output
     text: "  Fetching market prices for {count} date(s)…"
 
-  boil.normalize.coingecko_attribution:
-    category: output
-    text: "  Powered by CoinGecko API — https://www.coingecko.com/en/api"
-
   boil.normalize.boc_attribution:
     category: output
     text: "  Bank of Canada exchange rates — https://www.bankofcanada.ca/rates/exchange/"
@@ -367,3 +363,64 @@ messages:
   switch.activated:
     category: output
     text: "Active batch: {name}"
+
+  # ── pour ──────────────────────────────────────────────────────────────────
+
+  pour.error.no_active:
+    category: error
+    code: E025
+    text: "No active batch. Run `sirop create <name>` first."
+
+  pour.error.not_ready:
+    category: error
+    code: E026
+    text: "The superficial loss stage has not completed for batch '{name}'. Run `sirop boil` first."
+
+  pour.report_written:
+    category: output
+    text: "Tax report written to {path}"
+
+  pour.detail_written:
+    category: output
+    text: "Detail backup written to {path}"
+
+  tap.xpub.privacy_warning:
+    category: warning
+    code: W009
+    text: >-
+      Scanning {count} address(es) via a public Mempool endpoint.
+      Your wallet addresses will be sent to {url}.
+      Use a private node (BTC_MEMPOOL_URL) to avoid this disclosure.
+      Set BTC_TRAVERSAL_ALLOW_PUBLIC=true or pass --allow-public-mempool to suppress.
+
+  tap.xpub.scanning:
+    category: output
+    text: "Scanning {wallet_name} — {xpub_prefix}... ({branch_count} branch(es), gap {gap_limit})"
+
+  tap.xpub.scan_complete:
+    category: output
+    text: "  {wallet_name}: {tx_count} transaction(s) found"
+
+  tap.xpub.no_transactions:
+    category: output
+    text: "  {wallet_name}: no transactions found — wallet may be empty or gap_limit too low"
+
+  tap.xpub.error.invalid_yaml:
+    category: error
+    code: E027
+    text: "Failed to parse xpub wallet-definition file {path!r}: {detail}"
+
+  tap.xpub.error.missing_wallets_key:
+    category: error
+    code: E028
+    text: "xpub wallet-definition file {path!r} must contain a top-level 'wallets' list"
+
+  tap.xpub.error.invalid_wallet_entry:
+    category: error
+    code: E029
+    text: "Wallet entry #{index} in {path!r} is invalid: {detail}"
+
+  tap.xpub.error.scan_failed:
+    category: error
+    code: E030
+    text: "Failed to scan wallet {name!r} (xpub {xpub_prefix}...): {detail}"

@@ -14,7 +14,7 @@ from typing import Final
 
 # Bump this when the schema changes. The migration guard reads this value
 # and refuses to open a file whose schema_version doesn't match.
-SCHEMA_VERSION: Final[int] = 10
+SCHEMA_VERSION: Final[int] = 11
 
 # All pipeline stage names in execution order.
 PIPELINE_STAGES: Final[tuple[str, ...]] = (
@@ -203,7 +203,8 @@ CREATE TABLE IF NOT EXISTS classified_events (
     txid            TEXT,
     source          TEXT    NOT NULL,   -- origin exchange/wallet for traceability
     is_taxable      INTEGER NOT NULL DEFAULT 1,  -- 0=transfer, excluded from ACB engine
-    wallet_id       INTEGER REFERENCES wallets(id)  -- v7: source wallet FK
+    wallet_id       INTEGER REFERENCES wallets(id),  -- v7: source wallet FK
+    is_provisional  INTEGER NOT NULL DEFAULT 0   -- v11: 1=synthetic event for graph-pair delta
 )
 """
 
@@ -523,3 +524,21 @@ def migrate_to_v10(conn: sqlite3.Connection) -> None:
     ``create_tables`` is sufficient and no ALTER TABLE statements are required.
     """
     create_tables(conn)
+
+
+def migrate_to_v11(conn: sqlite3.Connection) -> None:
+    """Apply v11 schema migrations to an existing batch file.
+
+    Idempotent — safe to call on fresh databases and already-migrated ones.
+    v11 adds ``classified_events.is_provisional`` — a flag marking synthetic
+    events emitted for the surplus BTC in a graph-matched transfer pair where
+    the deposit amount exceeds the withdrawal amount.
+    """
+    create_tables(conn)
+    with conn:
+        ce_cols = {r[1] for r in conn.execute("PRAGMA table_info(classified_events)")}
+        if "is_provisional" not in ce_cols:
+            conn.execute(
+                "ALTER TABLE classified_events"
+                " ADD COLUMN is_provisional INTEGER NOT NULL DEFAULT 0"
+            )

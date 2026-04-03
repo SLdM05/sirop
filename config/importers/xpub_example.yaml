@@ -1,0 +1,38 @@
+# xpub wallet-definition file for sirop
+# ----------------------------------------
+# Pass this file to `sirop tap`:
+#   sirop tap my_wallets.yaml --source xpub
+#
+# One entry per xpub/ypub/zpub key.
+# Each entry creates (or appends to) a named wallet in the active sirop batch.
+#
+# Fields:
+#   name        (required) wallet name in the sirop database
+#   xpub        (required) account-level extended public key
+#                          zpub = P2WPKH native SegWit (JoinMarket, Sparrow default)
+#                          ypub = P2SH-P2WPKH wrapped SegWit
+#                          xpub = P2PKH legacy
+#   gap_limit   (optional) consecutive empty addresses before scan stops (default: 20)
+#                          use 50-100 for JoinMarket wallets (coinjoin gaps are wide)
+#   branches    (optional) which HD branches to scan (default: [0, 1])
+#                          0 = external (receive addresses)
+#                          1 = internal (change addresses)
+#   label       (optional) free-text annotation stored in the wallet record
+
+source: xpub
+
+wallets:
+  - name: my-sparrow-wallet
+    xpub: zpub6rFR7y4Q2Aij...   # replace with your actual zpub
+    gap_limit: 20
+
+  # JoinMarket example — scan both external and internal branches with larger gap
+  - name: jm-depth0-ext
+    xpub: zpub6...              # mixdepth 0 external xpub from JoinMarket
+    gap_limit: 50
+    branches: [0]
+
+  - name: jm-depth0-int
+    xpub: zpub7...              # mixdepth 0 internal xpub from JoinMarket
+    gap_limit: 50
+    branches: [1]

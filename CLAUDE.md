@@ -121,7 +121,7 @@ Read these before making changes:
 - `docs/ref/data-pipeline.mermaid` — Visual diagram of all 7 pipeline stages and data models
 - `docs/ref/sirop-language-guide.md` — Tool name, CLI verbs, message vocabulary, and the two-register rule
 - `docs/ref/security-input-hardening.md` — Security rules for every pipeline boundary: SQL parameterization, batch name validation, YAML loading, node API responses, logging redaction
-- `docs/ref/transaction-import-formats.md` — Authoritative CSV schemas for Shakepay and Sparrow Wallet: column definitions, unit detection rules (BTC vs sats), fee availability, unconfirmed-row handling, cross-source transfer matching, and YAML config reference. **Read this before building or modifying the Shakepay or Sparrow importers.**
+- `docs/ref/transaction-import-formats.md` — Authoritative import format specs for all sources: Shakepay CSV, Sparrow CSV, NDAX CSV column definitions, unit detection rules (BTC vs sats), fee availability, unconfirmed-row handling, cross-source transfer matching, and the xpub/ypub/zpub wallet-definition YAML schema. **Read this before building or modifying any importer.**
 - `docs/ref/database-schema.md` — Schema changelog, per-wallet vs global ACB pool reconciliation pattern, and ad-hoc SQLite investigation queries. **Read this before debugging `boil` output discrepancies or querying `.sirop` files directly.**
 
 ## Key Rules (quick reference)
@@ -142,9 +142,15 @@ Read these before making changes:
 - Sparrow Wallet CSV — signed BTC or satoshi amounts (auto-detect unit); fee present on
   sends, absent on receives; optional fiat column (CoinGecko rate — never use for ACB)
 - Koinly Capital Gains Report CSV (primary/validation source)
+- xpub/ypub/zpub wallet-definition YAML — user creates a YAML file listing one or more
+  extended public keys with wallet names; `sirop tap wallets.yaml` derives all child
+  addresses (BIP84/49/44 via bip-utils), scans transaction history via the Mempool API
+  with gap-limit logic, and loads each entry as a named wallet. Requires a private Mempool
+  node (`BTC_MEMPOOL_URL`). Designed for JoinMarket: each HD branch = one YAML entry.
+  See `config/importers/xpub_example.yaml` for the user template.
 
 See `docs/ref/transaction-import-formats.md` for full column specs, unit detection rules,
-and cross-source transfer matching logic for Shakepay ↔ Sparrow.
+cross-source transfer matching logic, and the xpub wallet-definition YAML schema.
 
 ## Tech Stack
 
@@ -152,7 +158,7 @@ and cross-source transfer matching logic for Shakepay ↔ Sparrow.
 - **Poetry** for dependency management and virtualenv (`pyproject.toml`)
 - `decimal.Decimal` for all money (never float)
 - Bank of Canada Valet API for FX rates (no key required)
-- Mempool.space + CoinGecko public APIs for historical crypto prices (no key required)
+- Mempool.space public API for historical BTC prices (no key required, BTC-only)
 - SQLite via `sqlite3` (stdlib) for pipeline persistence (one `.sirop` file per batch)
 - Bitcoin Core RPC or Mempool REST API for node verification
 - `ruff` for linting and formatting
@@ -233,7 +239,7 @@ config/
 │   ├── ndax.yaml          # Column mappings, date format, transaction type map
 │   ├── sparrow.yaml       # Column mappings, date format
 │   └── koinly.yaml        # Column mappings, date format, transaction type map
-├── currencies.yaml        # Supported currencies: BoC API series codes (fiat) and CoinGecko IDs + Mempool flags (crypto)
+├── currencies.yaml        # Supported currencies: BoC API series codes (fiat) and Mempool flag (BTC only)
 └── reports.yaml           # Output form field mappings, line numbers
 ```
 

@@ -1,9 +1,34 @@
 # Exchange & Wallet Export Format Specifications
 
-**Document purpose:** Defines the CSV schemas for each data source sirop must parse. Claude Code must implement importers that conform exactly to these specifications. Do not infer column semantics from column names alone — read the notes for each field carefully.
+**Document purpose:** Defines the schemas for each data source sirop can import. Claude Code must implement importers that conform exactly to these specifications. Do not infer column semantics from column names alone — read the notes for each field carefully.
 
-**Sources covered:** Shakepay, Sparrow Wallet, NDAX
+**Sources covered:** Shakepay, Sparrow Wallet, NDAX, xpub/ypub/zpub wallet definitions
 **Sources pending:** Koinly (separate document)
+
+---
+
+## Quick Reference — `sirop tap` Usage
+
+```bash
+# CSV imports (auto-detected by file content)
+sirop tap shakepay_btc.csv
+sirop tap sparrow_export.csv
+sirop tap ndax_ledger.csv
+
+# xpub wallet-definition YAML — imports multiple named wallets at once
+sirop tap my_wallets.yaml
+
+# Same, explicit source flag (required if file is not .yaml/.yml)
+sirop tap my_wallets.yaml --source xpub
+
+# JoinMarket — one YAML with all 10 branch xpubs, each as a distinct wallet
+sirop tap joinmarket_wallets.yaml
+```
+
+The xpub importer **requires a private Mempool node** (`BTC_MEMPOOL_URL` in `.env`).
+Address scanning sends derived Bitcoin addresses to the configured endpoint — use a
+local node to avoid disclosing your wallet to a public service. Set
+`BTC_TRAVERSAL_ALLOW_PUBLIC=true` only if you have accepted the privacy implications.
 
 > **NDAX** is implemented (`NDAXImporter`, `config/importers/ndax.yaml`).
 > The AlphaPoint Ledgers format spec is documented at the end of this file.
@@ -24,7 +49,7 @@
 ### Export Mechanics
 
 Shakepay splits transaction history into **multiple CSV files** by currency type:
-- Crypto transactions (BTC/ETH activity)
+- Bitcoin transactions (BTC activity)
 - CAD transactions
 - USD transactions (if applicable)
 
@@ -46,7 +71,7 @@ Date,Amount Debited,Asset Debited,Amount Credited,Asset Credited,Market Value,Ma
 |--------|------|-------|
 | `Date` | ISO 8601 datetime | Format: `2022-09-10T00:36:12+00`. The timezone offset is always `+00` (UTC). Parse with timezone awareness. |
 | `Amount Debited` | decimal or empty | Positive number. Empty if this transaction has no debit leg. |
-| `Asset Debited` | string or empty | ISO currency code (`CAD`, `BTC`, `ETH`) or empty. |
+| `Asset Debited` | string or empty | ISO currency code (`CAD`, `BTC`) or empty. Non-BTC crypto rows are skipped by the importer. |
 | `Amount Credited` | decimal or empty | Positive number. Empty if this transaction has no credit leg. |
 | `Asset Credited` | string or empty | ISO currency code or empty. |
 | `Market Value` | decimal or empty | Shakepay's computed market value at trade time. **Do not use for ACB.** Not a Bank of Canada rate. |
@@ -312,7 +337,7 @@ ASSET,ASSET_CLASS,AMOUNT,BALANCE,TYPE,TX_ID,DATE
 
 | Column | Type | Notes |
 |--------|------|-------|
-| `ASSET` | string | Asset ticker: `BTC`, `ETH`, `CAD`, etc. |
+| `ASSET` | string | Asset ticker: `BTC`, `CAD`, etc. Non-BTC crypto rows (e.g. ETH, SOL) are skipped by the importer with a warning. |
 | `ASSET_CLASS` | string | `FIAT` or `CRYPTO`. Used to distinguish fiat legs from crypto legs in a trade group. |
 | `AMOUNT` | decimal | **Signed.** Positive = credit (received). Negative = debit (sent). Parse as `Decimal`. |
 | `BALANCE` | decimal | Running balance of this asset after this row. Informational — not used for calculations. |
@@ -461,3 +486,67 @@ The following requirements apply to all importers regardless of source.
 8. **Recipient address convention.** If an exchange or wallet exports the **recipient Bitcoin address** (not the on-chain txid) for an outgoing transfer, store it in `notes` as `"Sent to: <addr>"` and set `txid = None`. This enables Pass 1.25 address-based txid resolution in the transfer matcher, which queries `GET /api/address/{addr}/txs` to find the real txid and match it against a Sparrow deposit. The Shakepay importer (`shakepay.py`) is the reference implementation: it detects `"Bitcoin address bc1q…"` in the Description column and applies this convention automatically.
 
 9. **Label / annotation field.** Any wallet importer (Sparrow, Electrum, Blue Wallet, etc.) that exports a user-editable label column **must** read it via the `label` key in its YAML column mapping and pass the value to `RawTransaction.notes`. This enables `sirop stir` to display the label as context for each transaction. If no `label` key exists in the config, `notes` defaults to `""`. See `config/importers/sparrow.yaml` for the reference YAML declaration and `src/sirop/importers/sparrow.py` for the implementation.
+
+---
+
+## xpub Wallet Definition (source: `xpub`)
+
+**File type:** YAML (`.yaml` or `.yml`)
+**Auto-detected:** yes — `sirop tap` detects `.yaml` suffix and routes to the xpub importer
+**Explicit flag:** `sirop tap wallets.yaml --source xpub`
+
+### File schema
+
+```yaml
+source: xpub       # required; identifies this as an xpub wallet definition
+
+wallets:
+  - name: <str>           # required — wallet name in the sirop batch database
+    xpub: <str>           # required — account-level zpub / ypub / xpub
+    gap_limit: <int>      # optional — consecutive empty addresses before stop (default: 20)
+    branches: [0, 1]      # optional — HD branches to scan (default: both)
+    label: <str>          # optional — free-text annotation stored in wallet record
+```
+
+### Supported key types
+
+| Prefix | Address type        | HD standard |
+|--------|---------------------|-------------|
+| `zpub` | P2WPKH (bech32)     | BIP84       |
+| `ypub` | P2SH-P2WPKH         | BIP49       |
+| `xpub` | P2PKH (legacy)      | BIP44       |
+
+### Derivation
+
+Given account xpub at path `m/purpose'/coin'/account'`, child addresses are derived at
+`m/.../branch/index` where `branch=0` is external (receive) and `branch=1` is internal (change).
+
+### Gap limit
+
+Scanning stops when `gap_limit` consecutive address indices have no transaction history on
+the Mempool API. Default is 20 (BIP44 standard). Increase to 50–100 for JoinMarket wallets
+where coinjoin rounds create wide gaps in address usage.
+
+### JoinMarket note
+
+JoinMarket uses 10 HD branches by default (5 mixing depths × 2 branches each). Each branch
+has its own xpub at path `m/84'/0'/n'/branch`. A single xpub only covers one branch. To
+import all JoinMarket activity, export all relevant xpubs from `joinmarket wallet-tool.py`
+and list each in the YAML with a distinct wallet name.
+
+### Transaction mapping
+
+| Mempool data        | sirop field             |
+|---------------------|-------------------------|
+| `net_sats > 0`      | `transaction_type = deposit` |
+| `net_sats < 0`      | `transaction_type = withdrawal` |
+| `fee` (spending tx) | `fee_amount` in BTC     |
+| `status.block_time` | `timestamp` (UTC)       |
+| `txid`              | `txid`                  |
+
+### Privacy
+
+All derived Bitcoin addresses are sent to the configured `BTC_MEMPOOL_URL`. Use a private
+node (e.g. `BTC_MEMPOOL_URL=http://localhost:8332`) to avoid disclosing your wallet to a
+public endpoint. If a public URL is configured, sirop emits warning `[W009]` before scanning.
+Set `BTC_TRAVERSAL_ALLOW_PUBLIC=true` to suppress the warning in scripted/CI runs.

@@ -220,13 +220,10 @@ fiat column.
 
 Fetch strategy:
 
-- **BTC**: Mempool.space historical-price endpoint first; CoinGecko as fallback.
-- **Other assets**: CoinGecko only.
+- **BTC**: Mempool.space historical-price endpoint (noon UTC, no documented rate limit).
 
-Asset → CoinGecko ID mapping and Mempool support flags are read from
-`config/currencies.yaml`. HTTP 429 responses trigger exponential back-off
-(2 s → 4 s → 8 s). All HTTP uses stdlib `urllib` — no additional
-dependencies.
+sirop is BTC-only. Requesting a price for any other asset raises `CryptoPriceError`
+immediately. All HTTP uses stdlib `urllib` — no additional dependencies.
 
 ---
 
@@ -245,7 +242,7 @@ raw_transactions (
     source              TEXT    NOT NULL,   -- e.g. "shakepay", "ndax"
     raw_timestamp       TEXT    NOT NULL,   -- as-is from the CSV
     transaction_type    TEXT    NOT NULL,   -- raw type string from the CSV
-    asset               TEXT    NOT NULL,   -- e.g. "BTC", "ETH"
+    asset               TEXT    NOT NULL,   -- e.g. "BTC"
     amount              TEXT    NOT NULL,   -- Decimal string
     amount_currency     TEXT    NOT NULL,   -- currency of amount (e.g. "BTC", "CAD", "USD")
     fee                 TEXT,               -- Decimal string or NULL
@@ -773,7 +770,7 @@ that need a batch (and weren't given one explicitly) read this file first.
 | 3 | New table: `custom_importers` — stores user-supplied importer YAML configs inside the batch file so a `.sirop` file is self-contained and portable. |
 | 4 | New table: `transfer_overrides` (initial version — `link` and `unlink` actions only, `tx_id_b` NOT NULL). Written by `sirop stir`; consumed by the `transfer_match` stage. |
 | 5 | New table: `wallets`. `wallet_id` FK added to `raw_transactions` and `transactions` — traces each transaction to its originating wallet. `transfer_overrides` recreated with nullable `tx_id_b` (supports external-leg overrides), new columns `implied_fee_crypto` and `external_wallet`, and `external-out` / `external-in` added to `action` CHECK constraint. |
-| 6 | New table: `crypto_prices` — caches historical cryptocurrency prices (USD and CAD) fetched from Mempool.space (BTC) and CoinGecko. Used by the normalizer as a fallback when no exchange-provided fiat value is present. |
+| 6 | New table: `crypto_prices` — caches historical BTC prices (USD and CAD) fetched from Mempool.space. Used by the normalizer as a fallback when no exchange-provided fiat value is present. |
 | 7 | `wallet_id` FK added to `verified_transactions` and `classified_events` — propagates wallet origin through the full pipeline so every classified event is traceable to its source wallet. `migrate_to_v7()` adds the columns idempotently to existing files. |
 | 8 | New table: `graph_transfer_pairs` — persists BTC graph-traversal matched pairs (withdrawal_id, deposit_id, hops, direction, fee_crypto) from the transfer_match stage so `sirop stir` can display them without re-running traversal. |
 | 9 | `raw_transactions.notes` — label/annotation field (e.g. Sparrow "Label" column, Shakepay recipient address when Description contains an address instead of a txid). `graph_transfer_pairs`: added `deposit_vout_count` and `deposit_vin_count` for CoinJoin and purchase+change pattern detection in `sirop stir`. |

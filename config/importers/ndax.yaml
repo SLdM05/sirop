@@ -45,6 +45,11 @@ transaction_type_map:
   "staking / deposit": "transfer_out"
   "staking / refund": "transfer_in"
 fee_model: "explicit"
+# sirop is BTC-only.  Rows for any other crypto asset are skipped at parse
+# time with a warning.  Fiat rows (ASSET_CLASS == fiat_asset_class) are
+# always allowed regardless of this list.
+allowed_crypto_assets:
+  - BTC
 # ASSET_CLASS value that identifies fiat rows.  Any other value is non-fiat.
 fiat_asset_class: "FIAT"
 # Maps parsing strategy names (internal Python concepts) to the primary TYPE

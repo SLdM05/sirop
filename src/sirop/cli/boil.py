@@ -38,7 +38,7 @@ from sirop.node.privacy import is_private_node_url
 from sirop.normalizer import normalizer
 from sirop.transfer_match import matcher
 from sirop.utils.boc import BoCRateError, fill_rate_gaps, prefetch_rates
-from sirop.utils.crypto_prices import prefetch_crypto_prices, prefetch_crypto_prices_by_range
+from sirop.utils.crypto_prices import prefetch_crypto_prices
 from sirop.utils.logging import StageContext, get_logger
 from sirop.utils.messages import emit, spinner
 from sirop.utils.price_cache import copy_prices_into_batch, open_price_cache, sync_prices_to_cache
@@ -46,6 +46,7 @@ from sirop.utils.price_cache import copy_prices_into_batch, open_price_cache, sy
 if TYPE_CHECKING:
     from datetime import date
 
+    from sirop.models.disposition import ACBState
     from sirop.models.raw import RawTransaction
 
 logger = get_logger(__name__)
@@ -301,15 +302,7 @@ def _prefetch_crypto_prices_bulk(
     *,
     boc_already_attributed: bool = False,
 ) -> None:
-    """Prefetch crypto CAD prices for all no-fiat transactions.
-
-    Strategy (two passes):
-    1. Range pass — one CoinGecko ``/market_chart/range`` call per unique
-       asset covers the full date span.  O(N_assets) HTTP calls instead of
-       O(N_dates x N_assets).
-    2. Per-date fallback — handles any dates the range response did not cover
-       (CoinGecko gaps, very recent dates, unsupported assets).  Mempool.space
-       is preferred for BTC in this pass.
+    """Prefetch BTC CAD prices for all no-fiat transactions via Mempool.space.
 
     Results are cached in SQLite so the normalizer never hits the network for
     these prices.
@@ -337,29 +330,17 @@ def _prefetch_crypto_prices_bulk(
 
     emit(MessageCode.BOIL_NORMALIZE_PREFETCH_CRYPTO, count=len(unique_pairs))
 
-    asset_date_groups: dict[str, list[date]] = {}
-    for asset, d in unique_pairs:
-        asset_date_groups.setdefault(asset, []).append(d)
-
     total = len(unique_pairs)
     with spinner(f"Fetching crypto prices… [0/{total}]") as status:
-        # Pass 1: range-based bulk fetch (one CoinGecko call per unique asset).
-        _range_written, range_cg = prefetch_crypto_prices_by_range(conn, asset_date_groups)
 
-        # Pass 2: per-date fallback; callback keeps the spinner counter current.
         def _progress(done: int, _total: int) -> None:
             status.update(f"Fetching crypto prices… [{done}/{_total}]")
 
-        _per_total, per_cg, mempool_count = prefetch_crypto_prices(
-            conn, unique_pairs, progress_cb=_progress
-        )
+        _fetched, mempool_count = prefetch_crypto_prices(conn, unique_pairs, progress_cb=_progress)
 
-    coingecko_count = range_cg + per_cg
-    if coingecko_count > 0:
-        emit(MessageCode.BOIL_NORMALIZE_COINGECKO_ATTRIBUTION)
     if mempool_count > 0:
         emit(MessageCode.BOIL_NORMALIZE_MEMPOOL_ATTRIBUTION)
-    if (coingecko_count > 0 or mempool_count > 0) and not boc_already_attributed:
+    if mempool_count > 0 and not boc_already_attributed:
         emit(MessageCode.BOIL_NORMALIZE_BOC_ATTRIBUTION)
 
 
@@ -523,13 +504,21 @@ def _run_acb(conn: object, tax_rules: TaxRules) -> None:
     disps = repo.write_dispositions(conn, disps, states)
     logger.debug("wrote %d disposition(s)", len(disps))
 
-    # Write year-end snapshots for assets acquired but never sold in this tax year.
-    # Without these, the holdings query finds nothing for those assets.
+    # Write year-end snapshots for assets that either:
+    #   (a) were acquired but never sold (acquisition-only), or
+    #   (b) had disposals followed by further acquisitions that changed the pool.
+    # Without (b), MAX(id) FROM acb_state points to the last disposal row, not
+    # the true year-end state, causing the holdings display to show a stale balance.
     assets_with_disposal = {s.asset for s in states}
+    last_disposal_pool: dict[str, ACBState] = {s.asset: s for s in states}
     holdovers = [
         (pool, last_events[asset].id)
         for asset, pool in final_pools.items()
-        if asset not in assets_with_disposal and pool.total_units > Decimal("0")
+        if pool.total_units > Decimal("0")
+        and (
+            asset not in assets_with_disposal  # (a) acquisition-only
+            or pool != last_disposal_pool.get(asset)  # (b) post-disposal acquisitions
+        )
     ]
     if holdovers:
         repo.write_holdover_acb_states(conn, holdovers)
@@ -819,59 +808,11 @@ def _print_wallet_holdings(
     conn: sqlite3.Connection, per_unit_acb: dict[str, float], tax_year: int
 ) -> None:
     """Print year-end holdings broken down by wallet."""
-    year_end = f"{tax_year}-12-31"
-    wallet_rows = conn.execute(
-        """
-        WITH transfer_vtx_ids AS (
-            -- vtx_ids of matched transfer legs; their fee is already captured
-            -- in the amount difference (W - D) and must not be double-subtracted.
-            SELECT DISTINCT vtx_id FROM classified_events WHERE event_type = 'transfer'
-        ),
-        fee_disposal_adj AS (
-            -- Sum fee_disposal amounts per wallet/asset for non-transfer transactions
-            -- within the tax year.  These crypto fees reduce the global ACB pool but
-            -- are not reflected in transactions.amount, so per-wallet holdings would
-            -- otherwise overstate.
-            SELECT
-                ce.wallet_id,
-                ce.asset,
-                SUM(CAST(ce.amount AS REAL)) AS adj
-            FROM classified_events ce
-            WHERE ce.event_type = 'fee_disposal'
-              AND ce.is_taxable = 1
-              AND ce.timestamp <= ?
-              AND ce.vtx_id NOT IN (SELECT vtx_id FROM transfer_vtx_ids)
-            GROUP BY ce.wallet_id, ce.asset
-        )
-        SELECT
-            COALESCE(w.name, t.source) AS wallet_name,
-            t.asset,
-            SUM(CASE
-                WHEN t.transaction_type IN ('buy','transfer_in','deposit','income')
-                    THEN CAST(t.amount AS REAL)
-                WHEN t.transaction_type IN ('sell','transfer_out','withdrawal','spend','fee')
-                    THEN -CAST(t.amount AS REAL)
-                ELSE 0
-            END) - COALESCE(MAX(fda.adj), 0) AS net_units
-        FROM transactions t
-        LEFT JOIN wallets w ON t.wallet_id = w.id
-        LEFT JOIN fee_disposal_adj fda ON fda.wallet_id = t.wallet_id AND fda.asset = t.asset
-        WHERE t.timestamp <= ?
-          AND t.asset IN (
-            SELECT asset FROM acb_state
-            WHERE id IN (SELECT MAX(id) FROM acb_state GROUP BY asset)
-              AND CAST(units AS REAL) > 0
-        )
-        GROUP BY wallet_name, t.asset
-        HAVING net_units > 0.00000001
-        ORDER BY wallet_name, t.asset
-        """,
-        (year_end, year_end),
-    ).fetchall()
+    per_wallet = repo.read_per_wallet_holdings(conn, tax_year)
 
     wallet_assets: dict[str, list[Any]] = {}
-    for r in wallet_rows:
-        wallet_assets.setdefault(r["wallet_name"], []).append(r)
+    for h in per_wallet:
+        wallet_assets.setdefault(h.wallet_name, []).append(h)
 
     # External wallets — net units held in wallets flagged via `stir external`.
     # external-out: units left a tracked wallet → positive for the external wallet
@@ -901,17 +842,23 @@ def _print_wallet_holdings(
         """
     ).fetchall()
     for r in ext_rows:
-        wallet_assets.setdefault(r["wallet_name"], []).append(r)
+        wallet_assets.setdefault(r["wallet_name"], []).append(
+            repo.WalletHolding(
+                wallet_name=r["wallet_name"],
+                asset=r["asset"],
+                net_units=Decimal(str(r["net_units"])),
+            )
+        )
 
     for wallet_name, rows in wallet_assets.items():
         emit(MessageCode.BOIL_SUMMARY_WALLET_HEADER, name=wallet_name)
         emit(MessageCode.BOIL_SUMMARY_HOLDINGS_HEADER)
-        for r in rows:
-            u = float(r["net_units"])
-            acb_pu = per_unit_acb.get(r["asset"], 0.0)
+        for h in rows:
+            u = float(h.net_units)
+            acb_pu = per_unit_acb.get(h.asset, 0.0)
             wallet_acb = u * acb_pu
             print(
-                f"    {r['asset']:<6} {u:>14.8f} units"
+                f"    {h.asset:<6} {u:>14.8f} units"
                 f"   ACB: {wallet_acb:>12,.2f} CAD"
                 f"   ({acb_pu:>12,.2f} CAD/unit)"
             )

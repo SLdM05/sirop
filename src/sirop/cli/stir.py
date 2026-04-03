@@ -226,7 +226,9 @@ def _run_stir(
         graph_pairs = _load_graph_pairs(conn, txs)
         state = _build_state(txs, overrides, graph_pairs=graph_pairs)
         if list_only:
-            _print_state(batch_name, txs, state, overrides, wallets)
+            _print_state(
+                batch_name, txs, state, overrides, wallets, repo.read_provisional_events(conn)
+            )
             return 0
 
         _print_unmatched(batch_name, txs, state, wallets, tax_year)
@@ -689,12 +691,13 @@ def _tx_table(txs: list[Transaction], wallets: list[Wallet]) -> Table:
     return table
 
 
-def _print_state(  # noqa: PLR0912 PLR0915
+def _print_state(  # noqa: PLR0912 PLR0913 PLR0915
     batch_name: str,
     txs: list[Transaction],
     state: _MatchState,
     overrides: list[TransferOverride],
     wallets: list[Wallet] | None = None,
+    provisional: list[repo.ProvisionalEvent] | None = None,
 ) -> None:
     _wallets = wallets or []
 
@@ -731,7 +734,12 @@ def _print_state(  # noqa: PLR0912 PLR0915
                     f"       [dim]Reason: graph traversal: {hops} {hop_word} ({direction})[/dim]"
                 )
                 if fee > Decimal("0"):
-                    out.print(f"       [dim]Fee disposal: {fee:.8f} {w_tx.asset}[/dim]")
+                    out.print(
+                        f"       [yellow]Fee disposal: {fee:.8f} {w_tx.asset}"
+                        " — treated as a disposition. Verify this is a network fee;"
+                        " if you own the intermediate wallet, add it with"
+                        " [bold]sirop tap[/bold] and re-run boil.[/yellow]"
+                    )
 
                 # Classify match confidence using deposit tx structure.
                 ratio = fee / w_tx.amount if w_tx.amount > Decimal("0") else Decimal("0")
@@ -757,6 +765,36 @@ def _print_state(  # noqa: PLR0912 PLR0915
         else:
             out.print("  [dim](none — run sirop boil to populate)[/dim]")
         out.print()
+
+        # Provisional events (graph-pair surplus acquisitions).
+        if provisional:
+            out.rule(
+                f"Provisional acquisitions — needs review ({len(provisional)})", style="yellow"
+            )
+            for pv in provisional:
+                cad_str = (
+                    f"  CAD {float(pv.cad_cost):>10,.2f}"
+                    if pv.cad_cost is not None
+                    else "  CAD       (unknown)"
+                )
+                out.print(
+                    f"  [yellow]{pv.asset}  {float(pv.amount):.8f} units{cad_str}[/yellow]"
+                    f"  [{pv.wallet_name}]  {pv.timestamp[:10]}"
+                )
+                out.print(
+                    f"       [dim]Withdrawal id:{pv.withdrawal_id}"
+                    f" ({float(pv.withdrawal_amount):.8f} {pv.asset})"
+                    f" → Deposit id:{pv.deposit_id}"
+                    f" ({float(pv.deposit_amount):.8f} {pv.asset})"
+                    f" — surplus {float(pv.amount):.8f} {pv.asset} treated as provisional buy[/dim]"
+                )
+                out.print(
+                    "       [dim]If you own the intermediate wallet, add it with"
+                    " [bold]sirop tap[/bold] and re-run boil — it will be reclassified"
+                    " as a transfer.[/dim]"
+                )
+                out.print()
+            out.print()
 
         # Forced links.
         out.rule(f"Forced links — stir overrides ({len(state.forced_link_pairs)})", style="dim")
@@ -1405,7 +1443,9 @@ def _interactive_loop(  # noqa: PLR0912 PLR0913 PLR0915
             wallets = repo.read_wallets(conn)
             overrides = repo.read_transfer_overrides(conn)
             state = _build_state(txs, overrides, graph_pairs=_load_graph_pairs(conn, txs))
-            _print_state(batch_name, txs, state, overrides, wallets)
+            _print_state(
+                batch_name, txs, state, overrides, wallets, repo.read_provisional_events(conn)
+            )
             continue
 
         if cmd == "transfer":

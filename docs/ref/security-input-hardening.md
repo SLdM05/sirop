@@ -85,10 +85,11 @@ regex; import the function.
 
 ## 3. YAML Config Loading — `safe_load` Only
 
-**Status:** Config loader not yet implemented. This rule applies when it is.
+**Status:** Implemented. All YAML loading uses `yaml.safe_load()`.
 
-**Rule:** All YAML files (importer configs, custom importers stored in the DB,
-user-provided configs) must be loaded exclusively with `yaml.safe_load()`.
+**Rule:** All YAML files — importer configs (`config/importers/*.yaml`), tax
+rules (`config/tax_rules.yaml`), and user-provided files (xpub wallet-definition
+YAML passed to `sirop tap`) — must be loaded exclusively with `yaml.safe_load()`.
 `yaml.load()` without an explicit `Loader` is banned.
 
 ```python
@@ -101,15 +102,20 @@ data = yaml.load(stream, Loader=yaml.UnsafeLoader)
 data = yaml.safe_load(stream)
 ```
 
-**Why this matters:** `yaml.load()` can deserialize arbitrary Python objects.
-A crafted YAML file with `!!python/object/apply:os.system ["rm -rf /"]` would
-execute that command in the sirop process. `yaml.safe_load()` restricts
-deserialization to basic Python types only.
+**Why this matters:** `yaml.load()` with a permissive loader can deserialize
+arbitrary Python objects from a crafted YAML file, allowing code execution in
+the sirop process. `yaml.safe_load()` restricts deserialization to basic Python
+types (str, int, float, list, dict, None) only.
 
-The ruff rule `S506` (`unsafe-yaml-load`) flags `yaml.load()` calls — ensure
-it remains enabled. After loading, the raw dict must be validated against a
-pydantic schema before any field is used. Do not access raw dict keys directly
-from untrusted YAML.
+The ruff rule `S506` (`unsafe-yaml-load`) flags unsafe `yaml.load()` calls —
+ensure it remains enabled.
+
+**User-provided wallet-definition YAML (xpub importer):** The file passed to
+`sirop tap wallets.yaml` is user-controlled input and must be treated as
+untrusted. `XpubImporter._load_wallet_entries()` uses `yaml.safe_load()` and
+validates each entry explicitly (required keys, type checks, gap_limit ceiling)
+before any value is used. No field from the wallet-definition YAML is ever
+interpolated into a SQL query or shell command.
 
 ---
 

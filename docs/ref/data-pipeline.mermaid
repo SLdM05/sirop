@@ -45,7 +45,7 @@ flowchart TD
 
         subgraph DBCACHE ["  Cached External Data  "]
             T_BOC[("boc_rates<br/><i>date · currency_pair · rate · fetched_at</i>")]:::dbtable
-            T_CRYPTO[("crypto_prices<br/><i>date · asset · price_usd · price_cad · source · fetched_at</i><br/><i>source: mempool | coingecko</i>")]:::dbtable
+            T_CRYPTO[("crypto_prices<br/><i>date · asset · price_usd · price_cad · source · fetched_at</i><br/><i>source: mempool</i>")]:::dbtable
         end
 
         subgraph DBSUPPORT ["  Support Tables  "]
@@ -100,6 +100,7 @@ flowchart TD
     ND[/"NDAX CSV"/]:::source
     SW[/"Sparrow CSV"/]:::source
     KN[/"Koinly CSV"/]:::source
+    XPUB[/"xpub wallet-definition YAML<br/><i>zpub · ypub · xpub</i><br/><i>one file, many named wallets</i>"/]:::source
 
     %% ═══════════════════════════════════════════
     %% STAGE 1 — tap  (import)
@@ -109,23 +110,27 @@ flowchart TD
     IMP_ND["NDAX Importer<br/><i>config-driven parser</i>"]:::importer
     IMP_SW["Sparrow Importer<br/><i>config-driven parser</i>"]:::importer
     IMP_KN["Koinly Importer<br/><i>config-driven parser</i>"]:::importer
+    IMP_XPUB["xpub Importer<br/><i>BIP84 / BIP49 / BIP44 derivation</i><br/><i>gap-limit address scan</i><br/><i>parse_multi → one wallet per xpub entry</i><br/><i>requires private Mempool node</i>"]:::importer
     YAML_IMP[("Importer YAML<br/>configs")]:::external
+    MEMPOOL_TAP[("Mempool REST API<br/><i>GET /address/{addr}/txs</i><br/><i>tap-time only — address scanning</i><br/><i>rate-limited by BTC_TRAVERSAL_REQUEST_DELAY</i><br/><i>privacy-gated — private node required</i>")]:::external
 
     SP --> IMP_SP
     ND --> IMP_ND
     SW --> IMP_SW
     KN --> IMP_KN
-    YAML_IMP -.-> IMP_SP & IMP_ND & IMP_SW & IMP_KN
+    XPUB --> IMP_XPUB
+    YAML_IMP -.-> IMP_SP & IMP_ND & IMP_SW & IMP_KN & IMP_XPUB
+    MEMPOOL_TAP -.->|"address tx history · BTC_MEMPOOL_URL"| IMP_XPUB
 
-    IMP_SP & IMP_ND & IMP_SW & IMP_KN -->|"via repo → atomic write"| T_RAW
+    IMP_SP & IMP_ND & IMP_SW & IMP_KN & IMP_XPUB -->|"via repo → atomic write"| T_RAW
 
     %% ═══════════════════════════════════════════
     %% STAGE 2 — normalize
     %% ═══════════════════════════════════════════
 
-    NORM["Normalizer<br/><i>CAD conversion via BoC rates</i><br/><i>crypto price fallback (Mempool / CoinGecko)</i><br/><i>UTC timestamp standardization</i><br/><i>Transaction type classification</i>"]:::process
+    NORM["Normalizer<br/><i>CAD conversion via BoC rates</i><br/><i>BTC price fallback (Mempool.space)</i><br/><i>UTC timestamp standardization</i><br/><i>Transaction type classification</i>"]:::process
     BOC[("Bank of Canada<br/>Valet API")]:::external
-    PRICE_API[("Mempool.space / CoinGecko<br/><i>historical crypto prices</i><br/><i>BTC: Mempool first, CoinGecko fallback</i><br/><i>other assets: CoinGecko only</i>")]:::external
+    PRICE_API[("Mempool.space<br/><i>historical BTC prices</i><br/><i>sirop is BTC-only</i>")]:::external
 
     T_RAW -->|"via repo"| NORM
     BOC -.->|"rates cached → T_BOC"| NORM

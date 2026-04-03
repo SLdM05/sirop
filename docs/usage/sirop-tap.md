@@ -174,7 +174,7 @@ the same timestamp into a single transaction (one buy + one fee row = one
 | `source` | Importer name, e.g. `"ndax"` |
 | `raw_timestamp` | Timestamp as-is from CSV, ISO 8601 UTC |
 | `transaction_type` | Mapped from CSV type string via `transaction_type_map` in the importer YAML |
-| `asset` | Ticker of the primary asset, e.g. `"BTC"`, `"ETH"`, `"CAD"` |
+| `asset` | Ticker of the primary asset, e.g. `"BTC"`, `"CAD"` |
 | `amount` | Absolute amount in `asset` units, fixed-point string |
 | `amount_currency` | Same as `asset` |
 | `fee` | Fee amount or `NULL` (zero-fee rows are stored as `NULL`, not `"0"`) |
@@ -196,9 +196,7 @@ written. This matches the storage convention in
 ### `extra_json`
 
 The full original CSV row (all columns as strings) is always preserved in
-`extra_json`. Importer-specific derived values are added under keys prefixed
-with `_`. For example, the NDAX importer embeds the sent side of a
-non-fiat-to-non-fiat trade or a dust conversion:
+`extra_json`. For example, a BTC dust conversion row from NDAX:
 
 ```json
 {
@@ -208,9 +206,7 @@ non-fiat-to-non-fiat trade or a dust conversion:
   "BALANCE": "0.010345",
   "TYPE": "DUST / IN",
   "TX_ID": "10010",
-  "DATE": "2025-04-15T16:45:00.000Z",
-  "_ndax_sent_asset": "ETH",
-  "_ndax_sent_amount": "4.3E-7"
+  "DATE": "2025-04-15T16:45:00.000Z"
 }
 ```
 

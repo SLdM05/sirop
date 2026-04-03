@@ -5,16 +5,8 @@
 #
 # crypto: assets supported for historical price lookups.
 #   display_name:      human-readable name used in reports.
-#   coingecko_id:      CoinGecko coin ID for the public history endpoint.
-#                      Requires COINGECKO_API_KEY in .env (free Demo tier).
-#                      Demo plan covers the last 365 days of history.
-#   mempool_supported: true if mempool.space historical-price is available
-#                      (BTC only). When true, mempool is tried first and
-#                      CoinGecko is used as a fallback.
-#   kraken_pair:       Kraken OHLC trading pair (e.g. XETHZUSD). Used as a
-#                      fallback when CoinGecko lacks data (e.g. dates older
-#                      than 365 days on the Demo plan). Free, no auth required.
-#                      Source: https://docs.kraken.com/api/docs/rest-api/get-ohlc-data
+#   mempool_supported: true if mempool.space historical-price is available.
+#                      sirop is BTC-only; this flag is always true for BTC.
 
 fiat:
   USD:
@@ -23,21 +15,4 @@ fiat:
 crypto:
   BTC:
     display_name: "Bitcoin"
-    coingecko_id: "bitcoin"
     mempool_supported: true
-    kraken_pair: "XXBTZUSD"
-  ETH:
-    display_name: "Ethereum"
-    coingecko_id: "ethereum"
-    mempool_supported: false
-    kraken_pair: "XETHZUSD"
-  SOL:
-    display_name: "Solana"
-    coingecko_id: "solana"
-    mempool_supported: false
-    kraken_pair: "SOLUSD"
-  RPL:
-    display_name: "Rocket Pool"
-    coingecko_id: "rocket-pool"
-    mempool_supported: false
-    kraken_pair: "RPLUSD"

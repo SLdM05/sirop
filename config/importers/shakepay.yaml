@@ -59,6 +59,10 @@ transaction_type_map:
 # Unknown types must NOT crash the importer.  Log a warning and store the
 # record flagged for manual review (see parser implementation requirements).
 fee_model: "spread"  # fees are embedded in the buy/sell spread, not a separate column
+# sirop is BTC-only.  Any non-BTC crypto asset rows are skipped at parse
+# time with a warning.  Fiat rows are always allowed.
+allowed_crypto_assets:
+  - BTC
 # CAD and USD are the only fiat currencies Shakepay currently supports.
 # Used by the importer to determine buy/sell direction for purchase/sale rows:
 #   Debit=fiat + Credit=crypto → "buy"

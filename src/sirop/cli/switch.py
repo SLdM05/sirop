@@ -1,5 +1,7 @@
 """Handler for `sirop switch <name>`."""
 
+from pathlib import Path
+
 from sirop.config.settings import Settings, get_settings
 from sirop.db.connection import get_batch_path, set_active_batch
 from sirop.models.messages import MessageCode
@@ -12,7 +14,9 @@ def handle_switch(name: str, settings: Settings | None = None) -> int:
     Parameters
     ----------
     name:
-        Batch name to activate (without extension).
+        Batch name to activate. Accepts bare names (``my2025tax``),
+        names with extension (``my2025tax.sirop``), or full/relative
+        paths (``data/my2025tax.sirop``).
     settings:
         Application settings. Resolved from the environment if not supplied.
 
@@ -23,6 +27,11 @@ def handle_switch(name: str, settings: Settings | None = None) -> int:
     """
     if settings is None:
         settings = get_settings()
+
+    # Normalize: strip any directory prefix and the .sirop extension so users
+    # can pass "data/my2025tax.sirop" and get the same result as "my2025tax".
+    p = Path(name)
+    name = p.stem if p.suffix == ".sirop" else p.name
 
     batch_path = get_batch_path(name, settings)
     if not batch_path.exists():
