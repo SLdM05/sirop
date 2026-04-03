@@ -10,20 +10,14 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
-from bip_utils import (  # type: ignore[import-untyped]
-    Bip44,
-    Bip44Changes,
-    Bip44Coins,
-    Bip49,
-    Bip49Coins,
-    Bip84,
-    Bip84Coins,
-)
+from embit import networks, script  # type: ignore[import-untyped]
+from embit.bip32 import HDKey  # type: ignore[import-untyped]
 
 from sirop.node.privacy import is_private_node_url
 
 logger = logging.getLogger(__name__)
 
+_MAINNET = networks.NETWORKS["main"]
 _MEMPOOL_PAGE_SIZE = 25
 _HTTP_NOT_FOUND = 404
 _HTTP_SERVER_ERROR = 500
@@ -52,19 +46,15 @@ def derive_address(xpub: str, branch: int, index: int) -> str:
         ValueError: Unrecognised xpub prefix.
     """
     prefix = xpub[:4]
+    if prefix not in ("zpub", "ypub", "xpub"):
+        raise ValueError(f"Unsupported xpub prefix: {prefix!r} — expected zpub, ypub, or xpub")
+    root = HDKey.from_string(xpub)
+    child = root.derive([branch, index])
     if prefix == "zpub":
-        change = Bip44Changes.CHAIN_EXT if branch == 0 else Bip44Changes.CHAIN_INT
-        ctx = Bip84.FromExtendedKey(xpub, Bip84Coins.BITCOIN)
-        return str(ctx.Change(change).AddressIndex(index).PublicKey().ToAddress())
+        return str(script.p2wpkh(child).address(_MAINNET))
     if prefix == "ypub":
-        change = Bip44Changes.CHAIN_EXT if branch == 0 else Bip44Changes.CHAIN_INT
-        ctx = Bip49.FromExtendedKey(xpub, Bip49Coins.BITCOIN)
-        return str(ctx.Change(change).AddressIndex(index).PublicKey().ToAddress())
-    if prefix == "xpub":
-        change = Bip44Changes.CHAIN_EXT if branch == 0 else Bip44Changes.CHAIN_INT
-        ctx = Bip44.FromExtendedKey(xpub, Bip44Coins.BITCOIN)
-        return str(ctx.Change(change).AddressIndex(index).PublicKey().ToAddress())
-    raise ValueError(f"Unsupported xpub prefix: {prefix!r} — expected zpub, ypub, or xpub")
+        return str(script.p2sh(script.p2wpkh(child)).address(_MAINNET))
+    return str(script.p2pkh(child).address(_MAINNET))
 
 
 def scan_wallet(
