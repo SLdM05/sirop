@@ -65,6 +65,7 @@ class TaxRules:
 
     capital_gains_inclusion_rate: Decimal
     superficial_loss_window_days: int
+    reward_treatment: dict[str, str]  # reward subtype → "income" | "discount"
 
 
 def run(

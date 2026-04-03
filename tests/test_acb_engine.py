@@ -22,6 +22,7 @@ _BASE_TS = datetime(2025, 1, 15, 12, 0, 0, tzinfo=UTC)
 _DEFAULT_RULES = TaxRules(
     capital_gains_inclusion_rate=Decimal("0.50"),
     superficial_loss_window_days=30,
+    reward_treatment={},
 )
 
 
@@ -312,6 +313,37 @@ def test_income_event_establishes_acb() -> None:
     assert d.acb_of_disposed_cad == Decimal("65.00000000")
     # gain = 70 - 65 = 5
     assert d.gain_loss_cad == Decimal("5.00000000")
+
+
+def test_discount_reward_enters_pool_at_zero_acb() -> None:
+    """A discount-treated reward enters the ACB pool at $0 cost basis.
+
+    When sold, the full proceeds are a capital gain — no ACB to subtract.
+    """
+    events = [
+        ClassifiedEvent(
+            id=1,
+            vtx_id=1,
+            timestamp=_BASE_TS,
+            event_type="income",
+            asset="BTC",
+            amount=Decimal("0.001"),
+            cad_proceeds=None,
+            cad_cost=Decimal("0"),  # discount treatment — $0 ACB
+            cad_fee=None,
+            txid=None,
+            source="shakepay",
+            is_taxable=True,
+        ),
+        _sell("BTC", "0.001", "70", offset_days=30, event_id=2),
+    ]
+    disps, *_ = run(events, _DEFAULT_RULES)
+
+    assert len(disps) == 1
+    d = disps[0]
+    # ACB = 0, so full proceeds = capital gain
+    assert d.acb_of_disposed_cad == Decimal("0.00000000")
+    assert d.gain_loss_cad == Decimal("70.00000000")
 
 
 def test_final_pools_returned_for_acquisition_only_asset() -> None:

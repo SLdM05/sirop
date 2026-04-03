@@ -248,8 +248,8 @@ class ShakepayImporter(BaseImporter):
             result = self._parse_deposit(ctx)
         elif canonical_type in ("fiat_deposit", "fiat_withdrawal"):
             result = self._parse_fiat(ctx, canonical_type)
-        elif canonical_type == "income":
-            result = self._parse_income(ctx)
+        elif canonical_type in ("income", "reward_shake", "reward_cashback"):
+            result = self._parse_income(ctx, canonical_type)
         else:
             # "other" (covers "peer transfer" and literal "other") and unknowns.
             result = self._parse_generic(ctx, canonical_type)
@@ -420,11 +420,12 @@ class ShakepayImporter(BaseImporter):
             raw_row=ctx.row,
         )
 
-    def _parse_income(self, ctx: _RowCtx) -> RawTransaction | None:
-        """Handle ``shakingsats`` rows (BTC rewards — income event).
+    def _parse_income(self, ctx: _RowCtx, canonical_type: str = "income") -> RawTransaction | None:
+        """Handle BTC reward/income rows (shakingsats, reward_shake, reward_cashback).
 
         ``fiat_value`` is left ``None``; the normalizer fetches the BoC rate
         to determine the CAD fair market value at receipt.
+        ``canonical_type`` is passed through so reward subtypes are preserved.
         """
         if ctx.credited is None:
             logger.warning(
@@ -434,7 +435,7 @@ class ShakepayImporter(BaseImporter):
         return RawTransaction(
             source=self._config.source_name,
             timestamp=ctx.timestamp,
-            transaction_type="income",
+            transaction_type=canonical_type,
             asset=ctx.credit_currency,
             amount=ctx.credited,
             amount_currency=ctx.credit_currency,

@@ -351,17 +351,18 @@ def test_buy_2025_fields(transactions: list[RawTransaction]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Income — shakingsats and Reward (2025 type name)
+# Rewards — shakingsats and Reward (2025 type name) → reward_shake
 # ---------------------------------------------------------------------------
 
 
-def test_income_present(transactions: list[RawTransaction]) -> None:
-    assert len(_find(transactions, "income", "BTC")) == 2  # noqa: PLR2004
+def test_reward_shake_present(transactions: list[RawTransaction]) -> None:
+    """Both 'shakingsats' and 'reward' CSV types map to canonical 'reward_shake'."""
+    assert len(_find(transactions, "reward_shake", "BTC")) == 2  # noqa: PLR2004
 
 
-def test_income_fields(transactions: list[RawTransaction]) -> None:
-    """shakingsats income: BTC credited, no fiat_value (normalizer handles FMV)."""
-    txs = _find(transactions, "income", "BTC")
+def test_reward_shake_fields(transactions: list[RawTransaction]) -> None:
+    """shakingsats: BTC credited, no fiat_value (normalizer handles FMV), no fee, no txid."""
+    txs = _find(transactions, "reward_shake", "BTC")
     tx = next(t for t in txs if t.raw_type == "shakingsats")
     assert tx.asset == "BTC"
     assert tx.amount == Decimal("0.00001500")
@@ -371,9 +372,9 @@ def test_income_fields(transactions: list[RawTransaction]) -> None:
     assert tx.txid is None
 
 
-def test_reward_type_maps_to_income(transactions: list[RawTransaction]) -> None:
-    """'Reward' is the 2025 Shakepay type name for what was 'shakingsats'."""
-    txs = _find(transactions, "income", "BTC")
+def test_reward_type_maps_to_reward_shake(transactions: list[RawTransaction]) -> None:
+    """'Reward' is the 2025 Shakepay type name for ShakingSats — maps to 'reward_shake'."""
+    txs = _find(transactions, "reward_shake", "BTC")
     tx = next(t for t in txs if t.raw_type == "reward")
     assert tx.asset == "BTC"
     assert tx.amount == Decimal("0.00000021")
