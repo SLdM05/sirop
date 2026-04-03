@@ -16,7 +16,8 @@ python = "^3.12"
 pyyaml = "^6.0"
 pydantic-settings = "^2.0"
 rich = "^14.3.3"
-bip-utils = "^2.12.1"
+pygments = ">=2.20.0"
+embit = ">=0.4.9"
 
 [tool.poetry.group.dev.dependencies]
 ruff = "^0.8"

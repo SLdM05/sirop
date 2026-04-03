@@ -44,19 +44,16 @@ def test_unsupported_prefix_raises() -> None:
 
 
 # BIP49 test vector — ypub from "12 abandon" mnemonic at m/49'/0'/0'
-def test_derive_ypub_external_index_0() -> None:
-    # Derive the ypub from the "12 abandon" mnemonic first, then test derivation
-    from bip_utils import Bip39SeedGenerator, Bip49, Bip49Coins  # type: ignore[import-untyped]
+# Source: Ian Coleman BIP39 tool, "abandon abandon ... about", no passphrase.
+_BIP49_YPUB = (
+    "ypub6Ww3ibxVfGzLrAH1PNcjyAWenMTbbAosGNB6VvmSEgytSER9azLDWCxoJwW"
+    "7Ke7icmizBMXrzBx9979FfaHxHcrArf3zbeJJJUZPf663zsP"
+)
 
-    mnemonic = (
-        "abandon abandon abandon abandon abandon abandon "
-        "abandon abandon abandon abandon abandon about"
-    )
-    seed = Bip39SeedGenerator(mnemonic).Generate()
-    ctx = Bip49.FromSeed(seed, Bip49Coins.BITCOIN)
-    ypub = ctx.Purpose().Coin().Account(0).PublicKey().ToExtended()
-    addr = derive_address(ypub, branch=0, index=0)
-    # verify it looks like a P2SH address
+
+def test_derive_ypub_external_index_0() -> None:
+    addr = derive_address(_BIP49_YPUB, branch=0, index=0)
+    # P2SH-P2WPKH addresses always start with "3" on mainnet
     assert addr.startswith("3"), f"Expected P2SH (3...) address, got {addr!r}"
 
 
