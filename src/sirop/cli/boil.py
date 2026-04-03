@@ -46,6 +46,7 @@ from sirop.utils.price_cache import copy_prices_into_batch, open_price_cache, sy
 if TYPE_CHECKING:
     from datetime import date
 
+    from sirop.models.disposition import ACBState
     from sirop.models.raw import RawTransaction
 
 logger = get_logger(__name__)
@@ -503,13 +504,21 @@ def _run_acb(conn: object, tax_rules: TaxRules) -> None:
     disps = repo.write_dispositions(conn, disps, states)
     logger.debug("wrote %d disposition(s)", len(disps))
 
-    # Write year-end snapshots for assets acquired but never sold in this tax year.
-    # Without these, the holdings query finds nothing for those assets.
+    # Write year-end snapshots for assets that either:
+    #   (a) were acquired but never sold (acquisition-only), or
+    #   (b) had disposals followed by further acquisitions that changed the pool.
+    # Without (b), MAX(id) FROM acb_state points to the last disposal row, not
+    # the true year-end state, causing the holdings display to show a stale balance.
     assets_with_disposal = {s.asset for s in states}
+    last_disposal_pool: dict[str, ACBState] = {s.asset: s for s in states}
     holdovers = [
         (pool, last_events[asset].id)
         for asset, pool in final_pools.items()
-        if asset not in assets_with_disposal and pool.total_units > Decimal("0")
+        if pool.total_units > Decimal("0")
+        and (
+            asset not in assets_with_disposal  # (a) acquisition-only
+            or pool != last_disposal_pool.get(asset)  # (b) post-disposal acquisitions
+        )
     ]
     if holdovers:
         repo.write_holdover_acb_states(conn, holdovers)
@@ -799,59 +808,11 @@ def _print_wallet_holdings(
     conn: sqlite3.Connection, per_unit_acb: dict[str, float], tax_year: int
 ) -> None:
     """Print year-end holdings broken down by wallet."""
-    year_end = f"{tax_year}-12-31"
-    wallet_rows = conn.execute(
-        """
-        WITH transfer_vtx_ids AS (
-            -- vtx_ids of matched transfer legs; their fee is already captured
-            -- in the amount difference (W - D) and must not be double-subtracted.
-            SELECT DISTINCT vtx_id FROM classified_events WHERE event_type = 'transfer'
-        ),
-        fee_disposal_adj AS (
-            -- Sum fee_disposal amounts per wallet/asset for non-transfer transactions
-            -- within the tax year.  These crypto fees reduce the global ACB pool but
-            -- are not reflected in transactions.amount, so per-wallet holdings would
-            -- otherwise overstate.
-            SELECT
-                ce.wallet_id,
-                ce.asset,
-                SUM(CAST(ce.amount AS REAL)) AS adj
-            FROM classified_events ce
-            WHERE ce.event_type = 'fee_disposal'
-              AND ce.is_taxable = 1
-              AND ce.timestamp <= ?
-              AND ce.vtx_id NOT IN (SELECT vtx_id FROM transfer_vtx_ids)
-            GROUP BY ce.wallet_id, ce.asset
-        )
-        SELECT
-            COALESCE(w.name, t.source) AS wallet_name,
-            t.asset,
-            SUM(CASE
-                WHEN t.transaction_type IN ('buy','transfer_in','deposit','income')
-                    THEN CAST(t.amount AS REAL)
-                WHEN t.transaction_type IN ('sell','transfer_out','withdrawal','spend','fee')
-                    THEN -CAST(t.amount AS REAL)
-                ELSE 0
-            END) - COALESCE(MAX(fda.adj), 0) AS net_units
-        FROM transactions t
-        LEFT JOIN wallets w ON t.wallet_id = w.id
-        LEFT JOIN fee_disposal_adj fda ON fda.wallet_id = t.wallet_id AND fda.asset = t.asset
-        WHERE t.timestamp <= ?
-          AND t.asset IN (
-            SELECT asset FROM acb_state
-            WHERE id IN (SELECT MAX(id) FROM acb_state GROUP BY asset)
-              AND CAST(units AS REAL) > 0
-        )
-        GROUP BY wallet_name, t.asset
-        HAVING net_units > 0.00000001
-        ORDER BY wallet_name, t.asset
-        """,
-        (year_end, year_end),
-    ).fetchall()
+    per_wallet = repo.read_per_wallet_holdings(conn, tax_year)
 
     wallet_assets: dict[str, list[Any]] = {}
-    for r in wallet_rows:
-        wallet_assets.setdefault(r["wallet_name"], []).append(r)
+    for h in per_wallet:
+        wallet_assets.setdefault(h.wallet_name, []).append(h)
 
     # External wallets — net units held in wallets flagged via `stir external`.
     # external-out: units left a tracked wallet → positive for the external wallet
@@ -881,17 +842,23 @@ def _print_wallet_holdings(
         """
     ).fetchall()
     for r in ext_rows:
-        wallet_assets.setdefault(r["wallet_name"], []).append(r)
+        wallet_assets.setdefault(r["wallet_name"], []).append(
+            repo.WalletHolding(
+                wallet_name=r["wallet_name"],
+                asset=r["asset"],
+                net_units=Decimal(str(r["net_units"])),
+            )
+        )
 
     for wallet_name, rows in wallet_assets.items():
         emit(MessageCode.BOIL_SUMMARY_WALLET_HEADER, name=wallet_name)
         emit(MessageCode.BOIL_SUMMARY_HOLDINGS_HEADER)
-        for r in rows:
-            u = float(r["net_units"])
-            acb_pu = per_unit_acb.get(r["asset"], 0.0)
+        for h in rows:
+            u = float(h.net_units)
+            acb_pu = per_unit_acb.get(h.asset, 0.0)
             wallet_acb = u * acb_pu
             print(
-                f"    {r['asset']:<6} {u:>14.8f} units"
+                f"    {h.asset:<6} {u:>14.8f} units"
                 f"   ACB: {wallet_acb:>12,.2f} CAD"
                 f"   ({acb_pu:>12,.2f} CAD/unit)"
             )

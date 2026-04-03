@@ -18,6 +18,7 @@ Conventions
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -359,8 +360,8 @@ def write_classified_events(
                 INSERT INTO classified_events
                     (vtx_id, timestamp, event_type, asset, amount,
                      cad_proceeds, cad_cost, cad_fee, txid, source, is_taxable,
-                     wallet_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     wallet_id, is_provisional)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     evt.vtx_id,
@@ -375,6 +376,7 @@ def write_classified_events(
                     evt.source,
                     1 if evt.is_taxable else 0,
                     evt.wallet_id,
+                    1 if evt.is_provisional else 0,
                 ),
             )
             updated.append(
@@ -392,6 +394,7 @@ def write_classified_events(
                     source=evt.source,
                     is_taxable=evt.is_taxable,
                     wallet_id=evt.wallet_id,
+                    is_provisional=evt.is_provisional,
                 )
             )
     return updated
@@ -469,7 +472,8 @@ def read_classified_events(conn: sqlite3.Connection) -> list[ClassifiedEvent]:
     rows = conn.execute(
         """
         SELECT id, vtx_id, timestamp, event_type, asset, amount,
-               cad_proceeds, cad_cost, cad_fee, txid, source, is_taxable, wallet_id
+               cad_proceeds, cad_cost, cad_fee, txid, source, is_taxable, wallet_id,
+               is_provisional
         FROM classified_events
         WHERE is_taxable = 1
         ORDER BY timestamp
@@ -493,6 +497,7 @@ def read_classified_events(conn: sqlite3.Connection) -> list[ClassifiedEvent]:
                 source=row["source"],
                 is_taxable=bool(row["is_taxable"]),
                 wallet_id=row["wallet_id"],
+                is_provisional=bool(row["is_provisional"]),
             )
         )
     return result
@@ -507,7 +512,8 @@ def read_all_classified_events(conn: sqlite3.Connection) -> list[ClassifiedEvent
     rows = conn.execute(
         """
         SELECT id, vtx_id, timestamp, event_type, asset, amount,
-               cad_proceeds, cad_cost, cad_fee, txid, source, is_taxable, wallet_id
+               cad_proceeds, cad_cost, cad_fee, txid, source, is_taxable, wallet_id,
+               is_provisional
         FROM classified_events
         ORDER BY timestamp
         """
@@ -530,6 +536,7 @@ def read_all_classified_events(conn: sqlite3.Connection) -> list[ClassifiedEvent
                 source=row["source"],
                 is_taxable=bool(row["is_taxable"]),
                 wallet_id=row["wallet_id"],
+                is_provisional=bool(row["is_provisional"]),
             )
         )
     return result
@@ -698,6 +705,177 @@ def read_acb_state_final(conn: sqlite3.Connection) -> list[ACBState]:
             )
         )
     return result
+
+
+@dataclasses.dataclass(frozen=True)
+class WalletHolding:
+    """Year-end net units held per wallet/asset, derived from the transactions table.
+
+    Used by ``_print_wallet_holdings`` in boil.py and by tests to assert that
+    the per-wallet breakdown sums to the same total as the global ACB pool.
+    """
+
+    wallet_name: str
+    asset: str
+    net_units: Decimal
+
+
+def read_per_wallet_holdings(conn: sqlite3.Connection, tax_year: int) -> list[WalletHolding]:
+    """Return year-end net units held per wallet/asset through year-end.
+
+    Sums deposits (positive) and withdrawals (negative) from the ``transactions``
+    table, then subtracts fee_disposal amounts so the per-wallet total matches
+    the global ACB pool unit count.
+
+    Transfer-linked transactions (vtx_id in classified_events where
+    event_type='transfer') are excluded — they are inter-wallet movements that
+    do not affect the ACB pool, so including them would cause the per-wallet
+    sum to diverge from the global block whenever a matched transfer pair has
+    mismatched amounts.
+    """
+    year_end = f"{tax_year}-12-31"
+    rows = conn.execute(
+        """
+        WITH transfer_vtx_ids AS (
+            -- vtx_ids of matched transfer legs (is_taxable=0).
+            -- Exclude NULL vtx_ids to avoid NOT IN returning UNKNOWN for all rows.
+            SELECT DISTINCT vtx_id
+            FROM classified_events
+            WHERE event_type = 'transfer'
+              AND vtx_id IS NOT NULL
+        ),
+        fee_disposal_adj AS (
+            -- Sum fee_disposal amounts per wallet/asset for non-transfer txs
+            -- within the tax year.  These reduce the global ACB pool but are
+            -- not reflected in transactions.amount, so per-wallet holdings
+            -- would otherwise overstate.
+            SELECT
+                ce.wallet_id,
+                ce.asset,
+                SUM(CAST(ce.amount AS REAL)) AS adj
+            FROM classified_events ce
+            WHERE ce.event_type = 'fee_disposal'
+              AND ce.is_taxable = 1
+              AND ce.timestamp <= ?
+              AND (ce.vtx_id IS NULL OR ce.vtx_id NOT IN (SELECT vtx_id FROM transfer_vtx_ids))
+            GROUP BY ce.wallet_id, ce.asset
+        ),
+        provisional_adj AS (
+            -- Sum provisional buy amounts per wallet/asset within the tax year.
+            -- Provisional events represent surplus BTC in graph-matched transfer pairs
+            -- (deposit.amount > withdrawal.amount).  The deposit tx is excluded from
+            -- the main sum (it is transfer-linked), so we add the surplus back here.
+            SELECT
+                ce.wallet_id,
+                ce.asset,
+                SUM(CAST(ce.amount AS REAL)) AS adj
+            FROM classified_events ce
+            WHERE ce.is_provisional = 1
+              AND ce.is_taxable = 1
+              AND ce.timestamp <= ?
+            GROUP BY ce.wallet_id, ce.asset
+        )
+        SELECT
+            COALESCE(w.name, t.source) AS wallet_name,
+            t.asset,
+            SUM(CASE
+                WHEN t.transaction_type IN ('buy','transfer_in','deposit','income')
+                    THEN CAST(t.amount AS REAL)
+                WHEN t.transaction_type IN ('sell','transfer_out','withdrawal','spend','fee')
+                    THEN -CAST(t.amount AS REAL)
+                ELSE 0
+            END) - COALESCE(MAX(fda.adj), 0) + COALESCE(MAX(pa.adj), 0) AS net_units
+        FROM transactions t
+        LEFT JOIN wallets w ON t.wallet_id = w.id
+        LEFT JOIN fee_disposal_adj fda ON fda.wallet_id = t.wallet_id AND fda.asset = t.asset
+        LEFT JOIN provisional_adj pa ON pa.wallet_id = t.wallet_id AND pa.asset = t.asset
+        WHERE t.timestamp <= ?
+          AND t.id NOT IN (SELECT vtx_id FROM transfer_vtx_ids)
+          AND t.asset IN (
+            SELECT asset FROM acb_state
+            WHERE id IN (SELECT MAX(id) FROM acb_state GROUP BY asset)
+              AND CAST(units AS REAL) > 0
+        )
+        GROUP BY wallet_name, t.asset
+        HAVING net_units > 0.00000001
+        ORDER BY wallet_name, t.asset
+        """,
+        (year_end, year_end, year_end),
+    ).fetchall()
+
+    return [
+        WalletHolding(
+            wallet_name=str(r["wallet_name"]),
+            asset=str(r["asset"]),
+            net_units=Decimal(str(r["net_units"])),
+        )
+        for r in rows
+    ]
+
+
+@dataclasses.dataclass(frozen=True)
+class ProvisionalEvent:
+    """A provisional classified_event paired with its triggering graph-transfer context."""
+
+    ce_id: int
+    timestamp: str  # ISO 8601
+    asset: str
+    amount: Decimal
+    cad_cost: Decimal | None
+    wallet_name: str
+    withdrawal_id: int  # transactions.id of the withdrawal leg
+    deposit_id: int  # transactions.id of the deposit leg (vtx_id of this event)
+    withdrawal_amount: Decimal
+    deposit_amount: Decimal
+
+
+def read_provisional_events(conn: sqlite3.Connection) -> list[ProvisionalEvent]:
+    """Return all provisional classified events joined with their graph-pair context.
+
+    Provisional events are surplus acquisitions emitted when a graph-matched
+    transfer pair has a larger deposit than withdrawal.  They need user review
+    (via ``sirop stir view``) and will be reclassified as transfers if the user
+    adds the intermediate wallet via ``sirop tap``.
+    """
+    rows = conn.execute(
+        """
+        SELECT
+            ce.id,
+            ce.timestamp,
+            ce.asset,
+            ce.amount,
+            ce.cad_cost,
+            COALESCE(w.name, ce.source) AS wallet_name,
+            gtp.withdrawal_id,
+            gtp.deposit_id,
+            t_out.amount AS withdrawal_amount,
+            t_in.amount  AS deposit_amount
+        FROM classified_events ce
+        LEFT JOIN wallets w ON ce.wallet_id = w.id
+        LEFT JOIN graph_transfer_pairs gtp ON gtp.deposit_id = ce.vtx_id
+        LEFT JOIN transactions t_out ON t_out.id = gtp.withdrawal_id
+        LEFT JOIN transactions t_in  ON t_in.id  = gtp.deposit_id
+        WHERE ce.is_provisional = 1
+          AND ce.is_taxable = 1
+        ORDER BY ce.timestamp
+        """
+    ).fetchall()
+
+    return [
+        ProvisionalEvent(
+            ce_id=row["id"],
+            timestamp=row["timestamp"],
+            asset=row["asset"],
+            amount=Decimal(row["amount"]),
+            cad_cost=Decimal(row["cad_cost"]) if row["cad_cost"] else None,
+            wallet_name=str(row["wallet_name"]),
+            withdrawal_id=row["withdrawal_id"],
+            deposit_id=row["deposit_id"],
+            withdrawal_amount=Decimal(row["withdrawal_amount"]),
+            deposit_amount=Decimal(row["deposit_amount"]),
+        )
+        for row in rows
+    ]
 
 
 def read_dispositions(conn: sqlite3.Connection) -> list[Disposition]:

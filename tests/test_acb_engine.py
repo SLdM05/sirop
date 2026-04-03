@@ -341,3 +341,31 @@ def test_final_pools_returned_for_acquisition_only_asset() -> None:
     # last_events must point to the second (most recent) buy (event_id=2).
     assert "BTC" in last_events
     assert last_events["BTC"].id == events[1].id
+
+
+def test_final_pools_returned_for_buy_sell_buy_asset() -> None:
+    """final_pools reflects the full year-end pool when post-disposal buys occur.
+
+    Regression: _run_acb in boil.py uses final_pools to write year-end holdovers
+    for assets where the pool changed after the last disposal (buy → sell → buy).
+    Without this, MAX(id) FROM acb_state points to the post-sell row, not year-end.
+    """
+    events = [
+        _buy("BTC", "0.5", "25000", cad_fee="50", offset_days=0, event_id=1),
+        _sell("BTC", "0.1", "6000", cad_fee="0", offset_days=10, event_id=2),
+        _buy("BTC", "0.3", "18000", cad_fee="36", offset_days=20, event_id=3),
+    ]
+    disps, acb_states, final_pools, last_events, _ = run(events, _DEFAULT_RULES)
+
+    # One disposal → one per-disposal acb_state entry.
+    assert len(acb_states) == 1
+    post_sell = acb_states[0]
+    assert post_sell.total_units == Decimal("0.4")  # 0.5 - 0.1
+
+    # Final pool must reflect all three events (0.4 + 0.3 = 0.7).
+    pool = final_pools["BTC"]
+    assert pool.total_units == Decimal("0.7")
+    # The final pool must differ from the last disposal state so _run_acb
+    # knows to write a year-end holdover entry.
+    assert pool != post_sell
+    assert last_events["BTC"].id == events[2].id
