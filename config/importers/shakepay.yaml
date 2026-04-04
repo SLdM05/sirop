@@ -50,12 +50,14 @@ transaction_type_map:
   "crypto purchase": "deposit"      # BTC received from external wallet
   "fiat funding": "fiat_deposit"    # CAD bank deposit — no tax event
   "fiat cashout": "fiat_withdrawal" # CAD withdrawal — no tax event
-  "shakingsats": "income"           # BTC rewards — income event; FMV = ACB (pre-2025 type name)
-  "reward": "income"                # BTC rewards — income event; FMV = ACB (2025 type name)
+  "shakingsats": "reward_shake"     # ShakingSats BTC loyalty reward (pre-2025 type name)
+  "reward": "reward_shake"          # ShakingSats BTC loyalty reward (2025 type name)
+  "shakesquads": "reward_shake"     # Shakesquads loyalty program — same treatment as ShakingSats
+  "card_cashback": "reward_cashback" # Shakepay Card BTC cashback
   "buy": "buy"                      # 2025: credit-only BTC purchase; normalizer fetches BoC/CoinGecko rate for ACB
   "send": "withdrawal"              # 2025: crypto sent to external address
   "peer transfer": "other"          # Shakepay-to-Shakepay — no disposition
-  "other": "other"                  # Referral bonuses etc. — flag for review
+  "other": "other"                  # Flag for review
 # Unknown types must NOT crash the importer.  Log a warning and store the
 # record flagged for manual review (see parser implementation requirements).
 fee_model: "spread"  # fees are embedded in the buy/sell spread, not a separate column

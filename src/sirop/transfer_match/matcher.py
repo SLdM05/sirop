@@ -87,15 +87,23 @@ _INCOMING = frozenset({TransactionType.DEPOSIT, TransactionType.TRANSFER_IN})
 _FIAT = frozenset({TransactionType.FIAT_DEPOSIT, TransactionType.FIAT_WITHDRAWAL})
 
 # Income types that generate both a ClassifiedEvent (acquisition) and an IncomeEvent.
-_INCOME_TYPES = frozenset({TransactionType.INCOME})
+# Reward subtypes are also income-like — treatment (income vs discount) is config-driven.
+_INCOME_TYPES = frozenset(
+    {
+        TransactionType.INCOME,
+        TransactionType.REWARD_SHAKE,
+        TransactionType.REWARD_CASHBACK,
+    }
+)
 
 
-def match_transfers(  # noqa: PLR0912 PLR0915
+def match_transfers(  # noqa: PLR0912 PLR0913 PLR0915
     txs: list[Transaction],
     overrides: list[TransferOverride] | None = None,
     tax_year: int | None = None,
     graph_traversal_allowed: bool = True,
     on_graph_progress: Callable[[int, int, int, int], None] | None = None,
+    reward_treatment: dict[str, str] | None = None,
 ) -> tuple[list[ClassifiedEvent], list[IncomeEvent], list[GraphMatch]]:
     """Classify *txs* into taxable events and income sub-records.
 
@@ -538,7 +546,7 @@ def match_transfers(  # noqa: PLR0912 PLR0915
             )
             continue
 
-        evt, income = _classify(tx, tax_year)
+        evt, income = _classify(tx, tax_year, reward_treatment or {})
         if evt is not None:
             events.append(evt)
         if income is not None:
@@ -669,7 +677,9 @@ def _find_match(
 
 
 def _classify(
-    tx: Transaction, tax_year: int | None = None
+    tx: Transaction,
+    tax_year: int | None = None,
+    reward_treatment: dict[str, str] | None = None,
 ) -> tuple[ClassifiedEvent | None, IncomeEvent | None]:
     """Convert a single ``Transaction`` to a ``ClassifiedEvent`` (and optionally
     an ``IncomeEvent`` for income transactions).
@@ -678,9 +688,9 @@ def _classify(
     """
     tx_type = tx.tx_type
 
-    # Income (staking / airdrop / mining) — returns both event and income sub-record.
+    # Income / reward types — treatment (income vs discount) is config-driven.
     if tx_type in _INCOME_TYPES:
-        return _classify_income(tx)
+        return _classify_income(tx, reward_treatment or {})
 
     # Acquisition types: buy, trade, and unmatched deposit.
     if tx_type in {TransactionType.BUY, TransactionType.TRADE, TransactionType.DEPOSIT}:
@@ -790,9 +800,21 @@ def _classify_disposal(tx: Transaction, tax_year: int | None = None) -> Classifi
     )
 
 
-def _classify_income(tx: Transaction) -> tuple[ClassifiedEvent, IncomeEvent]:
-    """Build a (ClassifiedEvent, IncomeEvent) pair for income transactions."""
-    income_type = _infer_income_type(tx)
+def _classify_income(
+    tx: Transaction,
+    reward_treatment: dict[str, str],
+) -> tuple[ClassifiedEvent, IncomeEvent | None]:
+    """Build a ``(ClassifiedEvent, IncomeEvent | None)`` pair for income/reward transactions.
+
+    Treatment is determined by *reward_treatment* keyed on ``tx.tx_type.value``:
+
+    - ``"income"`` (default): FMV at receipt establishes ACB; ``IncomeEvent`` created.
+    - ``"discount"``: ACB contribution is $0 (purchase-discount analogy); no
+      ``IncomeEvent`` — the BTC enters the pool but is not recognised as income.
+    """
+    treatment = reward_treatment.get(tx.tx_type.value, "income")
+    is_discount = treatment == "discount"
+
     evt = ClassifiedEvent(
         id=0,
         vtx_id=tx.id,
@@ -801,20 +823,23 @@ def _classify_income(tx: Transaction) -> tuple[ClassifiedEvent, IncomeEvent]:
         asset=tx.asset,
         amount=tx.amount,
         cad_proceeds=None,
-        cad_cost=tx.cad_value,  # FMV at receipt establishes ACB
+        cad_cost=Decimal("0") if is_discount else tx.cad_value,
         cad_fee=None,
         txid=tx.txid,
         source=tx.source,
         is_taxable=True,
         wallet_id=tx.wallet_id,
     )
+    if is_discount:
+        return evt, None
+
     income = IncomeEvent(
         id=0,
         vtx_id=tx.id,
         timestamp=tx.timestamp,
         asset=tx.asset,
         units=tx.amount,
-        income_type=income_type,
+        income_type=_infer_income_type(tx),
         fmv_cad=tx.cad_value,
         source=tx.source,
     )

@@ -539,6 +539,5 @@ def migrate_to_v11(conn: sqlite3.Connection) -> None:
         ce_cols = {r[1] for r in conn.execute("PRAGMA table_info(classified_events)")}
         if "is_provisional" not in ce_cols:
             conn.execute(
-                "ALTER TABLE classified_events"
-                " ADD COLUMN is_provisional INTEGER NOT NULL DEFAULT 0"
+                "ALTER TABLE classified_events ADD COLUMN is_provisional INTEGER NOT NULL DEFAULT 0"
             )

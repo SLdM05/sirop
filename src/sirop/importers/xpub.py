@@ -150,8 +150,7 @@ class XpubImporter:
         wallets_raw = raw.get("wallets")
         if not isinstance(wallets_raw, list):
             raise ValueError(
-                f"xpub wallet-definition file {str(path)!r} must contain "
-                "a top-level 'wallets' list"
+                f"xpub wallet-definition file {str(path)!r} must contain a top-level 'wallets' list"
             )
 
         entries: list[XpubWalletEntry] = []

@@ -79,6 +79,7 @@ class MessageCode(StrEnum):
     BOIL_GRAPH_TRAVERSAL_UNAVAILABLE = "boil.graph.traversal_unavailable"
     BOIL_GRAPH_PRIVACY_WARNING = "boil.graph.privacy_warning"
     BOIL_GRAPH_PRIVACY_SKIPPED = "boil.graph.privacy_skipped"
+    BOIL_WARNING_REWARD_DISCOUNT = "boil.warning.reward_discount"
 
     # ── stir ──────────────────────────────────────────────────────────────────
     STIR_ERROR_NOT_NORMALIZED = "stir.error.not_normalized"

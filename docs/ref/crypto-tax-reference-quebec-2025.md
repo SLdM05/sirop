@@ -30,6 +30,21 @@ Every event below requires capital gain/loss calculation in CAD at the transacti
 - **Airdrops** — likely income at FMV on receipt (CRA hasn't issued definitive guidance; conservative approach is to report as income; if FMV is zero at receipt, ACB is effectively $0)
 - **Mining rewards** — typically business income if commercial, otherwise "other income"
 
+### Loyalty rewards and cashback — configurable treatment
+
+Certain crypto rewards (e.g. ShakingSats, Shakesquads, Shakepay Card cashback) occupy a grey area. Shakepay explicitly states rewards are "not taxable at receipt." CRA's established position on personal credit card cashback treats such benefits as purchase discounts rather than income. No specific CRA ruling exists for crypto-native reward programmes.
+
+sirop supports two treatments, configurable per reward subtype in `config/tax_rules.yaml` under `reward_treatment`:
+
+| Treatment | At receipt | ACB contribution | At disposal |
+|-----------|-----------|-----------------|-------------|
+| **`discount`** (default for `reward_shake`, `reward_cashback`) | Not recognised as income; no IncomeEvent | $0 — BTC enters ACB pool at zero cost | Full proceeds = capital gain (50% inclusion) |
+| **`income`** | FMV in CAD recognised as income; IncomeEvent created for TP-21.4.39-V Part 6 | FMV — pool increases by FMV | Only appreciation above FMV = capital gain |
+
+Both treatments eventually tax the same BTC; the difference is timing (income now at 100% inclusion vs capital gain later at 50%) and bracket exposure. The **discount treatment defers taxation** and is the more favourable outcome for most investors.
+
+`[W010]` is emitted once per `boil` run whenever discount-treated reward events are present, reminding the user that no CRA ruling exists for this treatment.
+
 ---
 
 ## 2. Capital gains inclusion rate: confirmed at 50% for 2025

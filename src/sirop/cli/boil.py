@@ -194,7 +194,11 @@ def _execute_stage(  # noqa: PLR0913
             _run_verify(conn)
 
         elif stage == "transfer_match":
-            _run_transfer_match(conn, graph_traversal_allowed=graph_traversal_allowed)
+            _run_transfer_match(
+                conn,
+                graph_traversal_allowed=graph_traversal_allowed,
+                reward_treatment=tax_rules.reward_treatment,
+            )
 
         elif stage == "boil":
             _run_acb(conn, tax_rules)
@@ -393,7 +397,12 @@ def _resolve_graph_traversal_permission(
     return False
 
 
-def _run_transfer_match(conn: object, *, graph_traversal_allowed: bool = True) -> None:
+def _run_transfer_match(
+    conn: object,
+    *,
+    graph_traversal_allowed: bool = True,
+    reward_treatment: dict[str, str] | None = None,
+) -> None:
     assert isinstance(conn, sqlite3.Connection)
 
     tax_year = repo.read_tax_year(conn)
@@ -439,6 +448,7 @@ def _run_transfer_match(conn: object, *, graph_traversal_allowed: bool = True) -
             tax_year=tax_year,
             graph_traversal_allowed=graph_traversal_allowed,
             on_graph_progress=_graph_progress,
+            reward_treatment=reward_treatment,
         )
     repo.write_graph_transfer_pairs(conn, graph_matches)
 
@@ -472,6 +482,13 @@ def _run_transfer_match(conn: object, *, graph_traversal_allowed: bool = True) -
             count=future_sell_count,
             tax_year=tax_year,
         )
+
+    # Emit a single consolidated warning for discount-treated reward events.
+    _discount_subtypes = {k for k, v in (reward_treatment or {}).items() if v == "discount"}
+    if _discount_subtypes:
+        discount_count = sum(1 for tx in txs if tx.tx_type.value in _discount_subtypes)
+        if discount_count:
+            emit(MessageCode.BOIL_WARNING_REWARD_DISCOUNT, count=discount_count)
 
 
 def _run_acb(conn: object, tax_rules: TaxRules) -> None:
@@ -546,9 +563,11 @@ def _load_tax_rules() -> TaxRules:
     with _TAX_RULES_PATH.open(encoding="utf-8") as fh:
         raw = yaml.safe_load(fh)
 
+    reward_treatment: dict[str, str] = raw.get("reward_treatment") or {}
     return TaxRules(
         capital_gains_inclusion_rate=Decimal(str(raw["capital_gains_inclusion_rate"])),
         superficial_loss_window_days=int(raw["superficial_loss_window_days"]),
+        reward_treatment=reward_treatment,
     )
 
 

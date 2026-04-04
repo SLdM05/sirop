@@ -115,8 +115,7 @@ def get_crypto_price_cad(
         usd_cad = get_rate(conn, "USDCAD", price_date)
     except BoCRateError as exc:
         raise CryptoPriceError(
-            f"Cannot convert BTC price to CAD on {price_date}: "
-            f"BoC USDCAD rate unavailable — {exc}"
+            f"Cannot convert BTC price to CAD on {price_date}: BoC USDCAD rate unavailable — {exc}"
         ) from exc
 
     price_cad = usd_price * usd_cad

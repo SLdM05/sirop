@@ -1279,7 +1279,7 @@ def read_graph_transfer_pairs(conn: sqlite3.Connection) -> list[GraphMatch]:
         GraphMatch(
             deposit_db_id=int(row[1]),
             withdrawal_db_id=int(row[0]),
-            direction=cast(Literal["backward", "forward"], str(row[3])),
+            direction=cast("Literal['backward', 'forward']", str(row[3])),
             hops=int(row[2]),
             fee_crypto=Decimal(row[4]),
             deposit_vout_count=int(row[5]) if row[5] is not None else 0,

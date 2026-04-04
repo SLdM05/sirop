@@ -1154,9 +1154,7 @@ def _cmd_destination(  # noqa: PLR0911
         return
 
     ts = tx.timestamp.strftime("%Y-%m-%d %H:%M UTC")
-    out.print(
-        f"Transaction {tx_id} — {tx.source} {tx.tx_type.value}" f"  BTC {tx.amount:.8f}  {ts}"
-    )
+    out.print(f"Transaction {tx_id} — {tx.source} {tx.tx_type.value}  BTC {tx.amount:.8f}  {ts}")
     out.print("Paste the on-chain txid (64 lowercase hex characters):")
     try:
         raw = input("> ").strip().lower()

@@ -295,6 +295,14 @@ messages:
     code: W008
     text: "Graph traversal skipped — public Mempool endpoint not confirmed. Set BTC_TRAVERSAL_ALLOW_PUBLIC=true or use --allow-public-mempool to proceed."
 
+  boil.warning.reward_discount:
+    category: warning
+    code: W010
+    text: >-
+      {count} reward event(s) treated as purchase discounts (ACB=$0, not income).
+      No CRA ruling exists for crypto-specific cashback rewards.
+      To use income treatment instead, set reward_treatment in tax_rules.yaml.
+
 
   # ── stir ──────────────────────────────────────────────────────────────────
 

@@ -25,6 +25,7 @@ _BASE_TS = datetime(2025, 3, 15, 12, 0, 0, tzinfo=UTC)
 _DEFAULT_RULES = TaxRules(
     capital_gains_inclusion_rate=Decimal("0.50"),
     superficial_loss_window_days=30,
+    reward_treatment={},
 )
 
 _POOL_BEFORE = ACBState(
