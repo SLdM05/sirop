@@ -45,6 +45,7 @@ Design notes
 
 from __future__ import annotations
 
+from collections import defaultdict
 from datetime import timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING
@@ -461,7 +462,6 @@ def match_transfers(  # noqa: PLR0912 PLR0913 PLR0915
                     fee=format(gm.fee_crypto, "f"),
                 )
                 withdrawal_tx = tx_by_id[gm.withdrawal_db_id]
-                deposit_tx = tx_by_id[gm.deposit_db_id]
                 # Emit fee micro-disposal — same pattern as Pass 1.
                 if gm.fee_crypto > Decimal("0") and withdrawal_tx.cad_value > Decimal("0"):
                     cad_rate = (
@@ -486,12 +486,22 @@ def match_transfers(  # noqa: PLR0912 PLR0913 PLR0915
                             wallet_id=withdrawal_tx.wallet_id,
                         )
                     )
-                # If deposit > withdrawal, the surplus BTC entered the tracked wallet
-                # from an intermediate untracked source.  Emit a provisional buy so the
-                # ACB pool records a cost basis for it.  The user can resolve this by
-                # adding the intermediate wallet via `sirop tap` and re-running boil —
-                # the event will then be reclassified as a transfer.
-                surplus = deposit_tx.amount - withdrawal_tx.amount
+
+            # If deposit > sum(all matched withdrawals), the surplus BTC entered the
+            # tracked wallet from intermediate untracked sources.  Emit ONE provisional
+            # buy per deposit group so the ACB pool records a cost basis for it.
+            # Grouping is critical for consolidation (N withdrawals → 1 deposit): each
+            # withdrawal pair must not produce its own event, or the surplus is
+            # overcounted.  The user can resolve this by adding the intermediate wallet
+            # via `sirop tap` and re-running boil — the event will be reclassified.
+            by_deposit: dict[int, list[GraphMatch]] = defaultdict(list)
+            for gm in graph_matches:
+                by_deposit[gm.deposit_db_id].append(gm)
+
+            for deposit_db_id, matches in by_deposit.items():
+                deposit_tx = tx_by_id[deposit_db_id]
+                total_withdrawal = sum(tx_by_id[gm.withdrawal_db_id].amount for gm in matches)
+                surplus = deposit_tx.amount - total_withdrawal
                 if surplus > Decimal("0") and deposit_tx.cad_value > Decimal("0"):
                     dep_cad_rate = (
                         deposit_tx.cad_value / deposit_tx.amount

@@ -176,3 +176,52 @@ def test_scan_gap_limit_stops_derivation() -> None:
 def test_scan_invalid_branch_raises() -> None:
     with pytest.raises(ValueError, match="Invalid branch"):
         scan_wallet("https://mempool.space/api", _BIP84_ZPUB, branches=[2], gap_limit=5)
+
+
+# ---------------------------------------------------------------------------
+# script_type override tests
+# ---------------------------------------------------------------------------
+
+# BIP44 test vector — "12 abandon" at m/44'/0'/0' (xpub-serialized account key)
+# Derived from embit: mnemonic_to_seed("abandon abandon ... about"), root.derive("m/44'/0'/0'")
+_BIP44_XPUB = (
+    "xpub6BosfCnifzxcFwrSzQiqu2DBVTshkCXacvNsWGYJVVhhawA7d4R5WSWGFNbi8"
+    "Aw6ZRc1brxMyWMzG3DSSSSoekkudhUd9yLb6qx39T9nMdj"
+)
+# Known addresses for _BIP44_XPUB at branch=0, index=0 — validated via embit derivation above.
+_BIP44_ADDR_P2PKH = "1LqBGSKuX5yYUonjxT5qGfpUsXKYYWeabA"
+_BIP44_ADDR_P2WPKH = "bc1qmxrw6qdh5g3ztfcwm0et5l8mvws4eva24kmp8m"
+
+
+def test_derive_xpub_default_gives_legacy_address() -> None:
+    """xpub prefix with no override produces a P2PKH (1...) address."""
+    addr = derive_address(_BIP44_XPUB, branch=0, index=0)
+    assert addr == _BIP44_ADDR_P2PKH, f"Expected P2PKH {_BIP44_ADDR_P2PKH!r}, got {addr!r}"
+
+
+def test_derive_xpub_with_p2wpkh_override_gives_segwit_address() -> None:
+    """xpub prefix + script_type='p2wpkh' produces a native SegWit (bc1q...) address.
+
+    This is the JoinMarket case: BIP84 wallet keys exported with xpub prefix.
+    """
+    addr = derive_address(_BIP44_XPUB, branch=0, index=0, script_type="p2wpkh")
+    assert addr == _BIP44_ADDR_P2WPKH, f"Expected P2WPKH {_BIP44_ADDR_P2WPKH!r}, got {addr!r}"
+
+
+def test_derive_xpub_with_p2sh_p2wpkh_override_gives_wrapped_segwit_address() -> None:
+    """xpub prefix + script_type='p2sh-p2wpkh' produces a P2SH (3...) address."""
+    addr = derive_address(_BIP44_XPUB, branch=0, index=0, script_type="p2sh-p2wpkh")
+    assert addr.startswith("3"), f"Expected P2SH (3...) address, got {addr!r}"
+
+
+def test_derive_zpub_with_p2wpkh_override_same_as_default() -> None:
+    """script_type='p2wpkh' on a zpub is a no-op — same address as without override."""
+    default = derive_address(_BIP84_ZPUB, branch=0, index=0)
+    overridden = derive_address(_BIP84_ZPUB, branch=0, index=0, script_type="p2wpkh")
+    assert default == overridden
+
+
+def test_unsupported_prefix_still_raises_with_script_type() -> None:
+    """script_type cannot rescue an unrecognised key prefix."""
+    with pytest.raises(ValueError, match="Unsupported xpub prefix"):
+        derive_address("badpub6rFR7y4Q2AijF" + "x" * 80, branch=0, index=0, script_type="p2wpkh")

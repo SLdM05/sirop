@@ -781,13 +781,25 @@ def _print_state(  # noqa: PLR0912 PLR0913 PLR0915
                     f"  [yellow]{pv.asset}  {float(pv.amount):.8f} units{cad_str}[/yellow]"
                     f"  [{pv.wallet_name}]  {pv.timestamp[:10]}"
                 )
-                out.print(
-                    f"       [dim]Withdrawal id:{pv.withdrawal_id}"
-                    f" ({float(pv.withdrawal_amount):.8f} {pv.asset})"
-                    f" → Deposit id:{pv.deposit_id}"
-                    f" ({float(pv.deposit_amount):.8f} {pv.asset})"
-                    f" — surplus {float(pv.amount):.8f} {pv.asset} treated as provisional buy[/dim]"
+                _surplus_label = (
+                    f" — surplus {float(pv.amount):.8f} {pv.asset} treated as provisional buy"
                 )
+                if pv.withdrawal_count > 1:
+                    out.print(
+                        f"       [dim]{pv.withdrawal_count} withdrawals"
+                        f" (total {float(pv.withdrawal_amount):.8f} {pv.asset})"
+                        f" → Deposit id:{pv.deposit_id}"
+                        f" ({float(pv.deposit_amount):.8f} {pv.asset})"
+                        f"{_surplus_label}[/dim]"
+                    )
+                else:
+                    out.print(
+                        f"       [dim]Withdrawal id:{pv.withdrawal_id}"
+                        f" ({float(pv.withdrawal_amount):.8f} {pv.asset})"
+                        f" → Deposit id:{pv.deposit_id}"
+                        f" ({float(pv.deposit_amount):.8f} {pv.asset})"
+                        f"{_surplus_label}[/dim]"
+                    )
                 out.print(
                     "       [dim]If you own the intermediate wallet, add it with"
                     " [bold]sirop tap[/bold] and re-run boil — it will be reclassified"

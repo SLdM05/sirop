@@ -511,20 +511,39 @@ wallets:
     gap_limit: <int>      # optional — consecutive empty addresses before stop (default: 20)
     branches: [0, 1]      # optional — HD branches to scan (default: both)
     label: <str>          # optional — free-text annotation stored in wallet record
+    script_type: <str>    # optional — override prefix-based address encoding (see below)
 ```
 
 ### Supported key types
 
-| Prefix | Address type        | HD standard |
-|--------|---------------------|-------------|
-| `zpub` | P2WPKH (bech32)     | BIP84       |
-| `ypub` | P2SH-P2WPKH         | BIP49       |
-| `xpub` | P2PKH (legacy)      | BIP44       |
+| Prefix | Default address type | HD standard | Notes |
+|--------|----------------------|-------------|-------|
+| `zpub` | P2WPKH (`bc1q…`)    | BIP84       | |
+| `ypub` | P2SH-P2WPKH (`3…`)  | BIP49       | |
+| `xpub` | P2PKH (`1…`)         | BIP44       | See `script_type` for exceptions |
+
+### `script_type` field
+
+Overrides prefix-based address derivation. Required when a wallet exports `xpub` prefix
+but uses a different address type (most common: JoinMarket BIP84 wallets).
+
+| Value | Address type |
+|-------|-------------|
+| `p2wpkh` | native SegWit `bc1q…` |
+| `p2sh-p2wpkh` | wrapped SegWit `3…` |
+| `p2pkh` | legacy `1…` |
+
+When absent, address type is inferred from the key prefix as shown in the table above.
+Validated at parse time — unknown values raise `ValueError` before any network request.
 
 ### Derivation
 
 Given account xpub at path `m/purpose'/coin'/account'`, child addresses are derived at
 `m/.../branch/index` where `branch=0` is external (receive) and `branch=1` is internal (change).
+
+The key passed as `xpub` must be the **account-level key** at `m/purpose'/coin'/account'`.
+Passing a branch-level key (e.g. at `m/84'/0'/0'/0`) would add an extra derivation step
+and produce wrong addresses.
 
 ### Gap limit
 
@@ -534,10 +553,39 @@ where coinjoin rounds create wide gaps in address usage.
 
 ### JoinMarket note
 
-JoinMarket uses 10 HD branches by default (5 mixing depths × 2 branches each). Each branch
-has its own xpub at path `m/84'/0'/n'/branch`. A single xpub only covers one branch. To
-import all JoinMarket activity, export all relevant xpubs from `joinmarket wallet-tool.py`
-and list each in the YAML with a distinct wallet name.
+JoinMarket's wallet display shows two keys per mixdepth:
+
+```
+mixdepth        0       xpub6Bff...   ← account-level key (m/84'/0'/0') — USE THIS
+external addresses  m/84'/0'/0'/0   xpub6Epx...   ← branch-level key — DO NOT USE
+```
+
+Use the **account-level key** (on the `mixdepth N` line) with `branches: [0, 1]`. The
+branch-level key is already one derivation step below the account — passing it would
+cause sirop to scan `m/84'/0'/0'/0/branch/index` instead of `m/84'/0'/0'/branch/index`.
+
+JoinMarket exports `xpub` prefix for all keys regardless of address type. Set
+`script_type: p2wpkh` to derive the correct `bc1q…` native SegWit addresses.
+
+There are 5 mixing depths (0–4) by default. Import each as a separate entry with a
+distinct wallet name. Example:
+
+```yaml
+source: xpub
+
+wallets:
+  - name: jm-depth0
+    xpub: xpub6...       # account-level key from "mixdepth 0" line
+    script_type: p2wpkh  # JoinMarket BIP84 wallet
+    gap_limit: 50
+    branches: [0, 1]
+
+  - name: jm-depth1
+    xpub: xpub6...       # account-level key from "mixdepth 1" line
+    script_type: p2wpkh
+    gap_limit: 50
+    branches: [0, 1]
+```
 
 ### Transaction mapping
 
