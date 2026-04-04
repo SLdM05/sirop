@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import yaml
+from rich.table import Table
 
 from sirop.config.settings import Settings, get_settings
 from sirop.db import repositories as repo
@@ -38,6 +39,7 @@ from sirop.node.privacy import is_private_node_url
 from sirop.normalizer import normalizer
 from sirop.transfer_match import matcher
 from sirop.utils.boc import BoCRateError, fill_rate_gaps, prefetch_rates
+from sirop.utils.console import out as _out
 from sirop.utils.crypto_prices import prefetch_crypto_prices
 from sirop.utils.logging import StageContext, get_logger
 from sirop.utils.messages import emit, spinner
@@ -798,6 +800,23 @@ def _run_audit(conn: sqlite3.Connection, batch_name: str, settings: Settings) ->
     emit(MessageCode.BOIL_AUDIT_WRITTEN, path=out_path, count=len(out_rows))
 
 
+def _holdings_table(rows: list[tuple[str, float, float, float]]) -> Table:
+    """Build a Rich Table for holdings rows: (asset, units, pool_cost, per_unit)."""
+    table = Table(box=None, show_header=True, header_style="bold dim", pad_edge=False)
+    table.add_column("Asset", style="bold cyan", no_wrap=True)
+    table.add_column("Units", justify="right", no_wrap=True)
+    table.add_column("ACB Pool (CAD)", justify="right", style="yellow", no_wrap=True)
+    table.add_column("Per Unit (CAD)", justify="right", style="dim", no_wrap=True)
+    for asset, units, pool, per_unit in rows:
+        table.add_row(
+            asset,
+            f"{units:.8f}",
+            f"{pool:,.2f}",
+            f"{per_unit:,.2f}",
+        )
+    return table
+
+
 def _print_income_and_costs(conn: sqlite3.Connection) -> None:
     """Print income and costs & expenses sections of the boil summary."""
     income_rows = conn.execute(
@@ -870,17 +889,14 @@ def _print_wallet_holdings(
         )
 
     for wallet_name, rows in wallet_assets.items():
-        emit(MessageCode.BOIL_SUMMARY_WALLET_HEADER, name=wallet_name)
-        emit(MessageCode.BOIL_SUMMARY_HOLDINGS_HEADER)
+        _out.rule(wallet_name, style="dim")
+        wallet_rows: list[tuple[str, float, float, float]] = []
         for h in rows:
             u = float(h.net_units)
             acb_pu = per_unit_acb.get(h.asset, 0.0)
             wallet_acb = u * acb_pu
-            print(
-                f"    {h.asset:<6} {u:>14.8f} units"
-                f"   ACB: {wallet_acb:>12,.2f} CAD"
-                f"   ({acb_pu:>12,.2f} CAD/unit)"
-            )
+            wallet_rows.append((h.asset, u, wallet_acb, acb_pu))
+        _out.print(_holdings_table(wallet_rows))
 
 
 def _print_summary(conn: object, batch_name: str) -> None:
@@ -920,18 +936,16 @@ def _print_summary(conn: object, batch_name: str) -> None:
         """
     ).fetchall()
     if holdings:
-        emit(MessageCode.BOIL_SUMMARY_HOLDINGS_HEADER)
+        _out.print("\n  [bold]Year-end holdings (cost basis)[/bold]")
         per_unit_acb: dict[str, float] = {}
+        total_rows: list[tuple[str, float, float, float]] = []
         for h in holdings:
             units_val = float(h["units"])
             cost_val = float(h["pool_cost"])
             per_unit = cost_val / units_val if units_val else 0.0
             per_unit_acb[h["asset"]] = per_unit
-            print(
-                f"    {h['asset']:<6} {units_val:>14.8f} units"
-                f"   ACB: {cost_val:>12,.2f} CAD"
-                f"   ({per_unit:>12,.2f} CAD/unit)"
-            )
+            total_rows.append((h["asset"], units_val, cost_val, per_unit))
+        _out.print(_holdings_table(total_rows))
 
         tax_year = repo.read_tax_year(conn)
         _print_wallet_holdings(conn, per_unit_acb, tax_year)
