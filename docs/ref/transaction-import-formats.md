@@ -69,7 +69,7 @@ Date,Amount Debited,Asset Debited,Amount Credited,Asset Credited,Market Value,Ma
 
 | Column | Type | Notes |
 |--------|------|-------|
-| `Date` | ISO 8601 datetime | Format: `2022-09-10T00:36:12+00`. The timezone offset is always `+00` (UTC). Parse with timezone awareness. |
+| `Date` | datetime | 2025 format: `2025-03-17 09:47:31` (space-separated, no timezone offset — treat as UTC). Pre-2025 format: `2022-09-10T00:36:12+00` (ISO 8601 with bare `+HH` offset). Both are accepted by `datetime.fromisoformat()` (Python 3.11+). |
 | `Amount Debited` | decimal or empty | Positive number. Empty if this transaction has no debit leg. |
 | `Asset Debited` | string or empty | ISO currency code (`CAD`, `BTC`) or empty. Non-BTC crypto rows are skipped by the importer. |
 | `Amount Credited` | decimal or empty | Positive number. Empty if this transaction has no credit leg. |
@@ -87,16 +87,21 @@ Date,Amount Debited,Asset Debited,Amount Credited,Asset Credited,Market Value,Ma
 
 | `Type` | Description | Tax Relevance |
 |--------------------|-------------|---------------|
-| `purchase/sale` | CAD ↔ BTC or ETH trade | **Disposition event.** Buying BTC increases ACB. Selling BTC triggers capital gain/loss calculation. |
-| `crypto cashout` | BTC withdrawal to external wallet | **Potential disposition.** Treat as a transfer unless the destination is your own wallet (verify via node/Sparrow match). Does not trigger gain/loss if self-transfer. |
-| `fiat funding` | CAD deposit from bank | No tax event. |
-| `crypto purchase` | BTC deposit from external wallet | Acquire at ACB from originating transaction. |
-| `shakingsats` | ShakingSats daily BTC loyalty reward (pre-2025 export name) | **Reward event** → canonical type `reward_shake`. Tax treatment is configurable: default is **discount** (ACB=$0, not income); can be set to **income** (FMV as ACB). See `config/tax_rules.yaml` `reward_treatment`. |
-| `reward` | ShakingSats daily BTC loyalty reward (2025 export name) | Same as `shakingsats` → `reward_shake`. |
-| `shakesquads` | Shakesquads loyalty program BTC reward | **Reward event** → canonical type `reward_shake`. Same configurable treatment as `shakingsats`. |
-| `card_cashback` | Shakepay Card BTC cashback on purchases | **Reward event** → canonical type `reward_cashback`. Default treatment: **discount** (ACB=$0, not income). Strongest discount analogy — directly parallels personal credit card cashback. |
-| `other` | Miscellaneous credit (e.g. referral bonus in CAD) | **Out of scope** for BTC-only rows (CAD referral payouts are skipped). Unknown BTC `other` rows are flagged for manual review. |
-| `peer transfer` | Shakepay-to-Shakepay transfers | Treat as internal transfer; no disposition. |
+| `Type` value | Era | Description | Tax Relevance |
+|---|---|---|---|
+| `purchase/sale` | pre-2025 | CAD ↔ BTC trade (both buy and sell in one type; direction derived from debit/credit currency columns) | **Disposition event.** Buying BTC increases ACB. Selling BTC triggers capital gain/loss. |
+| `Buy` | 2025 | BTC purchase — credit-only row; debit columns are empty; CAD cost is not recorded in the CSV | **Acquisition.** `fiat_value=None`; normalizer fetches BoC rate for ACB. |
+| `crypto cashout` | pre-2025 | BTC withdrawal to external wallet | **Potential disposition.** Treat as a transfer unless the destination is your own wallet. |
+| `Send` | 2025 | BTC or ETH withdrawal to external address (replaces `crypto cashout`) | Same treatment as `crypto cashout`. |
+| `fiat funding` | both | CAD deposit from bank | No tax event. |
+| `fiat cashout` | both | CAD withdrawal to bank | No tax event. |
+| `crypto purchase` | pre-2025 | BTC deposit from external wallet | Acquire at ACB from originating transaction. |
+| `shakingsats` | pre-2025 | ShakingSats daily BTC loyalty reward | **Reward event** → canonical type `reward_shake`. Tax treatment is configurable: default is **discount** (ACB=$0, not income); can be set to **income** (FMV as ACB). See `config/tax_rules.yaml` `reward_treatment`. |
+| `Reward` | 2025 | ShakingSats daily BTC loyalty reward (renamed from `shakingsats`) | Same as `shakingsats` → `reward_shake`. |
+| `shakesquads` | both | Shakesquads loyalty program BTC reward | **Reward event** → `reward_shake`. Same configurable treatment as `shakingsats`. |
+| `card_cashback` | both | Shakepay Card BTC cashback on purchases | **Reward event** → `reward_cashback`. Default: **discount** (ACB=$0, not income). |
+| `other` | both | Miscellaneous credit (e.g. referral bonus in CAD) | **Out of scope** for BTC-only rows. Unknown BTC `other` rows are flagged for manual review. |
+| `peer transfer` | both | Shakepay-to-Shakepay transfers | Treat as internal transfer; no disposition. |
 
 > **Note:** The transaction type list above is derived from empirical data. Additional types may exist. The importer must not crash on unknown types — log a warning and flag for manual review.
 >
@@ -111,6 +116,18 @@ BTC amounts are expressed as decimal values (e.g. `0.00405049`). Parse as Python
 `Buy / Sell Rate` and `Spot Rate` are Shakepay's proprietary rates, not the Bank of Canada USD/CAD rate required by CRA. **Never use these for ACB calculation.** The importer must store them in the raw record for audit trail but must not expose them to the calculation engine. The calculation engine must fetch BoC rates independently.
 
 ### Sample Records
+
+2025 format:
+
+```csv
+Date,Amount Debited,Asset Debited,Amount Credited,Asset Credited,Market Value,Market Value Currency,Book Cost,Book Cost Currency,Type,Spot Rate,Buy / Sell Rate,Description
+2025-01-01 10:00:00,,,500,CAD,500,CAD,500,CAD,fiat funding,,,
+2025-01-02 11:00:00,,,0.00405049,BTC,250,CAD,250,CAD,Buy,61027.76,61720.90,Bought @ CA$61720.90
+2025-01-03 12:00:00,0.00103685,BTC,,,,,,,Send,,,Bitcoin address bc1qexampleaddress000000000000000000000000
+2025-01-04 09:00:00,,,0.00001500,BTC,0.90,CAD,0.90,CAD,Reward,60000.00,,ShakingSats
+```
+
+Pre-2025 format (for reference — still accepted by the importer):
 
 ```csv
 Date,Amount Debited,Asset Debited,Amount Credited,Asset Credited,Market Value,Market Value Currency,Book Cost,Book Cost Currency,Type,Spot Rate,Buy / Sell Rate,Description
@@ -180,7 +197,7 @@ The importer must handle files with and without the fiat column:
 
 1. Parse the header row.
 2. Check whether a column matching the pattern `Value \(.+\)` is present.
-3. If present, record the currency code from the header (e.g. `CAD`) and store the value in the raw record.
+3. If present, record the full column header name (e.g. `Value (CAD)`) and store the fiat value in the raw record keyed by that header.
 4. Pass `fiat_value = None` to the calculation engine regardless — this column is never used for ACB.
 
 ### Unconfirmed Transactions
@@ -212,9 +229,9 @@ The CSV parser must tolerate this trailing comment without error.
 
 ```csv
 Date (UTC),Label,Value,Balance,Fee,Value (CAD),Txid
-2024-01-15 09:14:32,received from shakepay,0.00450000,0.00450000,,36.23,abcd1234...
-2024-03-02 17:45:01,cold storage consolidation,-0.00450000,0.00000000,0.00002100,-37.15,efgh5678...
-Unconfirmed,pending incoming,0.01000000,0.01000000,,801.50,ijkl9012...
+2024-01-15 09:14:32,received from shakepay,0.00450000,0.00450000,,36.23,aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111
+2024-03-02 17:45:01,cold storage consolidation,-0.00450000,0.00000000,0.00002100,-37.15,bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222
+Unconfirmed,pending incoming,0.01000000,0.01000000,,801.50,cccc3333cccc3333cccc3333cccc3333cccc3333cccc3333cccc3333cccc3333
 
 # Historical CAD values are taken from daily rates and should only be considered as approximate.
 ```
@@ -223,8 +240,8 @@ Unconfirmed,pending incoming,0.01000000,0.01000000,,801.50,ijkl9012...
 
 ```csv
 Date (UTC),Label,Value,Balance,Fee,Txid
-2024-01-15 09:14:32,received from shakepay,450000,450000,,abcd1234...
-2024-03-02 17:45:01,cold storage consolidation,-450000,0,21000,efgh5678...
+2024-01-15 09:14:32,received from shakepay,450000,450000,,aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111
+2024-03-02 17:45:01,cold storage consolidation,-450000,0,21000,bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222
 ```
 
 ---
@@ -378,6 +395,9 @@ Consequences:
 | `STAKING / REWARD` | Staking income | `"income"` |
 | `STAKING / DEPOSIT` | Crypto locked for staking | `"transfer_out"` |
 | `STAKING / REFUND` | Crypto returned from staking | `"transfer_in"` |
+| `DUST / IN` | Received asset leg of a dust conversion | `"buy"` — normalizer fetches BoC rate for ACB |
+| `DUST / OUT` | Sent asset leg of a dust conversion | Not emitted as a standalone transaction; sent asset recorded in `raw_row` of the `DUST / IN` record |
+| `DUST / FEE` | Fee leg of a dust conversion group | `fee_amount` / `fee_currency` on the `DUST / IN` record |
 | `DUST / IN`, `DUST / OUT` | Dust conversion legs | `"other"` |
 
 ### Sample Records
@@ -397,82 +417,15 @@ two records are linked only by amount + timestamp in the transfer_match stage.
 
 ---
 
-## 5. YAML Configuration Reference
+## 5. Configuration Files
 
-The exchange format configurations live in `config/exchanges/`. Each file defines how to parse a specific source. Below is the expected structure for the two sources covered here.
+Exchange-specific column mappings, type maps, fee models, and parsing rules live in
+`config/importers/`. Each file is a YAML document whose structure is documented inline
+with comments. The canonical references are:
 
-```yaml
-# config/exchanges/shakepay.yaml
-source_id: shakepay
-display_name: Shakepay
-file_pattern: "*.csv"
-delimiter: ","
-encoding: utf-8
-has_header: true
-
-columns:
-  transaction_type: "Type"
-  timestamp: "Date"
-  amount_debited: "Amount Debited"
-  debit_currency: "Asset Debited"
-  amount_credited: "Amount Credited"
-  credit_currency: "Asset Credited"
-  txid: "Description"
-
-ignored_columns:
-  - "Buy / Sell Rate"        # Shakepay internal rate — not BoC, never use for ACB
-  - "Spot Rate"              # Same
-  - "Market Value"           # Shakepay computed value — not BoC, never use for ACB
-  - "Market Value Currency"  # Currency of Market Value
-  - "Book Cost"              # Shakepay computed book cost — never use for ACB
-  - "Book Cost Currency"     # Currency of Book Cost
-
-timestamp_format: "%Y-%m-%dT%H:%M:%S%z"
-timestamp_timezone: UTC
-
-amount_type: decimal_btc   # Parse BTC fields as Decimal; convert to sats internally
-```
-
-```yaml
-# config/exchanges/sparrow.yaml
-source_id: sparrow
-display_name: Sparrow Wallet
-file_pattern: "*.csv"
-delimiter: ","
-encoding: utf-8
-has_header: true
-
-columns:
-  timestamp: "Date (UTC)"
-  label: "Label"
-  value: "Value"
-  balance: "Balance"
-  fee: "Fee"
-  txid: "Txid"
-
-optional_columns:
-  fiat_value_pattern: "Value \\(.+\\)"   # Regex — capture currency code from header
-
-ignored_columns:
-  - fiat_value_pattern   # CoinGecko daily rate — not BoC, never use for ACB
-
-# Regex patterns for optional headers that may appear in some Sparrow exports.
-# The format detector matches incoming CSV headers against these patterns and
-# suppresses the "unknown column" drift-detection warning for any match.
-# This prevents false-positive warnings for the optional fiat column
-# (e.g. "Value (CAD)", "Value (EUR)") which Sparrow appends when an exchange
-# rate source is configured.
-known_column_patterns:
-  - "Value \\(.+\\)"   # optional fiat column — currency code varies by locale
-
-timestamp_format: "%Y-%m-%d %H:%M:%S"
-timestamp_timezone: UTC
-unconfirmed_sentinel: "Unconfirmed"
-
-amount_unit: auto_detect   # Detect BTC vs sats from presence of '.' or ',' separator
-amount_type: signed        # Positive = receive, negative = send
-fee_nullable: true         # Empty fee field = None, not zero
-```
+- [`config/importers/shakepay.yaml`](../../config/importers/shakepay.yaml)
+- [`config/importers/ndax.yaml`](../../config/importers/ndax.yaml)
+- [`config/importers/sparrow.yaml`](../../config/importers/sparrow.yaml)
 
 ---
 
@@ -511,20 +464,39 @@ wallets:
     gap_limit: <int>      # optional — consecutive empty addresses before stop (default: 20)
     branches: [0, 1]      # optional — HD branches to scan (default: both)
     label: <str>          # optional — free-text annotation stored in wallet record
+    script_type: <str>    # optional — override prefix-based address encoding (see below)
 ```
 
 ### Supported key types
 
-| Prefix | Address type        | HD standard |
-|--------|---------------------|-------------|
-| `zpub` | P2WPKH (bech32)     | BIP84       |
-| `ypub` | P2SH-P2WPKH         | BIP49       |
-| `xpub` | P2PKH (legacy)      | BIP44       |
+| Prefix | Default address type | HD standard | Notes |
+|--------|----------------------|-------------|-------|
+| `zpub` | P2WPKH (`bc1q…`)    | BIP84       | |
+| `ypub` | P2SH-P2WPKH (`3…`)  | BIP49       | |
+| `xpub` | P2PKH (`1…`)         | BIP44       | See `script_type` for exceptions |
+
+### `script_type` field
+
+Overrides prefix-based address derivation. Required when a wallet exports `xpub` prefix
+but uses a different address type (most common: JoinMarket BIP84 wallets).
+
+| Value | Address type |
+|-------|-------------|
+| `p2wpkh` | native SegWit `bc1q…` |
+| `p2sh-p2wpkh` | wrapped SegWit `3…` |
+| `p2pkh` | legacy `1…` |
+
+When absent, address type is inferred from the key prefix as shown in the table above.
+Validated at parse time — unknown values raise `ValueError` before any network request.
 
 ### Derivation
 
 Given account xpub at path `m/purpose'/coin'/account'`, child addresses are derived at
 `m/.../branch/index` where `branch=0` is external (receive) and `branch=1` is internal (change).
+
+The key passed as `xpub` must be the **account-level key** at `m/purpose'/coin'/account'`.
+Passing a branch-level key (e.g. at `m/84'/0'/0'/0`) would add an extra derivation step
+and produce wrong addresses.
 
 ### Gap limit
 
@@ -534,10 +506,39 @@ where coinjoin rounds create wide gaps in address usage.
 
 ### JoinMarket note
 
-JoinMarket uses 10 HD branches by default (5 mixing depths × 2 branches each). Each branch
-has its own xpub at path `m/84'/0'/n'/branch`. A single xpub only covers one branch. To
-import all JoinMarket activity, export all relevant xpubs from `joinmarket wallet-tool.py`
-and list each in the YAML with a distinct wallet name.
+JoinMarket's wallet display shows two keys per mixdepth:
+
+```
+mixdepth        0       xpub6Bff...   ← account-level key (m/84'/0'/0') — USE THIS
+external addresses  m/84'/0'/0'/0   xpub6Epx...   ← branch-level key — DO NOT USE
+```
+
+Use the **account-level key** (on the `mixdepth N` line) with `branches: [0, 1]`. The
+branch-level key is already one derivation step below the account — passing it would
+cause sirop to scan `m/84'/0'/0'/0/branch/index` instead of `m/84'/0'/0'/branch/index`.
+
+JoinMarket exports `xpub` prefix for all keys regardless of address type. Set
+`script_type: p2wpkh` to derive the correct `bc1q…` native SegWit addresses.
+
+There are 5 mixing depths (0–4) by default. Import each as a separate entry with a
+distinct wallet name. Example:
+
+```yaml
+source: xpub
+
+wallets:
+  - name: jm-depth0
+    xpub: xpub6...       # account-level key from "mixdepth 0" line
+    script_type: p2wpkh  # JoinMarket BIP84 wallet
+    gap_limit: 50
+    branches: [0, 1]
+
+  - name: jm-depth1
+    xpub: xpub6...       # account-level key from "mixdepth 1" line
+    script_type: p2wpkh
+    gap_limit: 50
+    branches: [0, 1]
+```
 
 ### Transaction mapping
 
@@ -548,6 +549,47 @@ and list each in the YAML with a distinct wallet name.
 | `fee` (spending tx) | `fee_amount` in BTC     |
 | `status.block_time` | `timestamp` (UTC)       |
 | `txid`              | `txid`                  |
+
+### Unconfirmed transactions and RBF
+
+**Unlike the Sparrow CSV importer**, the xpub importer includes unconfirmed
+transactions in its output. The Mempool API returns any transaction currently in the
+mempool alongside confirmed ones.
+
+**Unconfirmed rows** are assigned a sentinel timestamp of `1970-01-01T00:00:00Z` (Unix
+epoch) so that repeated taps produce a stable dedup key — using wall-clock time would
+re-insert the same unconfirmed transaction on every run. Unconfirmed rows should be
+treated as provisional: they have no confirmed block time, so any FMV or ACB lookup
+against them will use the wrong date.
+
+**RBF (Replace-By-Fee):** Bitcoin allows a sender to replace an unconfirmed transaction
+with a new one that pays a higher fee (BIP 125). When this happens:
+
+- The **original txid** disappears from the Mempool API once the replacement confirms.
+- The **replacement txid** is a different hash and appears as a new confirmed transaction.
+
+The xpub importer does not currently check the `rbf` or `replaced_by` fields that the
+Mempool API exposes on unconfirmed transactions. The practical consequence depends on
+**when** `sirop tap` is run:
+
+| Tap timing | What ends up in the batch |
+|---|---|
+| After replacement confirms | Only the replacement txid — correct |
+| While original is still unconfirmed (before replacement) | Original txid with epoch timestamp |
+| On next tap after original is replaced | Replacement txid added as a new row; original stays with epoch timestamp — **potential duplicate** |
+
+**Recommended practice:** run `sirop tap` after all pending transactions have confirmed
+(i.e. at tax-filing time, not in real time). If you do tap with unconfirmed transactions
+present, re-tap after they confirm to ensure the final txids are captured. The dedup logic
+will not remove the stale unconfirmed row automatically — you would need to re-create the
+batch to start clean.
+
+**Comparison with Sparrow CSV:**
+Sparrow labels RBF-related rows explicitly (the replaced transaction carries a label like
+`(Replaced By Fee)` in the `Label` column). Because Sparrow CSV is a point-in-time
+snapshot exported by the user, it reflects whatever Sparrow knew at export time —
+including labels applied to replaced transactions. The xpub importer, by contrast,
+queries the Mempool API live and has no equivalent labelling mechanism.
 
 ### Privacy
 

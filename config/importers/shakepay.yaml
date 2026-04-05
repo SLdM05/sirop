@@ -15,9 +15,11 @@ name: "Shakepay"
 #
 # Full column spec: docs/ref/transaction-import-formats.md §1
 date_column: "Date"
-# Shakepay timestamps: "2022-09-10T00:36:12+00" — the offset uses the bare
-# "+HH" form (hours only, no minutes).  Python's strptime %z does NOT accept
-# this form; only datetime.fromisoformat() handles it correctly (Python 3.11+).
+# Shakepay 2025 timestamps: "2025-03-17 09:47:31" — space-separated, no
+# timezone offset.  datetime.fromisoformat() accepts this form; the base
+# importer treats naive datetimes as UTC.  Pre-2025 exports used ISO 8601
+# with a bare "+HH" offset ("2022-09-10T00:36:12+00") — also accepted by
+# fromisoformat (Python 3.11+).
 date_format: "iso8601"
 columns:
   transaction_type: "Type"

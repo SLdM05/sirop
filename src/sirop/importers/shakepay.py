@@ -242,6 +242,11 @@ class ShakepayImporter(BaseImporter):
 
         if canonical_type == _PURCHASE_SALE:
             result = self._parse_purchase_sale(ctx)
+        elif canonical_type == "buy":
+            # 2025 Shakepay format: debit columns are empty; only BTC credit is
+            # present.  fiat_value is left None; the normalizer fetches the BoC
+            # rate to determine the CAD cost for ACB.
+            result = self._parse_buy_credit_only(ctx)
         elif canonical_type == "withdrawal":
             result = self._parse_withdrawal(ctx)
         elif canonical_type == "deposit":
@@ -321,10 +326,47 @@ class ShakepayImporter(BaseImporter):
             fee_currency=None,
             rate=rate,
             spot_rate=None,  # Shakepay spot rate ≠ BoC rate; preserved in raw_row only
-            txid=ctx.txid_raw,
+            txid=None,  # Description for buy/sell rows contains the rate string
+            # ("Bought @ CA$X"), not a blockchain txid. Using it as a
+            # txid causes false deduplication when the same rounded rate
+            # appears in multiple rows. Rate is preserved in raw_row.
             raw_type=ctx.raw_type.lower(),
             raw_row=ctx.row,
             notes=ctx.notes,
+        )
+
+    def _parse_buy_credit_only(self, ctx: _RowCtx) -> RawTransaction | None:
+        """Handle 2025-format ``Buy`` rows — credit-only; debit columns are empty.
+
+        Shakepay's 2025 CSV omits the fiat debit for BTC purchases.  The CAD
+        cost is available in ``Book Cost`` but the YAML marks that column as
+        ignored (it is Shakepay's proprietary spread-inclusive rate, not a BoC
+        rate).  ``fiat_value`` is left ``None``; the normalizer fetches the BoC
+        daily rate to determine the CAD cost for ACB, consistent with the
+        treatment of income/reward rows.
+        """
+        if ctx.credited is None or not ctx.credit_currency:
+            logger.warning(
+                "shakepay: Buy row at %d has no credited amount — skipping",
+                ctx.row_num,
+            )
+            return None
+        return RawTransaction(
+            source=self._config.source_name,
+            timestamp=ctx.timestamp,
+            transaction_type="buy",
+            asset=ctx.credit_currency,
+            amount=ctx.credited,
+            amount_currency=ctx.credit_currency,
+            fiat_value=None,
+            fiat_currency=None,
+            fee_amount=None,
+            fee_currency=None,
+            rate=None,
+            spot_rate=None,
+            txid=None,
+            raw_type=ctx.raw_type.lower(),
+            raw_row=ctx.row,
         )
 
     def _parse_withdrawal(self, ctx: _RowCtx) -> RawTransaction | None:

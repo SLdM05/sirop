@@ -3,8 +3,11 @@ name: "NDAX"
 # Export via Reports → Create Report → CSV → Ledgers report type.
 #
 # The format uses a SIGNED AMOUNT column (positive = credit, negative = debit).
-# There is no explicit transaction-group column; the importer groups rows that
-# share the same timestamp (truncated to the second) as a single transaction.
+# TX_ID is present in every row but is an internal order integer, NOT a blockchain
+# txid and NOT used for grouping (see the CRITICAL note in transaction_type_map
+# below).  The importer groups rows by timestamp truncated to the second — all
+# rows in a single economic event share the same TX_ID and DATE to millisecond
+# precision, so second-level truncation reliably identifies the group boundary.
 date_column: "DATE"
 # "iso8601" is a sentinel: the importer uses datetime.fromisoformat() instead
 # of strptime, which handles the trailing Z and fractional seconds natively.

@@ -154,9 +154,98 @@ WARNING  CSV has 2 column(s) not seen in any known NDAX format: ['Notes', 'Refer
 | `ndax` | NDAX (AlphaPoint APEX) | Reports → CSV → Ledgers | Explicit `TRADE/FEE` rows |
 | `shakepay` | Shakepay | Account → Export Transactions | Embedded in spread (no explicit fee column) |
 | `sparrow` | Sparrow Wallet | File → Export Transactions | Explicit fee column (sends only; NULL on receives) |
+| `xpub` | Any HD Bitcoin wallet (Sparrow, JoinMarket, etc.) | User-created YAML | Fee from Mempool (sends only) |
 
 Full column specs, unit-detection rules (BTC vs satoshis for Sparrow), and
 cross-source transfer matching logic: `docs/ref/transaction-import-formats.md`.
+
+---
+
+## xpub wallet-definition YAML
+
+Instead of a CSV, pass a YAML file listing one or more extended public keys. sirop
+derives all child addresses, scans transaction history via your Mempool node, and
+writes each key as a named wallet into the active batch.
+
+**Requires a private Mempool node** — address scanning sends derived Bitcoin addresses
+to the configured endpoint. Set `BTC_MEMPOOL_URL` in `.env` to a local node.
+
+```
+$ sirop tap my_wallets.yaml
+$ sirop tap my_wallets.yaml --source xpub   # explicit, if file is not .yaml/.yml
+```
+
+### YAML schema
+
+```yaml
+source: xpub
+
+wallets:
+  - name: my-sparrow-wallet        # wallet name in the sirop batch
+    xpub: zpub6rFR7y4Q2Aij...      # account-level zpub / ypub / xpub
+    gap_limit: 20                  # optional, default 20
+    branches: [0, 1]               # optional, default both (0=receive, 1=change)
+    label: ""                      # optional free-text annotation
+    script_type: p2wpkh            # optional — overrides prefix-based address encoding
+```
+
+### Key prefix → address type
+
+| Prefix | Default address type | HD standard |
+|--------|----------------------|-------------|
+| `zpub` | P2WPKH (`bc1q…`)    | BIP84       |
+| `ypub` | P2SH-P2WPKH (`3…`)  | BIP49       |
+| `xpub` | P2PKH (`1…`)         | BIP44       |
+
+### `script_type` override
+
+Some wallets export `xpub` prefix even when the wallet uses a different address
+type. Use `script_type` to override the prefix-based encoding:
+
+| Value | Address type |
+|-------|-------------|
+| `p2wpkh` | native SegWit `bc1q…` |
+| `p2sh-p2wpkh` | wrapped SegWit `3…` |
+| `p2pkh` | legacy `1…` |
+
+**JoinMarket** is the most common case: it exports `xpub` prefix for all keys
+regardless of derivation path, but derives native SegWit addresses (`bc1q…`). Set
+`script_type: p2wpkh` for every JoinMarket entry.
+
+### JoinMarket
+
+JoinMarket's wallet display shows two kinds of keys per mixdepth. Use only the
+**account-level key** (the one on the `mixdepth N` line):
+
+```
+mixdepth        0       xpub6Bff...   ← use this one (account level, m/84'/0'/0')
+external addresses  m/84'/0'/0'/0   xpub6Epx...   ← do NOT use (branch level, one step too deep)
+```
+
+Using the branch-level key would cause sirop to derive addresses at the wrong
+path (`m/84'/0'/0'/0/branch/index` instead of `m/84'/0'/0'/branch/index`).
+
+Each mixdepth covers both branches (external + change). Set `branches: [0, 1]`
+and use a larger `gap_limit` (50–100) because coinjoin rounds create wide gaps:
+
+```yaml
+source: xpub
+
+wallets:
+  - name: jm-depth0
+    xpub: xpub6Bff...    # account-level key from "mixdepth 0" line
+    script_type: p2wpkh  # JoinMarket BIP84 wallet — override xpub prefix
+    gap_limit: 50
+    branches: [0, 1]
+
+  - name: jm-depth1
+    xpub: xpub6...       # account-level key from "mixdepth 1" line
+    script_type: p2wpkh
+    gap_limit: 50
+    branches: [0, 1]
+```
+
+See `config/importers/xpub_example.yaml` for the full annotated template.
 
 ---
 
