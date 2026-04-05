@@ -104,6 +104,22 @@ def test_fiat_deposit_timestamp(transactions: list[RawTransaction]) -> None:
     assert deposits[0].timestamp == datetime(2025, 1, 1, 10, 0, 0, tzinfo=UTC)
 
 
+def test_timestamps_parsed_from_space_format(importer: ShakepayImporter, tmp_path: Path) -> None:
+    """Shakepay 2025 exports use 'YYYY-MM-DD HH:MM:SS' (no T, no TZ offset).
+    The base importer must treat naive timestamps as UTC."""
+    csv_text = (
+        "Date,Amount Debited,Asset Debited,Amount Credited,Asset Credited,"
+        "Market Value,Market Value Currency,Book Cost,Book Cost Currency,"
+        "Type,Spot Rate,Buy / Sell Rate,Description\n"
+        "2025-06-15 09:30:00,,,0.00100000,BTC,,,,,shakingsats,,,\n"
+    )
+    f = tmp_path / "sp.csv"
+    f.write_text(csv_text)
+    txs = importer.parse(f)
+    assert len(txs) == 1
+    assert txs[0].timestamp == datetime(2025, 6, 15, 9, 30, 0, tzinfo=UTC)
+
+
 # ---------------------------------------------------------------------------
 # Amounts
 # ---------------------------------------------------------------------------

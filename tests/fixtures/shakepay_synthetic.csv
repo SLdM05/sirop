@@ -1,14 +1,14 @@
 Date,Amount Debited,Asset Debited,Amount Credited,Asset Credited,Market Value,Market Value Currency,Book Cost,Book Cost Currency,Type,Spot Rate,Buy / Sell Rate,Description
-2025-01-01T10:00:00+00,,,500.00,CAD,500.00,CAD,500.00,CAD,fiat funding,,,
-2025-01-02T11:00:00+00,250.00,CAD,0.00405049,BTC,250.00,CAD,250.00,CAD,purchase/sale,,61720.90,
-2025-01-03T12:00:00+00,0.00100000,BTC,145.00,CAD,145.00,CAD,145.00,CAD,purchase/sale,,145000.00,
-2025-01-04T13:00:00+00,0.00405049,BTC,,,,,,,crypto cashout,61027.76,,aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd
-2025-01-05T14:00:00+00,,,0.01000000,BTC,,,,,crypto purchase,,,bbbbccccbbbbccccbbbbccccbbbbccccbbbbccccbbbbccccbbbbccccbbbbcccc
-2025-01-06T15:00:00+00,,,0.00001500,BTC,,,,,shakingsats,,,
-2025-01-06T15:30:00+00,,,0.00000021,BTC,,,,,Reward,,,ShakingSats
-2025-01-06T23:00:00+00,,,0.00000619,BTC,,,,,Buy,,,Bought @ CA$124394.18
-2025-01-07T01:00:00+00,0.00103685,BTC,,,,,,,Send,,,Bitcoin address bc1qfakeaddressfortesting000000000000000000
-2025-01-07T16:00:00+00,,,0.00010000,BTC,,,,,peer transfer,,,friend@example.com
-2025-01-08T17:00:00+00,,,10.00,CAD,,,,,other,,,referral_program
-2025-01-09T18:00:00+00,200.00,CAD,,,,,,,fiat cashout,,,
-2025-01-10T19:00:00+00,,,5.00,CAD,,,,,mystery_reward,,,
+2025-01-01 10:00:00,,,500.00,CAD,500.00,CAD,500.00,CAD,fiat funding,,,
+2025-01-02 11:00:00,250.00,CAD,0.00405049,BTC,250.00,CAD,250.00,CAD,purchase/sale,,61720.90,
+2025-01-03 12:00:00,0.00100000,BTC,145.00,CAD,145.00,CAD,145.00,CAD,purchase/sale,,145000.00,
+2025-01-04 13:00:00,0.00405049,BTC,,,,,,,crypto cashout,61027.76,,aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd
+2025-01-05 14:00:00,,,0.01000000,BTC,,,,,crypto purchase,,,bbbbccccbbbbccccbbbbccccbbbbccccbbbbccccbbbbccccbbbbccccbbbbcccc
+2025-01-06 15:00:00,,,0.00001500,BTC,,,,,shakingsats,,,
+2025-01-06 15:30:00,,,0.00000021,BTC,,,,,Reward,,,ShakingSats
+2025-01-06 23:00:00,,,0.00000619,BTC,0.76,CAD,0.77,CAD,Buy,122661.17,124394.18,Bought @ CA$124394.18
+2025-01-07 01:00:00,0.00103685,BTC,,,,,,,Send,,,Bitcoin address bc1qfakeaddressfortesting000000000000000000
+2025-01-07 16:00:00,,,0.00010000,BTC,,,,,peer transfer,,,friend@example.com
+2025-01-08 17:00:00,,,10.00,CAD,,,,,other,,,referral_program
+2025-01-09 18:00:00,200.00,CAD,,,,,,,fiat cashout,,,
+2025-01-10 19:00:00,,,5.00,CAD,,,,,mystery_reward,,,
