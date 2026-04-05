@@ -823,9 +823,10 @@ class ProvisionalEvent:
     amount: Decimal
     cad_cost: Decimal | None
     wallet_name: str
-    withdrawal_id: int  # transactions.id of the withdrawal leg
+    withdrawal_id: int  # first (or only) withdrawal id — MIN(gtp.withdrawal_id)
     deposit_id: int  # transactions.id of the deposit leg (vtx_id of this event)
-    withdrawal_amount: Decimal
+    withdrawal_count: int  # number of matched withdrawals (>1 = consolidation)
+    withdrawal_amount: Decimal  # sum of all matched withdrawal amounts
     deposit_amount: Decimal
 
 
@@ -845,18 +846,21 @@ def read_provisional_events(conn: sqlite3.Connection) -> list[ProvisionalEvent]:
             ce.asset,
             ce.amount,
             ce.cad_cost,
-            COALESCE(w.name, ce.source) AS wallet_name,
-            gtp.withdrawal_id,
-            gtp.deposit_id,
-            t_out.amount AS withdrawal_amount,
-            t_in.amount  AS deposit_amount
+            COALESCE(w.name, ce.source)       AS wallet_name,
+            COUNT(DISTINCT gtp.withdrawal_id)  AS withdrawal_count,
+            MIN(gtp.withdrawal_id)             AS withdrawal_id,
+            ce.vtx_id                          AS deposit_id,
+            SUM(t_out.amount)                  AS withdrawal_amount,
+            t_in.amount                        AS deposit_amount
         FROM classified_events ce
-        LEFT JOIN wallets w ON ce.wallet_id = w.id
-        LEFT JOIN graph_transfer_pairs gtp ON gtp.deposit_id = ce.vtx_id
+        LEFT JOIN wallets w    ON w.id         = ce.wallet_id
+        LEFT JOIN graph_transfer_pairs gtp
+               ON gtp.deposit_id              = ce.vtx_id
         LEFT JOIN transactions t_out ON t_out.id = gtp.withdrawal_id
-        LEFT JOIN transactions t_in  ON t_in.id  = gtp.deposit_id
+        LEFT JOIN transactions t_in  ON t_in.id  = ce.vtx_id
         WHERE ce.is_provisional = 1
           AND ce.is_taxable = 1
+        GROUP BY ce.id
         ORDER BY ce.timestamp
         """
     ).fetchall()
@@ -871,6 +875,7 @@ def read_provisional_events(conn: sqlite3.Connection) -> list[ProvisionalEvent]:
             wallet_name=str(row["wallet_name"]),
             withdrawal_id=row["withdrawal_id"],
             deposit_id=row["deposit_id"],
+            withdrawal_count=int(row["withdrawal_count"]),
             withdrawal_amount=Decimal(row["withdrawal_amount"]),
             deposit_amount=Decimal(row["deposit_amount"]),
         )

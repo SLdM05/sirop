@@ -21,12 +21,22 @@ These tests catch that in two complementary ways:
 """
 
 import sqlite3
+from collections.abc import Callable
+from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
-from sirop.cli.tap import _IMPORTER_REGISTRY, _confirm_wallet_append, _handle_tap_folder
+from sirop.cli.tap import (
+    _IMPORTER_REGISTRY,
+    _confirm_wallet_append,
+    _handle_tap_folder,
+    _write_to_batch,
+)
 from sirop.config.settings import Settings
+from sirop.db.schema import PIPELINE_STAGES, create_tables
+from sirop.models.raw import RawTransaction
 
 CONFIG_DIR = Path(__file__).parent.parent / "config" / "importers"
 
@@ -293,3 +303,170 @@ class TestConfirmWalletAppend:
         monkeypatch.setattr("builtins.input", lambda _: "")
         result = _confirm_wallet_append("test", _make_settings(tmp_path), "sparrow")
         assert result is True
+
+
+# ---------------------------------------------------------------------------
+# _write_to_batch dedup tests
+# ---------------------------------------------------------------------------
+
+
+def _make_batch_db(tmp_path: Path) -> Path:
+    """Create a file-based batch DB in tmp_path with full schema and tap=pending.
+
+    Returns the DB file path.  Use ``_open_batch_factory(db_path)`` to get a
+    monkeypatch-friendly ``open_batch`` replacement that opens a fresh connection
+    each time (required because ``_write_to_batch`` closes the connection in its
+    finally block — a shared in-memory conn would be dead after the first call).
+    """
+    db_path = tmp_path / "test.sirop"
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    create_tables(conn)
+    conn.executemany(
+        "INSERT INTO stage_status (stage, status) VALUES (?, 'pending')",
+        [(s,) for s in PIPELINE_STAGES],
+    )
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+def _open_batch_factory(
+    db_path: Path,
+) -> Callable[..., sqlite3.Connection]:
+    """Return a callable that opens a fresh SQLite connection to *db_path*.
+
+    Use as the monkeypatched replacement for ``sirop.cli.tap.open_batch``.
+    """
+
+    def _open(*_args: object, **_kwargs: object) -> sqlite3.Connection:
+        c = sqlite3.connect(str(db_path))
+        c.row_factory = sqlite3.Row
+        return c
+
+    return _open
+
+
+def _xpub_tx(
+    txid: str,
+    amount_sats: int,
+    block_time: int = 1_700_000_000,
+    tx_type: str = "deposit",
+) -> RawTransaction:
+    return RawTransaction(
+        source="xpub",
+        timestamp=datetime.fromtimestamp(block_time, tz=UTC),
+        transaction_type=tx_type,
+        asset="BTC",
+        amount=Decimal(amount_sats) / Decimal("100000000"),
+        amount_currency="BTC",
+        fiat_value=None,
+        fiat_currency=None,
+        fee_amount=None,
+        fee_currency=None,
+        rate=None,
+        spot_rate=None,
+        txid=txid,
+        raw_type=tx_type,
+        raw_row={"txid": txid},
+    )
+
+
+def _count_raw(db_path: Path) -> int:
+    conn = sqlite3.connect(str(db_path))
+    row = conn.execute("SELECT COUNT(*) FROM raw_transactions").fetchone()
+    conn.close()
+    return int(row[0])
+
+
+class TestWriteToBatchDedup:
+    """Regression tests for the dedup logic in _write_to_batch.
+
+    Bug: the original dedup key was (source, raw_timestamp, asset, amount) with no
+    wallet scope and no txid.  This caused two failures:
+
+    1. Re-tapping an xpub wallet inserted duplicates for unconfirmed transactions
+       because their timestamp was datetime.now() — different on each scan.
+    2. Two wallets with the same (timestamp, amount) but different txids could
+       incorrectly deduplicate each other.
+    """
+
+    def test_retap_same_wallet_no_duplicates(self, tmp_path: Path) -> None:
+        """Re-tapping the same transactions does not insert duplicate rows."""
+        db_path = _make_batch_db(tmp_path)
+        tx = _xpub_tx("aaa" + "0" * 61, 100_000)
+        settings = _make_settings(tmp_path)
+        factory = _open_batch_factory(db_path)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("sirop.cli.tap.open_batch", factory)
+            _write_to_batch("batch", settings, [tx], "wallet-a", auto_created=False, source="xpub")
+
+        count_after_first = _count_raw(db_path)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("sirop.cli.tap.open_batch", factory)
+            inserted, skipped = _write_to_batch(
+                "batch", settings, [tx], "wallet-a", auto_created=False, source="xpub"
+            )
+
+        assert inserted == 0
+        assert skipped == 1
+        assert _count_raw(db_path) == count_after_first
+
+    def test_same_txid_different_wallets_both_inserted(self, tmp_path: Path) -> None:
+        """The same txid in two different wallets (cross-wallet transfer) is not deduplicated.
+
+        A coinjoin tx seen as withdrawal from wallet-a and deposit to wallet-b has the
+        same txid but different amounts and wallet scope — both rows must be stored.
+        """
+        db_path = _make_batch_db(tmp_path)
+        settings = _make_settings(tmp_path)
+        factory = _open_batch_factory(db_path)
+        txid = "bbb" + "0" * 61
+        tx_a = _xpub_tx(txid, 100_500, tx_type="withdrawal")  # wallet-a sent funds
+        tx_b = _xpub_tx(txid, 99_800, tx_type="deposit")  # wallet-b received funds
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("sirop.cli.tap.open_batch", factory)
+            ins_a, _ = _write_to_batch(
+                "batch", settings, [tx_a], "wallet-a", auto_created=False, source="xpub"
+            )
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("sirop.cli.tap.open_batch", factory)
+            ins_b, _ = _write_to_batch(
+                "batch", settings, [tx_b], "wallet-b", auto_created=False, source="xpub"
+            )
+
+        assert ins_a == 1
+        assert ins_b == 1
+        assert _count_raw(db_path) == 2  # noqa: PLR2004
+
+    def test_two_wallets_same_amount_same_block_both_inserted(self, tmp_path: Path) -> None:
+        """Two wallets with equal amounts at the same block time are not falsely deduplicated.
+
+        This covers the coinjoin equal-output scenario: multiple participants receive
+        the same denomination in the same block.
+        """
+        db_path = _make_batch_db(tmp_path)
+        settings = _make_settings(tmp_path)
+        factory = _open_batch_factory(db_path)
+        block_time = 1_700_000_000
+
+        tx_a = _xpub_tx("ccc" + "0" * 61, 50_000, block_time=block_time)
+        tx_b = _xpub_tx("ddd" + "0" * 61, 50_000, block_time=block_time)  # same amount, same block
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("sirop.cli.tap.open_batch", factory)
+            _write_to_batch(
+                "batch", settings, [tx_a], "wallet-a", auto_created=False, source="xpub"
+            )
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("sirop.cli.tap.open_batch", factory)
+            ins_b, skipped_b = _write_to_batch(
+                "batch", settings, [tx_b], "wallet-b", auto_created=False, source="xpub"
+            )
+
+        assert ins_b == 1, "second wallet's tx must not be falsely skipped as duplicate"
+        assert skipped_b == 0
+        assert _count_raw(db_path) == 2  # noqa: PLR2004

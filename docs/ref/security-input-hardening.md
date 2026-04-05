@@ -113,8 +113,9 @@ ensure it remains enabled.
 **User-provided wallet-definition YAML (xpub importer):** The file passed to
 `sirop tap wallets.yaml` is user-controlled input and must be treated as
 untrusted. `XpubImporter._load_wallet_entries()` uses `yaml.safe_load()` and
-validates each entry explicitly (required keys, type checks, gap_limit ceiling)
-before any value is used. No field from the wallet-definition YAML is ever
+validates each entry explicitly (required keys, type checks, gap_limit ceiling,
+`script_type` allowlist `{"p2wpkh", "p2sh-p2wpkh", "p2pkh"}`) before any value
+is used. No field from the wallet-definition YAML is ever
 interpolated into a SQL query or shell command.
 
 ---

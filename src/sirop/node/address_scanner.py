@@ -34,13 +34,18 @@ class ScannedTx:
     confirmed: bool
 
 
-def derive_address(xpub: str, branch: int, index: int) -> str:
+def derive_address(xpub: str, branch: int, index: int, script_type: str | None = None) -> str:
     """Return the Bitcoin address at path m/.../branch/index from an account xpub.
 
     Supports:
       ``zpub`` -> P2WPKH native SegWit (BIP84)
       ``ypub`` -> P2SH-P2WPKH wrapped SegWit (BIP49)
       ``xpub`` -> P2PKH legacy (BIP44)
+
+    ``script_type`` overrides prefix-based address encoding. Use this when the key
+    prefix does not match the intended script type — e.g. JoinMarket BIP84 wallets
+    export ``xpub`` prefix but derive native SegWit (``bc1q``) addresses.
+    Accepted values: ``"p2wpkh"``, ``"p2sh-p2wpkh"``, ``"p2pkh"``.
 
     Raises:
         ValueError: Unrecognised xpub prefix.
@@ -50,19 +55,22 @@ def derive_address(xpub: str, branch: int, index: int) -> str:
         raise ValueError(f"Unsupported xpub prefix: {prefix!r} — expected zpub, ypub, or xpub")
     root = HDKey.from_string(xpub)
     child = root.derive([branch, index])
-    if prefix == "zpub":
+    # script_type overrides prefix-based detection (e.g. JoinMarket xpub on BIP84 path)
+    resolved = script_type or prefix
+    if resolved in ("zpub", "p2wpkh"):
         return str(script.p2wpkh(child).address(_MAINNET))
-    if prefix == "ypub":
+    if resolved in ("ypub", "p2sh-p2wpkh"):
         return str(script.p2sh(script.p2wpkh(child)).address(_MAINNET))
     return str(script.p2pkh(child).address(_MAINNET))
 
 
-def scan_wallet(
+def scan_wallet(  # noqa: PLR0913
     mempool_url: str,
     xpub: str,
     branches: list[int],
     gap_limit: int,
     request_delay: float = 0.0,
+    script_type: str | None = None,
 ) -> list[ScannedTx]:
     """Derive addresses and scan tx history with gap-limit logic via Mempool API.
 
@@ -86,7 +94,7 @@ def scan_wallet(
         gap = 0
         idx = 0
         while gap < gap_limit:
-            addr = derive_address(xpub, branch, idx)
+            addr = derive_address(xpub, branch, idx, script_type)
             all_addresses.add(addr)
             addr_txs = _fetch_address_txs(mempool_url, addr, private, request_delay)
             if addr_txs:
