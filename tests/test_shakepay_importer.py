@@ -11,7 +11,11 @@ purchase/sale    → buy  (CAD→BTC, debit=fiat, credit=crypto)
 purchase/sale    → sell (BTC→CAD, debit=crypto, credit=fiat)
 crypto cashout   → withdrawal
 crypto purchase  → deposit
-shakingsats      → income
+shakingsats      → reward_shake
+Reward           → reward_shake  (ShakingSats description)
+Reward           → reward_cashback  (description contains "cashback")
+Reward           → reward_shakesquad  (description contains "ShakeSquad")
+Reward           → interest  (description contains "Interest payout")
 peer transfer    → other
 other            → other
 fiat cashout     → fiat_withdrawal
@@ -368,11 +372,13 @@ def test_buy_2025_fields(transactions: list[RawTransaction]) -> None:
 
 # ---------------------------------------------------------------------------
 # Rewards — shakingsats and Reward (2025 type name) → reward_shake
+# Note: tax treatment (discount = ACB $0, not income) is determined by
+# tax_rules.yaml reward_treatment config, not by the importer type.
 # ---------------------------------------------------------------------------
 
 
 def test_reward_shake_present(transactions: list[RawTransaction]) -> None:
-    """Both 'shakingsats' and 'reward' CSV types map to canonical 'reward_shake'."""
+    """'shakingsats' and plain 'Reward' (ShakingSats description) map to 'reward_shake'."""
     assert len(_find(transactions, "reward_shake", "BTC")) == 2  # noqa: PLR2004
 
 
@@ -389,13 +395,48 @@ def test_reward_shake_fields(transactions: list[RawTransaction]) -> None:
 
 
 def test_reward_type_maps_to_reward_shake(transactions: list[RawTransaction]) -> None:
-    """'Reward' is the 2025 Shakepay type name for ShakingSats — maps to 'reward_shake'."""
+    """'Reward' rows with ShakingSats description map to 'reward_shake'."""
     txs = _find(transactions, "reward_shake", "BTC")
     tx = next(t for t in txs if t.raw_type == "reward")
     assert tx.asset == "BTC"
     assert tx.amount == Decimal("0.00000021")
     assert tx.fiat_value is None
     assert tx.txid is None
+
+
+# ---------------------------------------------------------------------------
+# Reward sub-types via description override (all have raw_type == "reward")
+# ---------------------------------------------------------------------------
+
+
+def test_reward_cashback_from_description(transactions: list[RawTransaction]) -> None:
+    """'Reward' with 'Bitcoin cashback' description → reward_cashback."""
+    txs = _find(transactions, "reward_cashback", "BTC")
+    assert len(txs) == 1
+    tx = txs[0]
+    assert tx.raw_type == "reward"
+    assert tx.amount == Decimal("0.00000275")
+    assert tx.fiat_value is None
+
+
+def test_reward_shakesquad_from_description(transactions: list[RawTransaction]) -> None:
+    """'Reward' with 'ShakeSquad' description → reward_shakesquad."""
+    txs = _find(transactions, "reward_shakesquad", "BTC")
+    assert len(txs) == 1
+    tx = txs[0]
+    assert tx.raw_type == "reward"
+    assert tx.amount == Decimal("0.00000588")
+    assert tx.fiat_value is None
+
+
+def test_interest_from_description(transactions: list[RawTransaction]) -> None:
+    """'Reward' with 'Interest payout' description → interest."""
+    txs = _find(transactions, "interest", "BTC")
+    assert len(txs) == 1
+    tx = txs[0]
+    assert tx.raw_type == "reward"
+    assert tx.amount == Decimal("0.0000001")
+    assert tx.fiat_value is None
 
 
 # ---------------------------------------------------------------------------

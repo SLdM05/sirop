@@ -184,6 +184,29 @@ or accessibility needs.
 | `header` | Bold white on dark | Panel titles, section headers |
 | `border` | Medium gray (`#44475a`) | Box borders, separators |
 
+### Transaction type color system
+
+All transaction type labels must be coloured consistently across the Rich CLI
+(`stir view`) and the eventual Textual TUI. The mapping is:
+
+| Color | Rich name | TCSS variable | Transaction types | Semantic meaning |
+|-------|-----------|--------------|-------------------|-----------------|
+| Red | `red` | `$error` | `sell`, `withdrawal`, `spend` | Disposal — crypto leaving the taxable pool |
+| Green | `green` | `$success` | `buy`, `deposit` | Paid acquisition — acquired for fiat consideration |
+| Yellow | `yellow` | `$warning` | `reward_shake`, `reward_shakesquad`, `reward_cashback` | Discount acquisition — received for free, ACB = $0 |
+| Blue | `blue` | `$accent-darken-1` | `income`, `interest` | Income acquisition — received as taxable income at FMV |
+| Cyan | `cyan` | `$accent` | `trade` | Exchange — one crypto swapped for another |
+| Dim | `dim` | `color: $text-muted` | `fiat_deposit`, `fiat_withdrawal`, `other` | Non-event — no crypto tax impact |
+
+**Implementation contract:**
+- The canonical source for this mapping is `_TYPE_STYLE` in `src/sirop/cli/stir.py`.
+- When the Textual TUI transaction table is built, apply the corresponding TCSS
+  class per row (e.g. `tx-type-red`, `tx-type-green`) — never inline styles.
+- All new `TransactionType` values added to `models/enums.py` **must** be
+  given an entry in `_TYPE_STYLE` at the same time, or `dim` if intentionally
+  ungrouped.
+- Color is never the only differentiator — the type label is always shown as text.
+
 ### Color rules
 
 - **Never use color as the only differentiator.** Always pair with a symbol

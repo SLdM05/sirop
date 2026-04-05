@@ -92,7 +92,9 @@ _FIAT = frozenset({TransactionType.FIAT_DEPOSIT, TransactionType.FIAT_WITHDRAWAL
 _INCOME_TYPES = frozenset(
     {
         TransactionType.INCOME,
+        TransactionType.INTEREST,
         TransactionType.REWARD_SHAKE,
+        TransactionType.REWARD_SHAKESQUAD,
         TransactionType.REWARD_CASHBACK,
     }
 )

@@ -92,13 +92,28 @@ _COINJOIN_TX_THRESHOLD = 5
 # Minimum output count on the deposit tx to suspect a purchase+change scenario.
 _PURCHASE_CHANGE_VOUT_MIN = 2
 
+# Transaction type color semantics (must match tui-design-guidelines.md §Transaction types):
+#   red    — disposals: value leaving the taxable pool (sell / withdrawal / spend)
+#   green  — paid acquisitions: acquired for CAD/fiat consideration (buy / deposit)
+#   yellow — discount acquisitions: received for free, ACB = $0 (reward_shake/squad/cashback)
+#   blue   — income acquisitions: received as taxable income at FMV (income / interest)
+#   cyan   — exchange: one crypto swapped for another (trade)
+#   dim    — non-events: fiat movements and unclassified rows (no crypto tax impact)
 _TYPE_STYLE: dict[TransactionType, str] = {
-    TransactionType.WITHDRAWAL: "red",
     TransactionType.SELL: "red",
+    TransactionType.WITHDRAWAL: "red",
     TransactionType.SPEND: "red",
-    TransactionType.DEPOSIT: "green",
     TransactionType.BUY: "green",
+    TransactionType.DEPOSIT: "green",
+    TransactionType.REWARD_SHAKE: "yellow",
+    TransactionType.REWARD_SHAKESQUAD: "yellow",
+    TransactionType.REWARD_CASHBACK: "yellow",
+    TransactionType.INCOME: "blue",
+    TransactionType.INTEREST: "blue",
     TransactionType.TRADE: "cyan",
+    TransactionType.FIAT_DEPOSIT: "dim",
+    TransactionType.FIAT_WITHDRAWAL: "dim",
+    TransactionType.OTHER: "dim",
 }
 
 # Transaction types that need transfer-match resolution when unmatched.

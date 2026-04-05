@@ -22,7 +22,7 @@ from sirop.models.messages import MessageCode
 from sirop.models.raw import RawTransaction
 from sirop.node.address_scanner import ScannedTx, scan_wallet
 from sirop.node.privacy import is_private_node_url
-from sirop.utils.messages import emit
+from sirop.utils.messages import emit, spinner
 
 logger = logging.getLogger(__name__)
 
@@ -104,15 +104,23 @@ class XpubImporter:
                 branch_count=len(entry.branches),
                 gap_limit=entry.gap_limit,
             )
+            _spinner_text = f"Scanning {entry.name}…"
             try:
-                scanned = scan_wallet(
-                    mempool_url,
-                    entry.xpub,
-                    entry.branches,
-                    entry.gap_limit,
-                    request_delay,
-                    entry.script_type,
-                )
+                with spinner(_spinner_text) as status:
+                    _name = entry.name
+
+                    def _on_progress(checked: int, found: int, *, _n: str = _name) -> None:
+                        status.update(f"Scanning {_n}… [{checked} addresses, {found} txs]")
+
+                    scanned = scan_wallet(
+                        mempool_url,
+                        entry.xpub,
+                        entry.branches,
+                        entry.gap_limit,
+                        request_delay,
+                        entry.script_type,
+                        on_progress=_on_progress,
+                    )
             except Exception as exc:
                 emit(
                     MessageCode.TAP_XPUB_ERROR_SCAN_FAILED,

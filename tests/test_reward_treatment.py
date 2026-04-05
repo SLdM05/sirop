@@ -1,7 +1,8 @@
 """Tests for reward discount vs income treatment in the transfer matcher.
 
-Covers _classify_income() for TransactionType.REWARD_SHAKE and
-TransactionType.REWARD_CASHBACK with both "discount" and "income" treatment.
+Covers _classify_income() for TransactionType.REWARD_SHAKE,
+TransactionType.REWARD_SHAKESQUAD, TransactionType.REWARD_CASHBACK,
+and TransactionType.INTEREST with both "discount" and "income" treatment.
 """
 
 from __future__ import annotations
@@ -73,6 +74,51 @@ def test_discount_reward_cashback_no_income_event() -> None:
         reward_treatment={"reward_cashback": "discount"},
     )
     assert income_evts == []
+
+
+def test_discount_reward_shakesquad_no_income_event() -> None:
+    """reward_shakesquad with discount treatment produces no IncomeEvent."""
+    tx = _reward_tx(TransactionType.REWARD_SHAKESQUAD)
+    _events, income_evts, _ = match_transfers(
+        [tx],
+        reward_treatment={"reward_shakesquad": "discount"},
+    )
+    assert income_evts == []
+
+
+def test_discount_reward_shakesquad_zero_acb() -> None:
+    """reward_shakesquad with discount treatment produces a ClassifiedEvent with cad_cost=0."""
+    tx = _reward_tx(TransactionType.REWARD_SHAKESQUAD)
+    events, _, _ = match_transfers(
+        [tx],
+        reward_treatment={"reward_shakesquad": "discount"},
+    )
+    taxable = [e for e in events if e.is_taxable]
+    assert len(taxable) == 1
+    assert taxable[0].cad_cost == Decimal("0")
+
+
+def test_interest_income_creates_income_event() -> None:
+    """interest with income treatment creates an IncomeEvent at FMV."""
+    tx = _reward_tx(TransactionType.INTEREST, amount="0.0000001")
+    _events, income_evts, _ = match_transfers(
+        [tx],
+        reward_treatment={"interest": "income"},
+    )
+    assert len(income_evts) == 1
+    assert income_evts[0].fmv_cad == tx.cad_value
+
+
+def test_interest_income_fmv_acb() -> None:
+    """interest with income treatment uses FMV as ACB."""
+    tx = _reward_tx(TransactionType.INTEREST, amount="0.0000001")
+    events, _, _ = match_transfers(
+        [tx],
+        reward_treatment={"interest": "income"},
+    )
+    taxable = [e for e in events if e.is_taxable]
+    assert len(taxable) == 1
+    assert taxable[0].cad_cost == tx.cad_value
 
 
 # ---------------------------------------------------------------------------

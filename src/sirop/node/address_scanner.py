@@ -8,7 +8,10 @@ import ssl
 import time
 import urllib.request
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 from embit import networks, script  # type: ignore[import-untyped]
 from embit.bip32 import HDKey  # type: ignore[import-untyped]
@@ -71,6 +74,7 @@ def scan_wallet(  # noqa: PLR0913
     gap_limit: int,
     request_delay: float = 0.0,
     script_type: str | None = None,
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> list[ScannedTx]:
     """Derive addresses and scan tx history with gap-limit logic via Mempool API.
 
@@ -80,6 +84,10 @@ def scan_wallet(  # noqa: PLR0913
         Seconds to sleep between each address HTTP request. Sourced from
         ``BTC_TRAVERSAL_REQUEST_DELAY`` in settings. Use 0.05-0.1 for public
         endpoints to avoid rate limiting; 0.0 is fine for a local node.
+    on_progress:
+        Optional callback invoked after each address is checked.
+        Receives ``(addresses_checked, txs_found)`` so the caller can update
+        a progress indicator.  Called with the running totals, not deltas.
     """
     for b in branches:
         if b not in (0, 1):
@@ -104,6 +112,8 @@ def scan_wallet(  # noqa: PLR0913
             else:
                 gap += 1
             idx += 1
+            if on_progress is not None:
+                on_progress(len(all_addresses), len(raw_txs))
 
     result: list[ScannedTx] = []
     for txid, raw_tx in raw_txs.items():
