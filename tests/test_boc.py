@@ -154,9 +154,9 @@ class TestWriteCache:
         ).fetchone()
         assert row is not None
         stored = row[0]
-        assert (
-            "E" not in stored and "e" not in stored
-        ), f"Scientific notation in stored rate: {stored!r}"
+        assert "E" not in stored and "e" not in stored, (
+            f"Scientific notation in stored rate: {stored!r}"
+        )
 
 
 # ---------------------------------------------------------------------------
