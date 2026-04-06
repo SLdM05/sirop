@@ -622,58 +622,64 @@ def _find_match(
 ) -> Transaction | None:
     """Search *all_txs* for a deposit that matches *outgoing*.
 
-    Match criteria (in priority order):
-    1. Same non-null txid.
-    2. Same asset, amount within tolerance, timestamp within window.
+    Two-pass search ordered by certainty:
+    1. Txid match (definitive) — all candidates scanned before falling back.
+    2. Amount + timestamp proximity (probabilistic) — only if no txid match found.
 
     Pairs in *forced_unlink_pairs* are never returned regardless of match signals.
     """
-    window = timedelta(hours=MATCH_WINDOW_HOURS)
-    window_start = outgoing.timestamp - window
-    window_end = outgoing.timestamp + window
     _unlinks = forced_unlink_pairs or set()
 
-    for candidate in all_txs:
+    def _is_eligible(candidate: Transaction) -> bool:
         if candidate.id == outgoing.id:
-            continue
+            return False
         if candidate.id in already_paired:
-            continue
+            return False
         if candidate.tx_type not in _INCOMING:
-            continue
+            return False
         if candidate.asset != outgoing.asset:
-            continue
-
-        # Respect forced unlinks.
+            return False
         if (outgoing.id, candidate.id) in _unlinks:
             logger.debug(
                 "transfer_match: skipping forced-unlinked pair (%d ↔ %d)",
                 outgoing.id,
                 candidate.id,
             )
+            return False
+        return True
+
+    # Pass A: txid match — definitive.
+    # Scan all candidates before falling back so a txid match later in the list
+    # is never shadowed by a probabilistic match earlier in the list.
+    if outgoing.txid:
+        for candidate in all_txs:
+            if not _is_eligible(candidate):
+                continue
+            if candidate.txid and outgoing.txid == candidate.txid:
+                logger.debug(
+                    "transfer_match: txid match for %s %s",
+                    outgoing.asset,
+                    outgoing.txid,
+                )
+                return candidate
+
+    # Pass B: amount + timestamp proximity — probabilistic.
+    # Used for sources with no blockchain txid (e.g. NDAX withdrawals).
+    # TODO: tag these matches with match_confidence="amount_time" and
+    # surface them to the user for confirmation (see module docstring).
+    window = timedelta(hours=MATCH_WINDOW_HOURS)
+    window_start = outgoing.timestamp - window
+    window_end = outgoing.timestamp + window
+    expected_deposit = outgoing.amount - (outgoing.fee_crypto or Decimal("0"))
+    tolerance = max(
+        expected_deposit * FEE_TOLERANCE_RELATIVE,
+        FEE_TOLERANCE_ABSOLUTE,
+    )
+    for candidate in all_txs:
+        if not _is_eligible(candidate):
             continue
-
-        # Txid match — definitive.
-        if outgoing.txid and candidate.txid and outgoing.txid == candidate.txid:
-            logger.debug(
-                "transfer_match: txid match for %s %s",
-                outgoing.asset,
-                outgoing.txid,
-            )
-            return candidate
-
-        # Amount + timestamp proximity match — probabilistic.
-        # Used for sources with no blockchain txid (e.g. NDAX withdrawals).
-        # TODO: tag these matches with match_confidence="amount_time" and
-        # surface them to the user for confirmation (see module docstring).
         if not (window_start <= candidate.timestamp <= window_end):
             continue
-
-        # The deposit amount should ≈ withdrawal amount minus fee.
-        expected_deposit = outgoing.amount - (outgoing.fee_crypto or Decimal("0"))
-        tolerance = max(
-            expected_deposit * FEE_TOLERANCE_RELATIVE,
-            FEE_TOLERANCE_ABSOLUTE,
-        )
         if abs(candidate.amount - expected_deposit) <= tolerance:
             logger.debug(
                 "transfer_match: amount+time match for %s on %s from %s"
