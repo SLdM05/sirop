@@ -813,6 +813,31 @@ def read_per_wallet_holdings(conn: sqlite3.Connection, tax_year: int) -> list[Wa
     ]
 
 
+def read_all_wallet_names(conn: sqlite3.Connection, tax_year: int) -> list[str]:
+    """Return all wallet names that had any transaction in a tracked asset through year-end.
+
+    Used to fill in zero-balance wallet rows in the holdings table, so wallets that
+    spent or transferred all their holdings still appear in the summary with zero units.
+    """
+    year_end = f"{tax_year}-12-31"
+    rows = conn.execute(
+        """
+        SELECT DISTINCT COALESCE(w.name, t.source) AS wallet_name
+        FROM transactions t
+        LEFT JOIN wallets w ON t.wallet_id = w.id
+        WHERE t.timestamp <= ?
+          AND t.asset IN (
+            SELECT asset FROM acb_state
+            WHERE id IN (SELECT MAX(id) FROM acb_state GROUP BY asset)
+              AND CAST(units AS REAL) > 0
+          )
+        ORDER BY wallet_name
+        """,
+        (year_end,),
+    ).fetchall()
+    return [str(r["wallet_name"]) for r in rows]
+
+
 @dataclasses.dataclass(frozen=True)
 class ProvisionalEvent:
     """A provisional classified_event paired with its triggering graph-transfer context."""
