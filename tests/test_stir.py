@@ -522,6 +522,36 @@ class TestMatcherNoOverrides:
         transfers = [e for e in events if e.event_type == "transfer"]
         assert len(transfers) == 2  # noqa: PLR2004
 
+    def test_txid_match_wins_over_earlier_amount_time_candidate(self) -> None:
+        """Txid match must win even when an amount+time candidate appears first in the list.
+
+        Regression: the old single-pass loop would return the first match of any kind,
+        so an amount+time-matching candidate earlier in the list shadowed a txid-matching
+        candidate that appeared later.  The two-pass approach fixes this.
+        """
+        out_tx = _tx(1, TransactionType.WITHDRAWAL, txid="deadbeef", amount="0.01", cad_value="500")
+        # Candidate A: no txid but amount+time matches — appears first.
+        in_tx_amount_time = _tx(
+            2, TransactionType.DEPOSIT, txid=None, amount="0.01", offset_hours=1, cad_value="500"
+        )
+        # Candidate B: txid matches — appears second.
+        in_tx_txid = _tx(
+            3, TransactionType.DEPOSIT, txid="deadbeef", amount="0.01", cad_value="500"
+        )
+
+        events, _, _ = match_transfers([out_tx, in_tx_amount_time, in_tx_txid])
+
+        # The withdrawal should be paired with the txid candidate (id=3), not id=2.
+        # ClassifiedEvent.vtx_id == the originating Transaction.id.
+        transfer_events = [e for e in events if e.event_type == "transfer"]
+        paired_ids = {e.vtx_id for e in transfer_events}
+        withdrawal_id = 1
+        txid_deposit_id = 3
+        amount_time_deposit_id = 2
+        assert withdrawal_id in paired_ids  # withdrawal matched
+        assert txid_deposit_id in paired_ids  # txid deposit matched
+        assert amount_time_deposit_id not in paired_ids  # amount+time deposit NOT matched
+
     def test_empty_overrides_list(self) -> None:
         """Passing an empty list is equivalent to passing None."""
         out_tx = _tx(1, TransactionType.WITHDRAWAL, txid="cafe0000", amount="0.01", cad_value="500")
@@ -1164,9 +1194,9 @@ class TestProvisionalConsolidation:
 
         result = repo.read_provisional_events(conn)
 
-        assert (
-            len(result) == 1
-        ), f"Expected 1 provisional event row, got {len(result)} — cartesian product bug"
+        assert len(result) == 1, (
+            f"Expected 1 provisional event row, got {len(result)} — cartesian product bug"
+        )
         assert result[0].deposit_id == 16  # noqa: PLR2004
         assert result[0].withdrawal_count == 2  # noqa: PLR2004
         assert result[0].amount == Decimal("0.00026670")

@@ -535,8 +535,7 @@ def _write_to_batch(  # noqa: PLR0912 PLR0913
         excluded_fp: set[tuple[str, str, str, str]] = set()  # (source, ts, asset, amount)
         if is_append:
             for row in conn.execute(
-                "SELECT source, raw_timestamp, asset, amount, txid, wallet_id"
-                " FROM raw_transactions"
+                "SELECT source, raw_timestamp, asset, amount, txid, wallet_id FROM raw_transactions"
             ).fetchall():
                 if row[4] is not None:
                     excluded_txid.add((row[4], row[5]))
