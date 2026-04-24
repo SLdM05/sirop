@@ -22,7 +22,7 @@ embit = ">=0.4.9"
 [tool.poetry.group.dev.dependencies]
 ruff = "^0.8"
 mypy = "^1.13"
-pytest = "^8.0"
+pytest = "^9.0"
 types-PyYAML = "*"
 pre-commit = "^4.5.1"
 

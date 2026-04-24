@@ -1194,9 +1194,9 @@ class TestProvisionalConsolidation:
 
         result = repo.read_provisional_events(conn)
 
-        assert len(result) == 1, (
-            f"Expected 1 provisional event row, got {len(result)} — cartesian product bug"
-        )
+        assert (
+            len(result) == 1
+        ), f"Expected 1 provisional event row, got {len(result)} — cartesian product bug"
         assert result[0].deposit_id == 16  # noqa: PLR2004
         assert result[0].withdrawal_count == 2  # noqa: PLR2004
         assert result[0].amount == Decimal("0.00026670")
