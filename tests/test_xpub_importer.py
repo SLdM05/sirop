@@ -224,9 +224,9 @@ def test_unconfirmed_tx_uses_epoch_timestamp(importer: XpubImporter) -> None:
     )
     # Access the private method directly — this is the unit under test.
     raw = importer._to_raw_transaction(unconfirmed)
-    assert raw.timestamp == datetime(1970, 1, 1, tzinfo=UTC), (
-        f"Expected epoch sentinel for unconfirmed tx, got {raw.timestamp!r}"
-    )
+    assert raw.timestamp == datetime(
+        1970, 1, 1, tzinfo=UTC
+    ), f"Expected epoch sentinel for unconfirmed tx, got {raw.timestamp!r}"
 
 
 def test_invalid_script_type_raises(

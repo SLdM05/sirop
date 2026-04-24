@@ -212,9 +212,9 @@ def test_direction_rate_is_consistent(direction_txs: list[RawTransaction]) -> No
             continue
         assert tx.rate is not None
         expected = tx.fiat_value / tx.amount
-        assert abs(tx.rate - expected) < Decimal("0.01"), (
-            f"{tx.transaction_type} rate mismatch: {tx.rate} vs {expected}"
-        )
+        assert abs(tx.rate - expected) < Decimal(
+            "0.01"
+        ), f"{tx.transaction_type} rate mismatch: {tx.rate} vs {expected}"
 
 
 def test_no_trade_type_in_direction_fixture(direction_txs: list[RawTransaction]) -> None:
@@ -262,9 +262,9 @@ def test_btc_buy_rate_is_consistent(transactions: list[RawTransaction]) -> None:
         assert tx.rate is not None
         assert tx.fiat_value is not None
         expected_rate = tx.fiat_value / tx.amount
-        assert abs(tx.rate - expected_rate) < Decimal("0.01"), (
-            f"Rate mismatch on {tx.timestamp}: {tx.rate} vs {expected_rate}"
-        )
+        assert abs(tx.rate - expected_rate) < Decimal(
+            "0.01"
+        ), f"Rate mismatch on {tx.timestamp}: {tx.rate} vs {expected_rate}"
 
 
 def test_earliest_btc_buy(transactions: list[RawTransaction]) -> None:
@@ -329,9 +329,9 @@ def test_dust_group_btc_only_emits_one_transaction(
     """
     dust_ts = datetime(2025, 4, 15, 16, 45, 0, tzinfo=UTC)
     dust_txs = [t for t in transactions if t.timestamp.replace(microsecond=0) == dust_ts]
-    assert len(dust_txs) == 1, (
-        f"Expected 1 transaction for BTC/ETH DUST group (ETH filtered), got {len(dust_txs)}"
-    )
+    assert (
+        len(dust_txs) == 1
+    ), f"Expected 1 transaction for BTC/ETH DUST group (ETH filtered), got {len(dust_txs)}"
     assert dust_txs[0].asset == "BTC"
     assert dust_txs[0].amount == Decimal("0.00000010")
 
@@ -348,9 +348,9 @@ def test_dust_group_with_fee_leg_emits_one_transaction(
     """
     dust_ts = datetime(2025, 5, 1, 10, 0, 0, tzinfo=UTC)
     dust_txs = [t for t in transactions if t.timestamp.replace(microsecond=0) == dust_ts]
-    assert len(dust_txs) == 1, (
-        f"Expected 1 transaction for BTC/SOL DUST group (SOL filtered), got {len(dust_txs)}"
-    )
+    assert (
+        len(dust_txs) == 1
+    ), f"Expected 1 transaction for BTC/SOL DUST group (SOL filtered), got {len(dust_txs)}"
 
 
 def test_dust_group_with_fee_leg_fee_on_received_tx(
@@ -383,9 +383,9 @@ def test_zero_amount_rows_not_emitted(transactions: list[RawTransaction]) -> Non
     Even if it weren't zero-amount, it would also be filtered by the BTC-only filter.
     """
     zero_amount = [t for t in transactions if t.amount == Decimal("0")]
-    assert zero_amount == [], (
-        f"Found {len(zero_amount)} zero-amount transaction(s) — should be skipped"
-    )
+    assert (
+        zero_amount == []
+    ), f"Found {len(zero_amount)} zero-amount transaction(s) — should be skipped"
 
 
 # ---------------------------------------------------------------------------
