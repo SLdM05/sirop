@@ -179,8 +179,11 @@ cross-source transfer matching logic, and the xpub wallet-definition YAML schema
 
 ## Language and Naming
 
-The tool is `sirop` (lowercase always). CLI verbs: `tap` (import), `boil` (calculate),
-`pour` (export), `grade` (status), `verify`. Batch commands (no theme): `create`, `list`, `switch`.
+The tool is `sirop` (lowercase always). Implemented CLI verbs today: `tap` (import),
+`boil` (calculate — runs normalize, verify, transfer_match, boil, superficial_loss),
+`pour` (export), `stir` (review and override transfer matching). Batch commands (no theme):
+`create`, `list`, `switch`. Planned but not implemented: `grade` (status summary) and
+a standalone `verify` (node verification currently runs as a stage inside `boil`).
 
 **Strict two-register rule:** maple theme in CLI chrome (output, logs, TUI); zero personality
 in tax output (Schedule 3, Schedule G, TP-21.4.39-V, audit logs, any file leaving the tool).

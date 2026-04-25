@@ -1,3 +1,12 @@
+---
+verified-at: b5e6b66
+tracks:
+  - src/sirop/__main__.py
+  - config/messages.yaml
+  - src/sirop/models/messages.py
+  - src/sirop/utils/messages.py
+---
+
 # sirop — Language and Naming Guide
 
 ## The Theme
@@ -46,13 +55,15 @@ a form says "Proceeds of disposition," the tool says "Proceeds of disposition."
 These are the canonical top-level commands. Use them consistently across
 the CLI, command palette, and any documentation.
 
-| Verb | Replaces | What it does |
-|------|----------|--------------|
-| `tap` | import | Reads raw transaction files from exchanges and wallets |
-| `boil` | calculate / process | Runs the full calculation pipeline |
-| `pour` | export / generate | Produces tax report outputs |
-| `grade` | summarize / status | Shows a summary of gains, losses, and ACB state |
-| `verify` | verify | Node verification (kept as-is — clear enough) |
+| Verb | Status | Replaces | What it does |
+|------|--------|----------|--------------|
+| `tap` | implemented | import | Reads raw transaction files from exchanges and wallets |
+| `boil` | implemented | calculate / process | Runs the full calculation pipeline (normalize, verify, transfer_match, boil, superficial_loss) |
+| `pour` | implemented | export / generate | Produces tax report outputs |
+| `stir` | implemented | — | Review and override transfer matching before `boil` |
+| `create`, `list`, `switch` | implemented | — | Batch management (no theme) |
+| `grade` | **planned** | summarize / status | Shows a summary of gains, losses, and ACB state |
+| `verify` | **planned as top-level verb**; today it's a stage inside `boil` | verify | Node verification (kept as-is — clear enough) |
 
 Sub-commands and flags don't need to follow the theme — use clear, descriptive
 names there. `sirop tap --source shakepay --file transactions.csv` is fine.
