@@ -1,3 +1,10 @@
+---
+verified-at: b5e6b66
+tracks:
+  - src/sirop/utils/logging.py
+  - src/sirop/utils/messages.py
+---
+
 # sirop Logging Spec — Per-Module Guidelines
 
 Reference for what each pipeline module should log at each level.

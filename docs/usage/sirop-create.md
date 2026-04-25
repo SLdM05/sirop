@@ -1,3 +1,13 @@
+---
+verified-at: b5e6b66
+tracks:
+  - src/sirop/cli/create.py
+  - src/sirop/cli/list_batches.py
+  - src/sirop/cli/switch.py
+  - src/sirop/__main__.py
+  - src/sirop/db/connection.py
+---
+
 # sirop create — Batch Management
 
 ## What is a batch?

@@ -1,3 +1,10 @@
+---
+verified-at: b5e6b66
+tracks:
+  - src/sirop/node
+  - src/sirop/transfer_match/graph_analysis.py
+---
+
 # Bitcoin Node Verification Module
 
 > **Status: Partial Implementation**

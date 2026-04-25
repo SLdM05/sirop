@@ -1,3 +1,11 @@
+---
+verified-at: b5e6b66
+tracks:
+  - src/sirop/cli/tap.py
+  - src/sirop/__main__.py
+  - src/sirop/importers
+---
+
 # sirop tap — Import Exchange Transactions
 
 ## What `tap` does
