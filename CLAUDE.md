@@ -87,23 +87,21 @@ the parent `feat/<name>` branch. Never open a `claude/` branch directly from `de
 |------------------------|-----------------------|----------------------------|
 | `claude/*` → `feat/*` | Squash and merge      | 1 commit per session       |
 | `feat/*` → `dev`       | Squash and merge      | 1 commit per feature       |
-| `dev` → `sirop-0.x`   | Create a merge commit | Feature list preserved     |
-| `sirop-0.x` → `main`  | Create a merge commit | Release boundary preserved |
+| `dev` → `main`         | Create a merge commit | Release boundary preserved |
 
-Never squash `dev → sirop-0.x` or `sirop-0.x → main` — those merge commits are
-the project's release record. After merging to `main`, tag immediately:
+Never squash `dev → main` — that merge commit is the project's release record.
+After merging to `main`, tag immediately:
 `git tag v0.x.0 main && git push sirop v0.x.0`.
 
 ### Branch naming
 
 - Feature branches: `feat/<short-noun>` — e.g., `feat/koinly-importer`, `feat/pour-command`
 - Session branches: `claude/<feature>-<id>` — e.g., `claude/koinly-importer-x7k2q`
-- RC branches: `sirop-<major>.<minor>` — e.g., `sirop-0.1`, `sirop-0.2`
 
 ### What NOT to do
 
 - Never commit directly to `main` or `dev` — both are branch-protected
-- Never squash `dev → sirop-0.x` or `sirop-0.x → main`
+- Never squash `dev → main`
 - Never rebase a branch after it has been pushed and shared
 - Never open a `claude/` branch directly from `dev`
 - Never use the old `feature-` prefix — always use `feat/`
@@ -112,17 +110,29 @@ the project's release record. After merging to `main`, tag immediately:
 
 ## Project Context
 
-Read these before making changes:
+### Reference index (load on demand)
 
-- `docs/ref/crypto-tax-reference-quebec-2025.md` — Complete tax rules, ACB formulas,
-  form references, and data format specs
+These docs are not required reading per session. Use the descriptions to route to the
+relevant doc when your task touches its scope. Bolded **⚠ Read before X** lines are
+hard gates — obey them.
+
+- `docs/ref/crypto-tax-reference-quebec-2025.md` — Tax rules, ACB formulas, form references, data format specs
 - `docs/ref/bitcoin-node-validation-module.md` — Node verification module spec
-- `docs/ref/tui-design-guidelines.md` — TUI layout, widget design, keyboard bindings, and phase roadmap
+- `docs/ref/tui-design-guidelines.md` — TUI layout, widgets, keyboard bindings, phase roadmap
 - `docs/ref/data-pipeline.mermaid` — Visual diagram of all 7 pipeline stages and data models
-- `docs/ref/sirop-language-guide.md` — Tool name, CLI verbs, message vocabulary, and the two-register rule
-- `docs/ref/security-input-hardening.md` — Security rules for every pipeline boundary: SQL parameterization, batch name validation, YAML loading, node API responses, logging redaction
-- `docs/ref/transaction-import-formats.md` — Authoritative import format specs for all sources: Shakepay CSV, Sparrow CSV, NDAX CSV column definitions, unit detection rules (BTC vs sats), fee availability, unconfirmed-row handling, cross-source transfer matching, and the xpub/ypub/zpub wallet-definition YAML schema. **Read this before building or modifying any importer.**
-- `docs/ref/database-schema.md` — Schema changelog, per-wallet vs global ACB pool reconciliation pattern, and ad-hoc SQLite investigation queries. **Read this before debugging `boil` output discrepancies or querying `.sirop` files directly.**
+- `docs/ref/sirop-language-guide.md` — Tool name, CLI verbs, message vocabulary, two-register rule
+  - **⚠ Read before writing any user-facing message string.**
+- `docs/ref/security-input-hardening.md` — SQL parameterization, batch name validation, YAML loading, node API responses, logging redaction
+  - **⚠ Read before adding SQL, YAML loaders, or log lines that print user data.**
+- `docs/ref/transaction-import-formats.md` — Column specs, unit detection (BTC vs sats), fee availability, unconfirmed-row handling, cross-source transfer matching, xpub/ypub/zpub wallet-definition YAML schema
+  - **⚠ Read before building or modifying any importer.**
+- `docs/ref/database-schema.md` — Schema changelog, per-wallet vs global ACB pool reconciliation, ad-hoc SQLite investigation queries
+  - **⚠ Read before debugging `boil` discrepancies or querying `.sirop` files directly.**
+
+### CLI usage manuals
+
+`docs/usage/sirop-<verb>.md` — user-facing CLI manuals (`tap`, `boil`, `pour`, `create`,
+`stir`). Update the matching manual when changing a command's flags, prompts, or output.
 
 ## Key Rules (quick reference)
 
