@@ -155,3 +155,89 @@ def test_missing_xpub_field_raises(
     bad.write_text(yaml.dump({"source": "xpub", "wallets": [{"name": "x"}]}))
     with pytest.raises(ValueError, match="xpub"):
         importer.parse_multi(bad, fake_settings)
+
+
+# ---------------------------------------------------------------------------
+# script_type field tests
+# ---------------------------------------------------------------------------
+
+
+def test_script_type_absent_defaults_to_none(
+    importer: XpubImporter, tmp_wallet_def: Path, fake_settings: MagicMock
+) -> None:
+    """YAML entry without script_type passes None to scan_wallet."""
+    with patch("sirop.importers.xpub.scan_wallet", return_value=_FAKE_SCANNED) as mock_scan:
+        importer.parse_multi(tmp_wallet_def, fake_settings)
+    _url, _xpub, _branches, _gap, _delay, script_type = mock_scan.call_args.args
+    assert script_type is None
+
+
+def test_script_type_p2wpkh_passed_to_scan_wallet(
+    importer: XpubImporter, tmp_path: Path, fake_settings: MagicMock
+) -> None:
+    """YAML entry with script_type: p2wpkh passes 'p2wpkh' to scan_wallet."""
+    wallet_def = {
+        "source": "xpub",
+        "wallets": [{"name": "jm-wallet", "xpub": _BIP84_ZPUB, "script_type": "p2wpkh"}],
+    }
+    p = tmp_path / "jm.yaml"
+    p.write_text(yaml.dump(wallet_def))
+    with patch("sirop.importers.xpub.scan_wallet", return_value=_FAKE_SCANNED) as mock_scan:
+        importer.parse_multi(p, fake_settings)
+    _url, _xpub, _branches, _gap, _delay, script_type = mock_scan.call_args.args
+    assert script_type == "p2wpkh"
+
+
+def test_script_type_case_insensitive(
+    importer: XpubImporter, tmp_path: Path, fake_settings: MagicMock
+) -> None:
+    """script_type is normalised to lowercase before validation."""
+    wallet_def = {
+        "source": "xpub",
+        "wallets": [{"name": "jm-wallet", "xpub": _BIP84_ZPUB, "script_type": "P2WPKH"}],
+    }
+    p = tmp_path / "upper.yaml"
+    p.write_text(yaml.dump(wallet_def))
+    with patch("sirop.importers.xpub.scan_wallet", return_value=_FAKE_SCANNED) as mock_scan:
+        importer.parse_multi(p, fake_settings)
+    _url, _xpub, _branches, _gap, _delay, script_type = mock_scan.call_args.args
+    assert script_type == "p2wpkh"
+
+
+def test_unconfirmed_tx_uses_epoch_timestamp(importer: XpubImporter) -> None:
+    """Unconfirmed transactions (block_time=0) must use epoch, not datetime.now().
+
+    Regression: the original code used datetime.now(UTC) for unconfirmed txs.
+    This made the dedup key non-deterministic — each re-tap would get a new
+    timestamp and insert the same unconfirmed transaction again.
+    """
+    from datetime import UTC, datetime
+
+    from sirop.node.address_scanner import ScannedTx
+
+    unconfirmed = ScannedTx(
+        txid="eee" + "0" * 61,
+        net_sats=100_000,
+        fee_sats=0,
+        block_time=0,
+        confirmed=False,
+    )
+    # Access the private method directly — this is the unit under test.
+    raw = importer._to_raw_transaction(unconfirmed)
+    assert raw.timestamp == datetime(
+        1970, 1, 1, tzinfo=UTC
+    ), f"Expected epoch sentinel for unconfirmed tx, got {raw.timestamp!r}"
+
+
+def test_invalid_script_type_raises(
+    importer: XpubImporter, tmp_path: Path, fake_settings: MagicMock
+) -> None:
+    """Unrecognised script_type value raises ValueError at parse time."""
+    wallet_def = {
+        "source": "xpub",
+        "wallets": [{"name": "bad", "xpub": _BIP84_ZPUB, "script_type": "p2tr"}],
+    }
+    p = tmp_path / "bad_script_type.yaml"
+    p.write_text(yaml.dump(wallet_def))
+    with pytest.raises(ValueError, match="script_type"):
+        importer.parse_multi(p, fake_settings)

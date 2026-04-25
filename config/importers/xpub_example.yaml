@@ -9,15 +9,24 @@
 # Fields:
 #   name        (required) wallet name in the sirop database
 #   xpub        (required) account-level extended public key
-#                          zpub = P2WPKH native SegWit (JoinMarket, Sparrow default)
+#                          zpub = P2WPKH native SegWit (Sparrow default)
 #                          ypub = P2SH-P2WPKH wrapped SegWit
-#                          xpub = P2PKH legacy
+#                          xpub = P2PKH legacy (or JoinMarket BIP84 — see script_type below)
 #   gap_limit   (optional) consecutive empty addresses before scan stops (default: 20)
 #                          use 50-100 for JoinMarket wallets (coinjoin gaps are wide)
 #   branches    (optional) which HD branches to scan (default: [0, 1])
 #                          0 = external (receive addresses)
 #                          1 = internal (change addresses)
 #   label       (optional) free-text annotation stored in the wallet record
+#   script_type (optional) override prefix-based address encoding
+#                          p2wpkh      = native SegWit bc1q... (BIP84)
+#                          p2sh-p2wpkh = wrapped SegWit 3...   (BIP49)
+#                          p2pkh       = legacy 1...            (BIP44)
+#
+#                          Use script_type when the key prefix does not match the
+#                          intended address type. JoinMarket BIP84 wallets always
+#                          export xpub prefix — set script_type: p2wpkh to get
+#                          the correct bc1q addresses.
 
 source: xpub
 
@@ -26,13 +35,16 @@ wallets:
     xpub: zpub6rFR7y4Q2Aij...   # replace with your actual zpub
     gap_limit: 20
 
-  # JoinMarket example — scan both external and internal branches with larger gap
-  - name: jm-depth0-ext
-    xpub: zpub6...              # mixdepth 0 external xpub from JoinMarket
+  # JoinMarket example
+  # ------------------
+  # Use the ACCOUNT-LEVEL xpub shown on the "mixdepth N" line in the JoinMarket
+  # wallet display — NOT the "external addresses m/84'/0'/N'/0" branch-level key
+  # (that key is already one level too deep and will produce wrong addresses).
+  #
+  # JoinMarket uses xpub prefix even for BIP84 wallets, so set script_type: p2wpkh
+  # to derive the correct bc1q native SegWit addresses.
+  - name: jm-depth0
+    xpub: xpub6...              # account-level key from "mixdepth 0" line
+    script_type: p2wpkh         # JoinMarket BIP84 wallet — override xpub prefix → bc1q
     gap_limit: 50
-    branches: [0]
-
-  - name: jm-depth0-int
-    xpub: zpub7...              # mixdepth 0 internal xpub from JoinMarket
-    gap_limit: 50
-    branches: [1]
+    branches: [0, 1]

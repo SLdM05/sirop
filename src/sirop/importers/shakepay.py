@@ -60,6 +60,20 @@ _PURCHASE_SALE: str = "purchase_sale"
 _ADDR_DESCRIPTION_RE = re.compile(r"^(?:Bitcoin|Ethereum) address (\S+)")
 
 
+@dataclass(frozen=True)
+class _DescOverride:
+    """One entry from ``description_type_overrides`` in the YAML config.
+
+    When a row's canonical type matches ``applies_to`` and the Description
+    column contains ``pattern`` (case-insensitive), the canonical type is
+    replaced with ``transaction_type``.
+    """
+
+    applies_to: str  # canonical type that triggers the check
+    pattern: str  # case-insensitive substring to search for in Description
+    transaction_type: str  # replacement canonical type
+
+
 @dataclass
 class _RowCtx:
     """Parsed state for one CSV row, threaded through the handler methods.
@@ -79,6 +93,7 @@ class _RowCtx:
     notes: str  # "Sent to: <addr>" when Description contains a crypto address
     raw_type: str
     row_num: int
+    description: str  # raw Description value for override matching
 
 
 class ShakepayImporter(BaseImporter):
@@ -95,6 +110,9 @@ class ShakepayImporter(BaseImporter):
         # Crypto assets that are allowed through the filter — all others are
         # skipped with a warning.  Populated from allowed_crypto_assets in YAML.
         self._allowed_crypto_assets: frozenset[str] = frozenset({"BTC"})
+        # Description-based sub-classification overrides.  Loaded from
+        # description_type_overrides in the YAML; applied after canonical type lookup.
+        self._desc_overrides: list[_DescOverride] = []
 
     # ------------------------------------------------------------------
     # Factory
@@ -109,6 +127,15 @@ class ShakepayImporter(BaseImporter):
         allowed = raw.get("allowed_crypto_assets")
         if allowed:
             importer._allowed_crypto_assets = frozenset(str(a).upper() for a in allowed)
+        overrides = raw.get("description_type_overrides") or []
+        importer._desc_overrides = [
+            _DescOverride(
+                applies_to=str(o["applies_to"]),
+                pattern=str(o["pattern"]),
+                transaction_type=str(o["transaction_type"]),
+            )
+            for o in overrides
+        ]
         return importer
 
     # ------------------------------------------------------------------
@@ -213,6 +240,9 @@ class ShakepayImporter(BaseImporter):
             _txid_raw = _raw_desc or None
             _notes = ""
 
+        # Raw Description value — captured before address-extraction strips it from _txid_raw.
+        _description = row[cols["txid"]].strip()
+
         ctx = _RowCtx(
             row=row,
             timestamp=timestamp,
@@ -228,6 +258,7 @@ class ShakepayImporter(BaseImporter):
             notes=_notes,
             raw_type=raw_type,
             row_num=row_num,
+            description=_description,
         )
 
         # Look up the canonical type; log a warning and fall through for unknowns.
@@ -240,16 +271,30 @@ class ShakepayImporter(BaseImporter):
             )
             canonical_type = raw_type.lower()
 
+        # Apply description-based overrides (e.g. "Reward" rows with "interest" description).
+        canonical_type = self._apply_desc_override(canonical_type, ctx.description)
+
         if canonical_type == _PURCHASE_SALE:
             result = self._parse_purchase_sale(ctx)
+        elif canonical_type == "buy":
+            # 2025 Shakepay format: debit columns are empty; only BTC credit is
+            # present.  fiat_value is left None; the normalizer fetches the BoC
+            # rate to determine the CAD cost for ACB.
+            result = self._parse_buy_credit_only(ctx)
         elif canonical_type == "withdrawal":
             result = self._parse_withdrawal(ctx)
         elif canonical_type == "deposit":
             result = self._parse_deposit(ctx)
         elif canonical_type in ("fiat_deposit", "fiat_withdrawal"):
             result = self._parse_fiat(ctx, canonical_type)
-        elif canonical_type == "income":
-            result = self._parse_income(ctx)
+        elif canonical_type in (
+            "income",
+            "interest",
+            "reward_shake",
+            "reward_shakesquad",
+            "reward_cashback",
+        ):
+            result = self._parse_income(ctx, canonical_type)
         else:
             # "other" (covers "peer transfer" and literal "other") and unknowns.
             result = self._parse_generic(ctx, canonical_type)
@@ -321,10 +366,47 @@ class ShakepayImporter(BaseImporter):
             fee_currency=None,
             rate=rate,
             spot_rate=None,  # Shakepay spot rate ≠ BoC rate; preserved in raw_row only
-            txid=ctx.txid_raw,
+            txid=None,  # Description for buy/sell rows contains the rate string
+            # ("Bought @ CA$X"), not a blockchain txid. Using it as a
+            # txid causes false deduplication when the same rounded rate
+            # appears in multiple rows. Rate is preserved in raw_row.
             raw_type=ctx.raw_type.lower(),
             raw_row=ctx.row,
             notes=ctx.notes,
+        )
+
+    def _parse_buy_credit_only(self, ctx: _RowCtx) -> RawTransaction | None:
+        """Handle 2025-format ``Buy`` rows — credit-only; debit columns are empty.
+
+        Shakepay's 2025 CSV omits the fiat debit for BTC purchases.  The CAD
+        cost is available in ``Book Cost`` but the YAML marks that column as
+        ignored (it is Shakepay's proprietary spread-inclusive rate, not a BoC
+        rate).  ``fiat_value`` is left ``None``; the normalizer fetches the BoC
+        daily rate to determine the CAD cost for ACB, consistent with the
+        treatment of income/reward rows.
+        """
+        if ctx.credited is None or not ctx.credit_currency:
+            logger.warning(
+                "shakepay: Buy row at %d has no credited amount — skipping",
+                ctx.row_num,
+            )
+            return None
+        return RawTransaction(
+            source=self._config.source_name,
+            timestamp=ctx.timestamp,
+            transaction_type="buy",
+            asset=ctx.credit_currency,
+            amount=ctx.credited,
+            amount_currency=ctx.credit_currency,
+            fiat_value=None,
+            fiat_currency=None,
+            fee_amount=None,
+            fee_currency=None,
+            rate=None,
+            spot_rate=None,
+            txid=None,
+            raw_type=ctx.raw_type.lower(),
+            raw_row=ctx.row,
         )
 
     def _parse_withdrawal(self, ctx: _RowCtx) -> RawTransaction | None:
@@ -420,11 +502,12 @@ class ShakepayImporter(BaseImporter):
             raw_row=ctx.row,
         )
 
-    def _parse_income(self, ctx: _RowCtx) -> RawTransaction | None:
-        """Handle ``shakingsats`` rows (BTC rewards — income event).
+    def _parse_income(self, ctx: _RowCtx, canonical_type: str = "income") -> RawTransaction | None:
+        """Handle BTC reward/income rows (shakingsats, reward_shake, reward_cashback).
 
         ``fiat_value`` is left ``None``; the normalizer fetches the BoC rate
         to determine the CAD fair market value at receipt.
+        ``canonical_type`` is passed through so reward subtypes are preserved.
         """
         if ctx.credited is None:
             logger.warning(
@@ -434,7 +517,7 @@ class ShakepayImporter(BaseImporter):
         return RawTransaction(
             source=self._config.source_name,
             timestamp=ctx.timestamp,
-            transaction_type="income",
+            transaction_type=canonical_type,
             asset=ctx.credit_currency,
             amount=ctx.credited,
             amount_currency=ctx.credit_currency,
@@ -490,6 +573,24 @@ class ShakepayImporter(BaseImporter):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _apply_desc_override(self, canonical_type: str, description: str) -> str:
+        """Return a replacement canonical type if a description override matches.
+
+        Iterates ``self._desc_overrides`` in order; returns the first match.
+        Returns *canonical_type* unchanged when no override applies.
+        """
+        desc_lower = description.lower()
+        for override in self._desc_overrides:
+            if canonical_type == override.applies_to and override.pattern in desc_lower:
+                logger.debug(
+                    "shakepay: description override %r → %r (matched %r)",
+                    canonical_type,
+                    override.transaction_type,
+                    override.pattern,
+                )
+                return override.transaction_type
+        return canonical_type
 
     def _parse_optional_decimal(self, value: str, field_name: str, row_num: int) -> Decimal | None:
         """Return ``None`` for empty strings; parse non-empty values as ``Decimal``.

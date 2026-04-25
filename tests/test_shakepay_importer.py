@@ -11,7 +11,11 @@ purchase/sale    → buy  (CAD→BTC, debit=fiat, credit=crypto)
 purchase/sale    → sell (BTC→CAD, debit=crypto, credit=fiat)
 crypto cashout   → withdrawal
 crypto purchase  → deposit
-shakingsats      → income
+shakingsats      → reward_shake
+Reward           → reward_shake  (ShakingSats description)
+Reward           → reward_cashback  (description contains "cashback")
+Reward           → reward_shakesquad  (description contains "ShakeSquad")
+Reward           → interest  (description contains "Interest payout")
 peer transfer    → other
 other            → other
 fiat cashout     → fiat_withdrawal
@@ -102,6 +106,22 @@ def test_fiat_deposit_timestamp(transactions: list[RawTransaction]) -> None:
     deposits = _find(transactions, "fiat_deposit")
     assert len(deposits) == 1
     assert deposits[0].timestamp == datetime(2025, 1, 1, 10, 0, 0, tzinfo=UTC)
+
+
+def test_timestamps_parsed_from_space_format(importer: ShakepayImporter, tmp_path: Path) -> None:
+    """Shakepay 2025 exports use 'YYYY-MM-DD HH:MM:SS' (no T, no TZ offset).
+    The base importer must treat naive timestamps as UTC."""
+    csv_text = (
+        "Date,Amount Debited,Asset Debited,Amount Credited,Asset Credited,"
+        "Market Value,Market Value Currency,Book Cost,Book Cost Currency,"
+        "Type,Spot Rate,Buy / Sell Rate,Description\n"
+        "2025-06-15 09:30:00,,,0.00100000,BTC,,,,,shakingsats,,,\n"
+    )
+    f = tmp_path / "sp.csv"
+    f.write_text(csv_text)
+    txs = importer.parse(f)
+    assert len(txs) == 1
+    assert txs[0].timestamp == datetime(2025, 6, 15, 9, 30, 0, tzinfo=UTC)
 
 
 # ---------------------------------------------------------------------------
@@ -351,17 +371,20 @@ def test_buy_2025_fields(transactions: list[RawTransaction]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Income — shakingsats and Reward (2025 type name)
+# Rewards — shakingsats and Reward (2025 type name) → reward_shake
+# Note: tax treatment (discount = ACB $0, not income) is determined by
+# tax_rules.yaml reward_treatment config, not by the importer type.
 # ---------------------------------------------------------------------------
 
 
-def test_income_present(transactions: list[RawTransaction]) -> None:
-    assert len(_find(transactions, "income", "BTC")) == 2  # noqa: PLR2004
+def test_reward_shake_present(transactions: list[RawTransaction]) -> None:
+    """'shakingsats' and plain 'Reward' (ShakingSats description) map to 'reward_shake'."""
+    assert len(_find(transactions, "reward_shake", "BTC")) == 2  # noqa: PLR2004
 
 
-def test_income_fields(transactions: list[RawTransaction]) -> None:
-    """shakingsats income: BTC credited, no fiat_value (normalizer handles FMV)."""
-    txs = _find(transactions, "income", "BTC")
+def test_reward_shake_fields(transactions: list[RawTransaction]) -> None:
+    """shakingsats: BTC credited, no fiat_value (normalizer handles FMV), no fee, no txid."""
+    txs = _find(transactions, "reward_shake", "BTC")
     tx = next(t for t in txs if t.raw_type == "shakingsats")
     assert tx.asset == "BTC"
     assert tx.amount == Decimal("0.00001500")
@@ -371,14 +394,49 @@ def test_income_fields(transactions: list[RawTransaction]) -> None:
     assert tx.txid is None
 
 
-def test_reward_type_maps_to_income(transactions: list[RawTransaction]) -> None:
-    """'Reward' is the 2025 Shakepay type name for what was 'shakingsats'."""
-    txs = _find(transactions, "income", "BTC")
+def test_reward_type_maps_to_reward_shake(transactions: list[RawTransaction]) -> None:
+    """'Reward' rows with ShakingSats description map to 'reward_shake'."""
+    txs = _find(transactions, "reward_shake", "BTC")
     tx = next(t for t in txs if t.raw_type == "reward")
     assert tx.asset == "BTC"
     assert tx.amount == Decimal("0.00000021")
     assert tx.fiat_value is None
     assert tx.txid is None
+
+
+# ---------------------------------------------------------------------------
+# Reward sub-types via description override (all have raw_type == "reward")
+# ---------------------------------------------------------------------------
+
+
+def test_reward_cashback_from_description(transactions: list[RawTransaction]) -> None:
+    """'Reward' with 'Bitcoin cashback' description → reward_cashback."""
+    txs = _find(transactions, "reward_cashback", "BTC")
+    assert len(txs) == 1
+    tx = txs[0]
+    assert tx.raw_type == "reward"
+    assert tx.amount == Decimal("0.00000275")
+    assert tx.fiat_value is None
+
+
+def test_reward_shakesquad_from_description(transactions: list[RawTransaction]) -> None:
+    """'Reward' with 'ShakeSquad' description → reward_shakesquad."""
+    txs = _find(transactions, "reward_shakesquad", "BTC")
+    assert len(txs) == 1
+    tx = txs[0]
+    assert tx.raw_type == "reward"
+    assert tx.amount == Decimal("0.00000588")
+    assert tx.fiat_value is None
+
+
+def test_interest_from_description(transactions: list[RawTransaction]) -> None:
+    """'Reward' with 'Interest payout' description → interest."""
+    txs = _find(transactions, "interest", "BTC")
+    assert len(txs) == 1
+    tx = txs[0]
+    assert tx.raw_type == "reward"
+    assert tx.amount == Decimal("0.0000001")
+    assert tx.fiat_value is None
 
 
 # ---------------------------------------------------------------------------

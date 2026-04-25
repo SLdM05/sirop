@@ -813,6 +813,31 @@ def read_per_wallet_holdings(conn: sqlite3.Connection, tax_year: int) -> list[Wa
     ]
 
 
+def read_all_wallet_names(conn: sqlite3.Connection, tax_year: int) -> list[str]:
+    """Return all wallet names that had any transaction in a tracked asset through year-end.
+
+    Used to fill in zero-balance wallet rows in the holdings table, so wallets that
+    spent or transferred all their holdings still appear in the summary with zero units.
+    """
+    year_end = f"{tax_year}-12-31"
+    rows = conn.execute(
+        """
+        SELECT DISTINCT COALESCE(w.name, t.source) AS wallet_name
+        FROM transactions t
+        LEFT JOIN wallets w ON t.wallet_id = w.id
+        WHERE t.timestamp <= ?
+          AND t.asset IN (
+            SELECT asset FROM acb_state
+            WHERE id IN (SELECT MAX(id) FROM acb_state GROUP BY asset)
+              AND CAST(units AS REAL) > 0
+          )
+        ORDER BY wallet_name
+        """,
+        (year_end,),
+    ).fetchall()
+    return [str(r["wallet_name"]) for r in rows]
+
+
 @dataclasses.dataclass(frozen=True)
 class ProvisionalEvent:
     """A provisional classified_event paired with its triggering graph-transfer context."""
@@ -823,9 +848,10 @@ class ProvisionalEvent:
     amount: Decimal
     cad_cost: Decimal | None
     wallet_name: str
-    withdrawal_id: int  # transactions.id of the withdrawal leg
+    withdrawal_id: int  # first (or only) withdrawal id — MIN(gtp.withdrawal_id)
     deposit_id: int  # transactions.id of the deposit leg (vtx_id of this event)
-    withdrawal_amount: Decimal
+    withdrawal_count: int  # number of matched withdrawals (>1 = consolidation)
+    withdrawal_amount: Decimal  # sum of all matched withdrawal amounts
     deposit_amount: Decimal
 
 
@@ -845,18 +871,21 @@ def read_provisional_events(conn: sqlite3.Connection) -> list[ProvisionalEvent]:
             ce.asset,
             ce.amount,
             ce.cad_cost,
-            COALESCE(w.name, ce.source) AS wallet_name,
-            gtp.withdrawal_id,
-            gtp.deposit_id,
-            t_out.amount AS withdrawal_amount,
-            t_in.amount  AS deposit_amount
+            COALESCE(w.name, ce.source)       AS wallet_name,
+            COUNT(DISTINCT gtp.withdrawal_id)  AS withdrawal_count,
+            MIN(gtp.withdrawal_id)             AS withdrawal_id,
+            ce.vtx_id                          AS deposit_id,
+            SUM(t_out.amount)                  AS withdrawal_amount,
+            t_in.amount                        AS deposit_amount
         FROM classified_events ce
-        LEFT JOIN wallets w ON ce.wallet_id = w.id
-        LEFT JOIN graph_transfer_pairs gtp ON gtp.deposit_id = ce.vtx_id
+        LEFT JOIN wallets w    ON w.id         = ce.wallet_id
+        LEFT JOIN graph_transfer_pairs gtp
+               ON gtp.deposit_id              = ce.vtx_id
         LEFT JOIN transactions t_out ON t_out.id = gtp.withdrawal_id
-        LEFT JOIN transactions t_in  ON t_in.id  = gtp.deposit_id
+        LEFT JOIN transactions t_in  ON t_in.id  = ce.vtx_id
         WHERE ce.is_provisional = 1
           AND ce.is_taxable = 1
+        GROUP BY ce.id
         ORDER BY ce.timestamp
         """
     ).fetchall()
@@ -871,6 +900,7 @@ def read_provisional_events(conn: sqlite3.Connection) -> list[ProvisionalEvent]:
             wallet_name=str(row["wallet_name"]),
             withdrawal_id=row["withdrawal_id"],
             deposit_id=row["deposit_id"],
+            withdrawal_count=int(row["withdrawal_count"]),
             withdrawal_amount=Decimal(row["withdrawal_amount"]),
             deposit_amount=Decimal(row["deposit_amount"]),
         )
@@ -1279,7 +1309,7 @@ def read_graph_transfer_pairs(conn: sqlite3.Connection) -> list[GraphMatch]:
         GraphMatch(
             deposit_db_id=int(row[1]),
             withdrawal_db_id=int(row[0]),
-            direction=cast(Literal["backward", "forward"], str(row[3])),
+            direction=cast("Literal['backward', 'forward']", str(row[3])),
             hops=int(row[2]),
             fee_crypto=Decimal(row[4]),
             deposit_vout_count=int(row[5]) if row[5] is not None else 0,

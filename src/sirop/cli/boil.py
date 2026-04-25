@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import yaml
+from rich.table import Table
 
 from sirop.config.settings import Settings, get_settings
 from sirop.db import repositories as repo
@@ -38,6 +39,7 @@ from sirop.node.privacy import is_private_node_url
 from sirop.normalizer import normalizer
 from sirop.transfer_match import matcher
 from sirop.utils.boc import BoCRateError, fill_rate_gaps, prefetch_rates
+from sirop.utils.console import out as _out
 from sirop.utils.crypto_prices import prefetch_crypto_prices
 from sirop.utils.logging import StageContext, get_logger
 from sirop.utils.messages import emit, spinner
@@ -194,7 +196,11 @@ def _execute_stage(  # noqa: PLR0913
             _run_verify(conn)
 
         elif stage == "transfer_match":
-            _run_transfer_match(conn, graph_traversal_allowed=graph_traversal_allowed)
+            _run_transfer_match(
+                conn,
+                graph_traversal_allowed=graph_traversal_allowed,
+                reward_treatment=tax_rules.reward_treatment,
+            )
 
         elif stage == "boil":
             _run_acb(conn, tax_rules)
@@ -393,7 +399,12 @@ def _resolve_graph_traversal_permission(
     return False
 
 
-def _run_transfer_match(conn: object, *, graph_traversal_allowed: bool = True) -> None:
+def _run_transfer_match(
+    conn: object,
+    *,
+    graph_traversal_allowed: bool = True,
+    reward_treatment: dict[str, str] | None = None,
+) -> None:
     assert isinstance(conn, sqlite3.Connection)
 
     tax_year = repo.read_tax_year(conn)
@@ -439,6 +450,7 @@ def _run_transfer_match(conn: object, *, graph_traversal_allowed: bool = True) -
             tax_year=tax_year,
             graph_traversal_allowed=graph_traversal_allowed,
             on_graph_progress=_graph_progress,
+            reward_treatment=reward_treatment,
         )
     repo.write_graph_transfer_pairs(conn, graph_matches)
 
@@ -472,6 +484,13 @@ def _run_transfer_match(conn: object, *, graph_traversal_allowed: bool = True) -
             count=future_sell_count,
             tax_year=tax_year,
         )
+
+    # Emit a single consolidated warning for discount-treated reward events.
+    _discount_subtypes = {k for k, v in (reward_treatment or {}).items() if v == "discount"}
+    if _discount_subtypes:
+        discount_count = sum(1 for tx in txs if tx.tx_type.value in _discount_subtypes)
+        if discount_count:
+            emit(MessageCode.BOIL_WARNING_REWARD_DISCOUNT, count=discount_count)
 
 
 def _run_acb(conn: object, tax_rules: TaxRules) -> None:
@@ -546,9 +565,11 @@ def _load_tax_rules() -> TaxRules:
     with _TAX_RULES_PATH.open(encoding="utf-8") as fh:
         raw = yaml.safe_load(fh)
 
+    reward_treatment: dict[str, str] = raw.get("reward_treatment") or {}
     return TaxRules(
         capital_gains_inclusion_rate=Decimal(str(raw["capital_gains_inclusion_rate"])),
         superficial_loss_window_days=int(raw["superficial_loss_window_days"]),
+        reward_treatment=reward_treatment,
     )
 
 
@@ -779,6 +800,30 @@ def _run_audit(conn: sqlite3.Connection, batch_name: str, settings: Settings) ->
     emit(MessageCode.BOIL_AUDIT_WRITTEN, path=out_path, count=len(out_rows))
 
 
+def _holdings_table(rows: list[tuple[str, str, float, float, float, bool]]) -> Table:
+    """Build a Rich Table for holdings rows.
+
+    Row tuple: (wallet, asset, units, pool_cost, per_unit, is_total).
+    """
+    table = Table(box=None, show_header=True, header_style="bold dim", pad_edge=False)
+    table.add_column("Wallet", no_wrap=True)
+    table.add_column("Asset", style="bold cyan", no_wrap=True)
+    table.add_column("Units", justify="right", no_wrap=True)
+    table.add_column("ACB Pool (CAD)", justify="right", style="yellow", no_wrap=True)
+    table.add_column("Per Unit (CAD)", justify="right", style="dim", no_wrap=True)
+    for wallet, asset, units, pool, per_unit, is_total in rows:
+        table.add_row(
+            wallet,
+            asset,
+            f"{units:.8f}",
+            f"{pool:,.2f}",
+            f"{per_unit:,.2f}",
+            style="bold" if is_total else None,
+            end_section=is_total,
+        )
+    return table
+
+
 def _print_income_and_costs(conn: sqlite3.Connection) -> None:
     """Print income and costs & expenses sections of the boil summary."""
     income_rows = conn.execute(
@@ -804,15 +849,22 @@ def _print_income_and_costs(conn: sqlite3.Connection) -> None:
         print(f"  Costs & expenses:      {float(costs_row[0]):>12,.2f} CAD")
 
 
-def _print_wallet_holdings(
+def _wallet_holding_rows(
     conn: sqlite3.Connection, per_unit_acb: dict[str, float], tax_year: int
-) -> None:
-    """Print year-end holdings broken down by wallet."""
-    per_wallet = repo.read_per_wallet_holdings(conn, tax_year)
+) -> list[tuple[str, str, float, float, float, bool]]:
+    """Return per-wallet holdings rows (wallet, asset, units, acb_pool, per_unit, is_total=False).
 
-    wallet_assets: dict[str, list[Any]] = {}
+    Every tracked asset is shown for every wallet that ever held it, even if the
+    year-end balance is zero.  External wallets (from ``stir external``) are included.
+    """
+    per_wallet = repo.read_per_wallet_holdings(conn, tax_year)
+    all_wallet_names = repo.read_all_wallet_names(conn, tax_year)
+    tracked_assets = sorted(per_unit_acb.keys())
+
+    # Build lookup: wallet_name -> asset -> net_units
+    holdings_map: dict[str, dict[str, float]] = {}
     for h in per_wallet:
-        wallet_assets.setdefault(h.wallet_name, []).append(h)
+        holdings_map.setdefault(h.wallet_name, {})[h.asset] = float(h.net_units)
 
     # External wallets — net units held in wallets flagged via `stir external`.
     # external-out: units left a tracked wallet → positive for the external wallet
@@ -842,26 +894,17 @@ def _print_wallet_holdings(
         """
     ).fetchall()
     for r in ext_rows:
-        wallet_assets.setdefault(r["wallet_name"], []).append(
-            repo.WalletHolding(
-                wallet_name=r["wallet_name"],
-                asset=r["asset"],
-                net_units=Decimal(str(r["net_units"])),
-            )
-        )
+        holdings_map.setdefault(r["wallet_name"], {})[r["asset"]] = float(r["net_units"])
+        if r["wallet_name"] not in all_wallet_names:
+            all_wallet_names.append(r["wallet_name"])
 
-    for wallet_name, rows in wallet_assets.items():
-        emit(MessageCode.BOIL_SUMMARY_WALLET_HEADER, name=wallet_name)
-        emit(MessageCode.BOIL_SUMMARY_HOLDINGS_HEADER)
-        for h in rows:
-            u = float(h.net_units)
-            acb_pu = per_unit_acb.get(h.asset, 0.0)
-            wallet_acb = u * acb_pu
-            print(
-                f"    {h.asset:<6} {u:>14.8f} units"
-                f"   ACB: {wallet_acb:>12,.2f} CAD"
-                f"   ({acb_pu:>12,.2f} CAD/unit)"
-            )
+    rows: list[tuple[str, str, float, float, float, bool]] = []
+    for wallet_name in sorted(all_wallet_names):
+        for asset in tracked_assets:
+            u = holdings_map.get(wallet_name, {}).get(asset, 0.0)
+            acb_pu = per_unit_acb.get(asset, 0.0)
+            rows.append((wallet_name, asset, u, u * acb_pu, acb_pu, False))
+    return rows
 
 
 def _print_summary(conn: object, batch_name: str) -> None:
@@ -901,21 +944,19 @@ def _print_summary(conn: object, batch_name: str) -> None:
         """
     ).fetchall()
     if holdings:
-        emit(MessageCode.BOIL_SUMMARY_HOLDINGS_HEADER)
+        _out.print("\n  [bold]Year-end holdings (cost basis)[/bold]")
         per_unit_acb: dict[str, float] = {}
+        total_rows: list[tuple[str, str, float, float, float, bool]] = []
         for h in holdings:
             units_val = float(h["units"])
             cost_val = float(h["pool_cost"])
             per_unit = cost_val / units_val if units_val else 0.0
             per_unit_acb[h["asset"]] = per_unit
-            print(
-                f"    {h['asset']:<6} {units_val:>14.8f} units"
-                f"   ACB: {cost_val:>12,.2f} CAD"
-                f"   ({per_unit:>12,.2f} CAD/unit)"
-            )
+            total_rows.append(("total", h["asset"], units_val, cost_val, per_unit, True))
 
         tax_year = repo.read_tax_year(conn)
-        _print_wallet_holdings(conn, per_unit_acb, tax_year)
+        wallet_rows = _wallet_holding_rows(conn, per_unit_acb, tax_year)
+        _out.print(_holdings_table(total_rows + wallet_rows))
 
     # Superficial losses — show details if any were found.
     sld_rows = conn.execute(

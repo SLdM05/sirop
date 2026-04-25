@@ -10,6 +10,10 @@ class TransactionType(StrEnum):
     DEPOSIT = "deposit"
     WITHDRAWAL = "withdrawal"
     INCOME = "income"
+    REWARD_SHAKE = "reward_shake"  # ShakingSats loyalty rewards
+    REWARD_SHAKESQUAD = "reward_shakesquad"  # Shakesquads referral/loyalty rewards
+    REWARD_CASHBACK = "reward_cashback"  # Shakepay Card cashback
+    INTEREST = "interest"  # Savings/lending interest income
     SPEND = "spend"
     FEE = "fee"
     FIAT_DEPOSIT = "fiat_deposit"

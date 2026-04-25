@@ -11,6 +11,7 @@ import dataclasses
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from unittest.mock import patch
 
 import pytest
 
@@ -26,6 +27,7 @@ from sirop.db.schema import create_tables, migrate_to_v5
 from sirop.models.enums import TransactionType
 from sirop.models.override import TransferOverride
 from sirop.models.transaction import Transaction
+from sirop.node.models import GraphMatch
 from sirop.transfer_match.matcher import match_transfers
 
 # ---------------------------------------------------------------------------
@@ -519,6 +521,36 @@ class TestMatcherNoOverrides:
         events, _, _ = match_transfers([out_tx, in_tx])
         transfers = [e for e in events if e.event_type == "transfer"]
         assert len(transfers) == 2  # noqa: PLR2004
+
+    def test_txid_match_wins_over_earlier_amount_time_candidate(self) -> None:
+        """Txid match must win even when an amount+time candidate appears first in the list.
+
+        Regression: the old single-pass loop would return the first match of any kind,
+        so an amount+time-matching candidate earlier in the list shadowed a txid-matching
+        candidate that appeared later.  The two-pass approach fixes this.
+        """
+        out_tx = _tx(1, TransactionType.WITHDRAWAL, txid="deadbeef", amount="0.01", cad_value="500")
+        # Candidate A: no txid but amount+time matches — appears first.
+        in_tx_amount_time = _tx(
+            2, TransactionType.DEPOSIT, txid=None, amount="0.01", offset_hours=1, cad_value="500"
+        )
+        # Candidate B: txid matches — appears second.
+        in_tx_txid = _tx(
+            3, TransactionType.DEPOSIT, txid="deadbeef", amount="0.01", cad_value="500"
+        )
+
+        events, _, _ = match_transfers([out_tx, in_tx_amount_time, in_tx_txid])
+
+        # The withdrawal should be paired with the txid candidate (id=3), not id=2.
+        # ClassifiedEvent.vtx_id == the originating Transaction.id.
+        transfer_events = [e for e in events if e.event_type == "transfer"]
+        paired_ids = {e.vtx_id for e in transfer_events}
+        withdrawal_id = 1
+        txid_deposit_id = 3
+        amount_time_deposit_id = 2
+        assert withdrawal_id in paired_ids  # withdrawal matched
+        assert txid_deposit_id in paired_ids  # txid deposit matched
+        assert amount_time_deposit_id not in paired_ids  # amount+time deposit NOT matched
 
     def test_empty_overrides_list(self) -> None:
         """Passing an empty list is equivalent to passing None."""
@@ -1043,3 +1075,128 @@ class TestBuildStateGraphPairsConsolidation:
         deposit_ids_in_graph = {m[1].id for m in state.graph_pairs}
         deposit_ids_in_auto = {m[1].id for m in state.auto_pairs}
         assert d.id not in deposit_ids_in_auto or d.id not in deposit_ids_in_graph
+
+
+# ---------------------------------------------------------------------------
+# Regression: provisional acquisition duplication in consolidation transfers
+# ---------------------------------------------------------------------------
+
+
+class TestProvisionalConsolidation:
+    """Consolidation (N withdrawals → 1 deposit) must produce ONE provisional event.
+
+    Prior to the fix, Pass 1b emitted a provisional ClassifiedEvent per
+    (withdrawal, deposit) pair, overcounting the surplus.  Additionally,
+    read_provisional_events() had a cartesian-product JOIN that multiplied
+    the displayed rows.
+    """
+
+    def test_consolidation_emits_one_provisional_event(self) -> None:
+        """Two withdrawals that graph-match one deposit → one provisional event."""
+        # deposit (0.00407682 BTC) > sum of both withdrawals (0.00381012 BTC)
+        # expected surplus = 0.00026670 BTC
+        withdrawal_9 = _tx(
+            9, TransactionType.WITHDRAWAL, amount="0.00083555", txid="a" * 64, cad_value="12.26"
+        )
+        withdrawal_12 = _tx(
+            12, TransactionType.WITHDRAWAL, amount="0.00297457", txid="b" * 64, cad_value="43.65"
+        )
+        deposit_16 = _tx(
+            16, TransactionType.DEPOSIT, amount="0.00407682", txid="c" * 64, cad_value="59.82"
+        )
+
+        fake_matches = [
+            GraphMatch(
+                deposit_db_id=16,
+                withdrawal_db_id=9,
+                direction="backward",
+                hops=1,
+                fee_crypto=Decimal("0"),
+            ),
+            GraphMatch(
+                deposit_db_id=16,
+                withdrawal_db_id=12,
+                direction="backward",
+                hops=1,
+                fee_crypto=Decimal("0"),
+            ),
+        ]
+
+        with patch(
+            "sirop.transfer_match.matcher.find_graph_matches",
+            return_value=fake_matches,
+        ):
+            events, _income, _pairs = match_transfers(
+                [withdrawal_9, withdrawal_12, deposit_16],
+                graph_traversal_allowed=True,
+            )
+
+        provisional = [e for e in events if e.is_provisional]
+        assert len(provisional) == 1, (
+            f"Expected 1 provisional event, got {len(provisional)}: "
+            f"{[(e.amount, e.vtx_id) for e in provisional]}"
+        )
+        expected_surplus = Decimal("0.00407682") - Decimal("0.00083555") - Decimal("0.00297457")
+        assert provisional[0].amount == expected_surplus
+        assert provisional[0].vtx_id == 16  # noqa: PLR2004
+
+    def test_read_provisional_events_no_cartesian_product(self) -> None:
+        """read_provisional_events returns one row per classified_event, not N x M."""
+        conn = _make_conn()
+        ts = _BASE_TS.isoformat()
+
+        # Insert transactions rows (graph_transfer_pairs.withdrawal_id/deposit_id → transactions).
+        _tx_insert = (
+            "INSERT INTO transactions (id, raw_id, timestamp, transaction_type, asset,"
+            " amount, cad_amount, cad_fee, cad_rate, source, is_transfer, notes)"
+            " VALUES (?,NULL,?,?,?,?,?,?,?,?,?,?)"
+        )
+
+        def _tx_row(tx_id: int, tx_type: str, amount: str, cad: str) -> tuple:  # type: ignore[type-arg]
+            return (tx_id, ts, tx_type, "BTC", amount, cad, "0", "0", "test", 0, "")
+
+        with conn:
+            conn.execute(_tx_insert, _tx_row(9, "withdrawal", "0.00083555", "0"))
+            conn.execute(_tx_insert, _tx_row(12, "withdrawal", "0.00297457", "0"))
+            conn.execute(_tx_insert, _tx_row(16, "deposit", "0.00407682", "60"))
+            # classified_events.vtx_id → verified_transactions(id).
+            conn.execute(
+                "INSERT INTO verified_transactions"
+                " (id, tx_id, timestamp, transaction_type, asset, amount,"
+                "  cad_amount, cad_fee, cad_rate, source, is_transfer)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (16, 16, ts, "deposit", "BTC", "0.00407682", "60", "0", "147000", "test", 0),
+            )
+            # One provisional classified_event (vtx_id = verified_transaction 16).
+            conn.execute(
+                "INSERT INTO classified_events"
+                " (id, vtx_id, timestamp, event_type, asset, amount,"
+                "  cad_proceeds, cad_cost, cad_fee, txid, source,"
+                "  is_taxable, is_provisional, wallet_id)"
+                " VALUES (?,?,?,?,?,?,NULL,?,NULL,NULL,?,1,1,NULL)",
+                (1, 16, ts, "buy", "BTC", "0.00026670", "3.91", "test"),
+            )
+            # Two graph_transfer_pairs rows — consolidation (both share deposit_id=16).
+            conn.execute(
+                "INSERT INTO graph_transfer_pairs"
+                " (withdrawal_id, deposit_id, hops, direction, fee_crypto,"
+                "  deposit_vout_count, deposit_vin_count)"
+                " VALUES (?,?,?,?,?,?,?)",
+                (9, 16, 1, "backward", "0", 1, 2),
+            )
+            conn.execute(
+                "INSERT INTO graph_transfer_pairs"
+                " (withdrawal_id, deposit_id, hops, direction, fee_crypto,"
+                "  deposit_vout_count, deposit_vin_count)"
+                " VALUES (?,?,?,?,?,?,?)",
+                (12, 16, 1, "backward", "0", 1, 2),
+            )
+
+        result = repo.read_provisional_events(conn)
+
+        assert (
+            len(result) == 1
+        ), f"Expected 1 provisional event row, got {len(result)} — cartesian product bug"
+        assert result[0].deposit_id == 16  # noqa: PLR2004
+        assert result[0].withdrawal_count == 2  # noqa: PLR2004
+        assert result[0].amount == Decimal("0.00026670")

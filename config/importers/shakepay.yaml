@@ -15,9 +15,11 @@ name: "Shakepay"
 #
 # Full column spec: docs/ref/transaction-import-formats.md §1
 date_column: "Date"
-# Shakepay timestamps: "2022-09-10T00:36:12+00" — the offset uses the bare
-# "+HH" form (hours only, no minutes).  Python's strptime %z does NOT accept
-# this form; only datetime.fromisoformat() handles it correctly (Python 3.11+).
+# Shakepay 2025 timestamps: "2025-03-17 09:47:31" — space-separated, no
+# timezone offset.  datetime.fromisoformat() accepts this form; the base
+# importer treats naive datetimes as UTC.  Pre-2025 exports used ISO 8601
+# with a bare "+HH" offset ("2022-09-10T00:36:12+00") — also accepted by
+# fromisoformat (Python 3.11+).
 date_format: "iso8601"
 columns:
   transaction_type: "Type"
@@ -50,12 +52,17 @@ transaction_type_map:
   "crypto purchase": "deposit"      # BTC received from external wallet
   "fiat funding": "fiat_deposit"    # CAD bank deposit — no tax event
   "fiat cashout": "fiat_withdrawal" # CAD withdrawal — no tax event
-  "shakingsats": "income"           # BTC rewards — income event; FMV = ACB (pre-2025 type name)
-  "reward": "income"                # BTC rewards — income event; FMV = ACB (2025 type name)
+  "shakingsats": "reward_shake"     # ShakingSats BTC loyalty reward (pre-2025 type name)
+  "reward": "reward_shake"          # ShakingSats BTC loyalty reward (2025 type name)
+  "shakesquads": "reward_shakesquad" # Shakesquads referral/loyalty program — separate from ShakingSats
+  "card_cashback": "reward_cashback" # Shakepay Card BTC cashback
+  # "interest" is NOT a distinct Shakepay Type value — interest payouts use Type="Reward"
+  # with a Description like "Interest payout on CAD balance".  The importer applies
+  # description_type_overrides below to sub-classify such rows as "interest".
   "buy": "buy"                      # 2025: credit-only BTC purchase; normalizer fetches BoC/CoinGecko rate for ACB
   "send": "withdrawal"              # 2025: crypto sent to external address
   "peer transfer": "other"          # Shakepay-to-Shakepay — no disposition
-  "other": "other"                  # Referral bonuses etc. — flag for review
+  "other": "other"                  # Flag for review
 # Unknown types must NOT crash the importer.  Log a warning and store the
 # record flagged for manual review (see parser implementation requirements).
 fee_model: "spread"  # fees are embedded in the buy/sell spread, not a separate column
@@ -78,3 +85,20 @@ fingerprint_columns:
   - "Buy / Sell Rate"
   - "Spot Rate"
   - "Market Value Currency"
+# Some Shakepay Type values (e.g. "Reward") cover multiple economic subtypes that
+# are distinguished only by the Description column.  Each entry below overrides
+# the canonical transaction_type when applies_to matches AND the Description
+# column contains pattern (case-insensitive substring match).
+# Entries are evaluated in order; the first match wins.
+description_type_overrides:
+  # All entries apply to "reward_shake" — the base mapping for Type="Reward".
+  # Evaluated in order; first match wins.
+  - applies_to: "reward_shake"    # "Bitcoin cashback" → Shakepay Card cashback
+    pattern: "cashback"
+    transaction_type: "reward_cashback"
+  - applies_to: "reward_shake"    # "ShakeSquad" → Shakesquads referral reward
+    pattern: "shakesquad"
+    transaction_type: "reward_shakesquad"
+  - applies_to: "reward_shake"    # "Interest payout on CAD balance" → savings interest
+    pattern: "interest"
+    transaction_type: "interest"

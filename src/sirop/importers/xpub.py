@@ -22,7 +22,7 @@ from sirop.models.messages import MessageCode
 from sirop.models.raw import RawTransaction
 from sirop.node.address_scanner import ScannedTx, scan_wallet
 from sirop.node.privacy import is_private_node_url
-from sirop.utils.messages import emit
+from sirop.utils.messages import emit, spinner
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +30,7 @@ _SATS_PER_BTC = Decimal("100000000")
 _DEFAULT_GAP_LIMIT = 20
 _MAX_GAP_LIMIT = 200
 _DEFAULT_BRANCHES = [0, 1]
+_VALID_SCRIPT_TYPES = {"p2wpkh", "p2sh-p2wpkh", "p2pkh"}
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,7 @@ class XpubWalletEntry:
     gap_limit: int = _DEFAULT_GAP_LIMIT
     branches: list[int] = field(default_factory=lambda: list(_DEFAULT_BRANCHES))
     label: str = ""
+    script_type: str | None = None  # overrides prefix-based encoding (e.g. p2wpkh for JoinMarket)
 
 
 class XpubImporter:
@@ -102,14 +104,23 @@ class XpubImporter:
                 branch_count=len(entry.branches),
                 gap_limit=entry.gap_limit,
             )
+            _spinner_text = f"Scanning {entry.name}…"
             try:
-                scanned = scan_wallet(
-                    mempool_url,
-                    entry.xpub,
-                    entry.branches,
-                    entry.gap_limit,
-                    request_delay,
-                )
+                with spinner(_spinner_text) as status:
+                    _name = entry.name
+
+                    def _on_progress(checked: int, found: int, *, _n: str = _name) -> None:
+                        status.update(f"Scanning {_n}… [{checked} addresses, {found} txs]")
+
+                    scanned = scan_wallet(
+                        mempool_url,
+                        entry.xpub,
+                        entry.branches,
+                        entry.gap_limit,
+                        request_delay,
+                        entry.script_type,
+                        on_progress=_on_progress,
+                    )
             except Exception as exc:
                 emit(
                     MessageCode.TAP_XPUB_ERROR_SCAN_FAILED,
@@ -150,8 +161,7 @@ class XpubImporter:
         wallets_raw = raw.get("wallets")
         if not isinstance(wallets_raw, list):
             raise ValueError(
-                f"xpub wallet-definition file {str(path)!r} must contain "
-                "a top-level 'wallets' list"
+                f"xpub wallet-definition file {str(path)!r} must contain a top-level 'wallets' list"
             )
 
         entries: list[XpubWalletEntry] = []
@@ -173,6 +183,15 @@ class XpubImporter:
                     f"max_gap_limit={self._max_gap_limit}"
                 )
             branches = [int(b) for b in item.get("branches", _DEFAULT_BRANCHES)]
+            script_type_raw = item.get("script_type")
+            if script_type_raw is not None:
+                script_type_raw = str(script_type_raw).lower()
+                if script_type_raw not in _VALID_SCRIPT_TYPES:
+                    raise ValueError(
+                        f"Wallet entry #{idx} in {str(path)!r}: "
+                        f"script_type={script_type_raw!r} — must be one of "
+                        f"{sorted(_VALID_SCRIPT_TYPES)}"
+                    )
             entries.append(
                 XpubWalletEntry(
                     name=str(name),
@@ -180,6 +199,7 @@ class XpubImporter:
                     gap_limit=gap_limit,
                     branches=branches,
                     label=str(item.get("label", "")),
+                    script_type=script_type_raw,
                 )
             )
         return entries
@@ -188,11 +208,11 @@ class XpubImporter:
     def _to_raw_transaction(scanned: ScannedTx) -> RawTransaction:
         amount_btc = Decimal(abs(scanned.net_sats)) / _SATS_PER_BTC
         fee_btc = Decimal(scanned.fee_sats) / _SATS_PER_BTC if scanned.fee_sats else None
-        ts = (
-            datetime.fromtimestamp(scanned.block_time, tz=UTC)
-            if scanned.block_time
-            else datetime.now(tz=UTC)
-        )
+        # Use the confirmed block_time when available.  For unconfirmed transactions
+        # (block_time == 0) use epoch as a stable sentinel rather than datetime.now()
+        # — using the current wall time here would make the dedup key non-deterministic,
+        # causing the same unconfirmed tx to be re-inserted on every re-tap.
+        ts = datetime.fromtimestamp(scanned.block_time, tz=UTC)
         tx_type = "deposit" if scanned.net_sats > 0 else "withdrawal"
 
         return RawTransaction(

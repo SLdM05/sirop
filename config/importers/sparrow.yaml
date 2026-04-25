@@ -44,7 +44,8 @@ known_column_patterns:
 #   3. If no decimal point anywhere → unit is satoshis. Parse as integer.
 #   4. Use Python Decimal for all BTC parsing. Never use float.
 #   5. After normalization, all internal values are stored as integer satoshis.
-amount_unit: auto_detect  # detect BTC vs satoshis from presence of decimal point
+amount_unit: auto_detect  # detect BTC vs satoshis from presence of decimal point or
+                          # locale decimal comma (e.g. "0,00005123" → BTC mode)
 amount_type: signed       # positive = received, negative = sent
 # --- Fee Availability ---
 # Fee is empty ("") for all received transactions (inputs are third-party UTXOs;

@@ -477,7 +477,7 @@ def _confirm_wallet_append(batch_name: str, settings: Settings, wallet_name: str
     return answer not in {"n", "no"}
 
 
-def _write_to_batch(  # noqa: PLR0913
+def _write_to_batch(  # noqa: PLR0912 PLR0913
     batch_name: str,
     settings: Settings,
     txs: list[RawTransaction],
@@ -519,29 +519,42 @@ def _write_to_batch(  # noqa: PLR0913
         #
         # 1. Within-file: some exchange exports contain repeated rows (e.g. a
         #    CSV exported across overlapping date ranges that was concatenated,
-        #    or a platform bug).  Caught by the `seen` set.
+        #    or a platform bug).  Caught by the `seen_*` sets.
         # 2. Cross-file: the same row already exists in raw_transactions from a
         #    previous tap of a different (or the same) file.  Caught by
-        #    `excluded_keys`, which is populated from the DB on append taps.
+        #    `excluded_*`, which is populated from the DB on append taps.
         #
-        # (source, raw_timestamp, asset, amount) is a natural unique key —
-        # no exchange produces two distinct transactions with identical values
-        # at the exact same second.
-        excluded_keys: set[tuple[str, str, str, str]] = set()
+        # Primary key strategy:
+        #   - When a txid is present (xpub, some CSV exports): use (txid, wallet_id).
+        #     This is stable across re-taps even for unconfirmed transactions, and
+        #     correctly scopes the check per-wallet so cross-wallet transfers (same
+        #     txid, different wallets, different net amounts) are never mis-deduplicated.
+        #   - When txid is absent (most CSV sources): fall back to
+        #     (source, raw_timestamp, asset, amount) — the classic fingerprint.
+        excluded_txid: set[tuple[str, int]] = set()  # (txid, wallet_id)
+        excluded_fp: set[tuple[str, str, str, str]] = set()  # (source, ts, asset, amount)
         if is_append:
-            excluded_keys = {
-                (row[0], row[1], row[2], row[3])
-                for row in conn.execute(
-                    "SELECT source, raw_timestamp, asset, amount FROM raw_transactions"
-                ).fetchall()
-            }
-        seen: set[tuple[str, str, str, str]] = set()
+            for row in conn.execute(
+                "SELECT source, raw_timestamp, asset, amount, txid, wallet_id FROM raw_transactions"
+            ).fetchall():
+                if row[4] is not None:
+                    excluded_txid.add((row[4], row[5]))
+                else:
+                    excluded_fp.add((row[0], row[1], row[2], row[3]))
+        seen_txid: set[tuple[str, int]] = set()
+        seen_fp: set[tuple[str, str, str, str]] = set()
         new_txs: list[RawTransaction] = []
         for tx in txs:
-            key = (tx.source, tx.timestamp.isoformat(), tx.asset, format(tx.amount, "f"))
-            if key not in excluded_keys and key not in seen:
-                seen.add(key)
-                new_txs.append(tx)
+            if tx.txid is not None:
+                tkey = (tx.txid, wallet.id)
+                if tkey not in excluded_txid and tkey not in seen_txid:
+                    seen_txid.add(tkey)
+                    new_txs.append(tx)
+            else:
+                fpkey = (tx.source, tx.timestamp.isoformat(), tx.asset, format(tx.amount, "f"))
+                if fpkey not in excluded_fp and fpkey not in seen_fp:
+                    seen_fp.add(fpkey)
+                    new_txs.append(tx)
         skipped = len(txs) - len(new_txs)
         txs = new_txs
 

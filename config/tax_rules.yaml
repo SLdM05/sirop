@@ -4,6 +4,17 @@ superficial_loss_window_days: 30
 loss_carry_back_years: 3
 record_retention_years: 6
 
+# Reward tax treatment: "discount" (ACB=$0, not income) or "income" (FMV as ACB, taxable).
+# Shakepay's help centre states rewards are "not taxable at receipt"; CRA's position on
+# personal credit card cashback supports the discount analogy.  No CRA ruling exists
+# specifically for crypto rewards — users may override these defaults per their situation.
+# Any reward subtype not listed here defaults to "income" (conservative fallback).
+reward_treatment:
+  reward_shake: discount      # ShakingSats — loyalty engagement rewards
+  reward_shakesquad: discount # Shakesquads referral/loyalty rewards
+  reward_cashback: discount   # Shakepay Card BTC cashback — direct credit card analogy
+  interest: income            # Savings/lending interest — taxable income at FMV
+
 federal:
   schedule_3_crypto_line: 10
   t1_taxable_gains_line: 12700

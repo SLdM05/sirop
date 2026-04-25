@@ -45,6 +45,7 @@ Design notes
 
 from __future__ import annotations
 
+from collections import defaultdict
 from datetime import timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING
@@ -87,15 +88,25 @@ _INCOMING = frozenset({TransactionType.DEPOSIT, TransactionType.TRANSFER_IN})
 _FIAT = frozenset({TransactionType.FIAT_DEPOSIT, TransactionType.FIAT_WITHDRAWAL})
 
 # Income types that generate both a ClassifiedEvent (acquisition) and an IncomeEvent.
-_INCOME_TYPES = frozenset({TransactionType.INCOME})
+# Reward subtypes are also income-like — treatment (income vs discount) is config-driven.
+_INCOME_TYPES = frozenset(
+    {
+        TransactionType.INCOME,
+        TransactionType.INTEREST,
+        TransactionType.REWARD_SHAKE,
+        TransactionType.REWARD_SHAKESQUAD,
+        TransactionType.REWARD_CASHBACK,
+    }
+)
 
 
-def match_transfers(  # noqa: PLR0912 PLR0915
+def match_transfers(  # noqa: PLR0912 PLR0913 PLR0915
     txs: list[Transaction],
     overrides: list[TransferOverride] | None = None,
     tax_year: int | None = None,
     graph_traversal_allowed: bool = True,
     on_graph_progress: Callable[[int, int, int, int], None] | None = None,
+    reward_treatment: dict[str, str] | None = None,
 ) -> tuple[list[ClassifiedEvent], list[IncomeEvent], list[GraphMatch]]:
     """Classify *txs* into taxable events and income sub-records.
 
@@ -453,7 +464,6 @@ def match_transfers(  # noqa: PLR0912 PLR0915
                     fee=format(gm.fee_crypto, "f"),
                 )
                 withdrawal_tx = tx_by_id[gm.withdrawal_db_id]
-                deposit_tx = tx_by_id[gm.deposit_db_id]
                 # Emit fee micro-disposal — same pattern as Pass 1.
                 if gm.fee_crypto > Decimal("0") and withdrawal_tx.cad_value > Decimal("0"):
                     cad_rate = (
@@ -478,12 +488,22 @@ def match_transfers(  # noqa: PLR0912 PLR0915
                             wallet_id=withdrawal_tx.wallet_id,
                         )
                     )
-                # If deposit > withdrawal, the surplus BTC entered the tracked wallet
-                # from an intermediate untracked source.  Emit a provisional buy so the
-                # ACB pool records a cost basis for it.  The user can resolve this by
-                # adding the intermediate wallet via `sirop tap` and re-running boil —
-                # the event will then be reclassified as a transfer.
-                surplus = deposit_tx.amount - withdrawal_tx.amount
+
+            # If deposit > sum(all matched withdrawals), the surplus BTC entered the
+            # tracked wallet from intermediate untracked sources.  Emit ONE provisional
+            # buy per deposit group so the ACB pool records a cost basis for it.
+            # Grouping is critical for consolidation (N withdrawals → 1 deposit): each
+            # withdrawal pair must not produce its own event, or the surplus is
+            # overcounted.  The user can resolve this by adding the intermediate wallet
+            # via `sirop tap` and re-running boil — the event will be reclassified.
+            by_deposit: dict[int, list[GraphMatch]] = defaultdict(list)
+            for gm in graph_matches:
+                by_deposit[gm.deposit_db_id].append(gm)
+
+            for deposit_db_id, matches in by_deposit.items():
+                deposit_tx = tx_by_id[deposit_db_id]
+                total_withdrawal = sum(tx_by_id[gm.withdrawal_db_id].amount for gm in matches)
+                surplus = deposit_tx.amount - total_withdrawal
                 if surplus > Decimal("0") and deposit_tx.cad_value > Decimal("0"):
                     dep_cad_rate = (
                         deposit_tx.cad_value / deposit_tx.amount
@@ -538,7 +558,7 @@ def match_transfers(  # noqa: PLR0912 PLR0915
             )
             continue
 
-        evt, income = _classify(tx, tax_year)
+        evt, income = _classify(tx, tax_year, reward_treatment or {})
         if evt is not None:
             events.append(evt)
         if income is not None:
@@ -602,58 +622,64 @@ def _find_match(
 ) -> Transaction | None:
     """Search *all_txs* for a deposit that matches *outgoing*.
 
-    Match criteria (in priority order):
-    1. Same non-null txid.
-    2. Same asset, amount within tolerance, timestamp within window.
+    Two-pass search ordered by certainty:
+    1. Txid match (definitive) — all candidates scanned before falling back.
+    2. Amount + timestamp proximity (probabilistic) — only if no txid match found.
 
     Pairs in *forced_unlink_pairs* are never returned regardless of match signals.
     """
-    window = timedelta(hours=MATCH_WINDOW_HOURS)
-    window_start = outgoing.timestamp - window
-    window_end = outgoing.timestamp + window
     _unlinks = forced_unlink_pairs or set()
 
-    for candidate in all_txs:
+    def _is_eligible(candidate: Transaction) -> bool:
         if candidate.id == outgoing.id:
-            continue
+            return False
         if candidate.id in already_paired:
-            continue
+            return False
         if candidate.tx_type not in _INCOMING:
-            continue
+            return False
         if candidate.asset != outgoing.asset:
-            continue
-
-        # Respect forced unlinks.
+            return False
         if (outgoing.id, candidate.id) in _unlinks:
             logger.debug(
                 "transfer_match: skipping forced-unlinked pair (%d ↔ %d)",
                 outgoing.id,
                 candidate.id,
             )
+            return False
+        return True
+
+    # Pass A: txid match — definitive.
+    # Scan all candidates before falling back so a txid match later in the list
+    # is never shadowed by a probabilistic match earlier in the list.
+    if outgoing.txid:
+        for candidate in all_txs:
+            if not _is_eligible(candidate):
+                continue
+            if candidate.txid and outgoing.txid == candidate.txid:
+                logger.debug(
+                    "transfer_match: txid match for %s %s",
+                    outgoing.asset,
+                    outgoing.txid,
+                )
+                return candidate
+
+    # Pass B: amount + timestamp proximity — probabilistic.
+    # Used for sources with no blockchain txid (e.g. NDAX withdrawals).
+    # TODO: tag these matches with match_confidence="amount_time" and
+    # surface them to the user for confirmation (see module docstring).
+    window = timedelta(hours=MATCH_WINDOW_HOURS)
+    window_start = outgoing.timestamp - window
+    window_end = outgoing.timestamp + window
+    expected_deposit = outgoing.amount - (outgoing.fee_crypto or Decimal("0"))
+    tolerance = max(
+        expected_deposit * FEE_TOLERANCE_RELATIVE,
+        FEE_TOLERANCE_ABSOLUTE,
+    )
+    for candidate in all_txs:
+        if not _is_eligible(candidate):
             continue
-
-        # Txid match — definitive.
-        if outgoing.txid and candidate.txid and outgoing.txid == candidate.txid:
-            logger.debug(
-                "transfer_match: txid match for %s %s",
-                outgoing.asset,
-                outgoing.txid,
-            )
-            return candidate
-
-        # Amount + timestamp proximity match — probabilistic.
-        # Used for sources with no blockchain txid (e.g. NDAX withdrawals).
-        # TODO: tag these matches with match_confidence="amount_time" and
-        # surface them to the user for confirmation (see module docstring).
         if not (window_start <= candidate.timestamp <= window_end):
             continue
-
-        # The deposit amount should ≈ withdrawal amount minus fee.
-        expected_deposit = outgoing.amount - (outgoing.fee_crypto or Decimal("0"))
-        tolerance = max(
-            expected_deposit * FEE_TOLERANCE_RELATIVE,
-            FEE_TOLERANCE_ABSOLUTE,
-        )
         if abs(candidate.amount - expected_deposit) <= tolerance:
             logger.debug(
                 "transfer_match: amount+time match for %s on %s from %s"
@@ -669,7 +695,9 @@ def _find_match(
 
 
 def _classify(
-    tx: Transaction, tax_year: int | None = None
+    tx: Transaction,
+    tax_year: int | None = None,
+    reward_treatment: dict[str, str] | None = None,
 ) -> tuple[ClassifiedEvent | None, IncomeEvent | None]:
     """Convert a single ``Transaction`` to a ``ClassifiedEvent`` (and optionally
     an ``IncomeEvent`` for income transactions).
@@ -678,9 +706,9 @@ def _classify(
     """
     tx_type = tx.tx_type
 
-    # Income (staking / airdrop / mining) — returns both event and income sub-record.
+    # Income / reward types — treatment (income vs discount) is config-driven.
     if tx_type in _INCOME_TYPES:
-        return _classify_income(tx)
+        return _classify_income(tx, reward_treatment or {})
 
     # Acquisition types: buy, trade, and unmatched deposit.
     if tx_type in {TransactionType.BUY, TransactionType.TRADE, TransactionType.DEPOSIT}:
@@ -790,9 +818,21 @@ def _classify_disposal(tx: Transaction, tax_year: int | None = None) -> Classifi
     )
 
 
-def _classify_income(tx: Transaction) -> tuple[ClassifiedEvent, IncomeEvent]:
-    """Build a (ClassifiedEvent, IncomeEvent) pair for income transactions."""
-    income_type = _infer_income_type(tx)
+def _classify_income(
+    tx: Transaction,
+    reward_treatment: dict[str, str],
+) -> tuple[ClassifiedEvent, IncomeEvent | None]:
+    """Build a ``(ClassifiedEvent, IncomeEvent | None)`` pair for income/reward transactions.
+
+    Treatment is determined by *reward_treatment* keyed on ``tx.tx_type.value``:
+
+    - ``"income"`` (default): FMV at receipt establishes ACB; ``IncomeEvent`` created.
+    - ``"discount"``: ACB contribution is $0 (purchase-discount analogy); no
+      ``IncomeEvent`` — the BTC enters the pool but is not recognised as income.
+    """
+    treatment = reward_treatment.get(tx.tx_type.value, "income")
+    is_discount = treatment == "discount"
+
     evt = ClassifiedEvent(
         id=0,
         vtx_id=tx.id,
@@ -801,20 +841,23 @@ def _classify_income(tx: Transaction) -> tuple[ClassifiedEvent, IncomeEvent]:
         asset=tx.asset,
         amount=tx.amount,
         cad_proceeds=None,
-        cad_cost=tx.cad_value,  # FMV at receipt establishes ACB
+        cad_cost=Decimal("0") if is_discount else tx.cad_value,
         cad_fee=None,
         txid=tx.txid,
         source=tx.source,
         is_taxable=True,
         wallet_id=tx.wallet_id,
     )
+    if is_discount:
+        return evt, None
+
     income = IncomeEvent(
         id=0,
         vtx_id=tx.id,
         timestamp=tx.timestamp,
         asset=tx.asset,
         units=tx.amount,
-        income_type=income_type,
+        income_type=_infer_income_type(tx),
         fmv_cad=tx.cad_value,
         source=tx.source,
     )

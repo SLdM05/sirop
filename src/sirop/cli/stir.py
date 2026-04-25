@@ -92,13 +92,28 @@ _COINJOIN_TX_THRESHOLD = 5
 # Minimum output count on the deposit tx to suspect a purchase+change scenario.
 _PURCHASE_CHANGE_VOUT_MIN = 2
 
+# Transaction type color semantics (must match tui-design-guidelines.md §Transaction types):
+#   red    — disposals: value leaving the taxable pool (sell / withdrawal / spend)
+#   green  — paid acquisitions: acquired for CAD/fiat consideration (buy / deposit)
+#   yellow — discount acquisitions: received for free, ACB = $0 (reward_shake/squad/cashback)
+#   blue   — income acquisitions: received as taxable income at FMV (income / interest)
+#   cyan   — exchange: one crypto swapped for another (trade)
+#   dim    — non-events: fiat movements and unclassified rows (no crypto tax impact)
 _TYPE_STYLE: dict[TransactionType, str] = {
-    TransactionType.WITHDRAWAL: "red",
     TransactionType.SELL: "red",
+    TransactionType.WITHDRAWAL: "red",
     TransactionType.SPEND: "red",
-    TransactionType.DEPOSIT: "green",
     TransactionType.BUY: "green",
+    TransactionType.DEPOSIT: "green",
+    TransactionType.REWARD_SHAKE: "yellow",
+    TransactionType.REWARD_SHAKESQUAD: "yellow",
+    TransactionType.REWARD_CASHBACK: "yellow",
+    TransactionType.INCOME: "blue",
+    TransactionType.INTEREST: "blue",
     TransactionType.TRADE: "cyan",
+    TransactionType.FIAT_DEPOSIT: "dim",
+    TransactionType.FIAT_WITHDRAWAL: "dim",
+    TransactionType.OTHER: "dim",
 }
 
 # Transaction types that need transfer-match resolution when unmatched.
@@ -781,13 +796,25 @@ def _print_state(  # noqa: PLR0912 PLR0913 PLR0915
                     f"  [yellow]{pv.asset}  {float(pv.amount):.8f} units{cad_str}[/yellow]"
                     f"  [{pv.wallet_name}]  {pv.timestamp[:10]}"
                 )
-                out.print(
-                    f"       [dim]Withdrawal id:{pv.withdrawal_id}"
-                    f" ({float(pv.withdrawal_amount):.8f} {pv.asset})"
-                    f" → Deposit id:{pv.deposit_id}"
-                    f" ({float(pv.deposit_amount):.8f} {pv.asset})"
-                    f" — surplus {float(pv.amount):.8f} {pv.asset} treated as provisional buy[/dim]"
+                _surplus_label = (
+                    f" — surplus {float(pv.amount):.8f} {pv.asset} treated as provisional buy"
                 )
+                if pv.withdrawal_count > 1:
+                    out.print(
+                        f"       [dim]{pv.withdrawal_count} withdrawals"
+                        f" (total {float(pv.withdrawal_amount):.8f} {pv.asset})"
+                        f" → Deposit id:{pv.deposit_id}"
+                        f" ({float(pv.deposit_amount):.8f} {pv.asset})"
+                        f"{_surplus_label}[/dim]"
+                    )
+                else:
+                    out.print(
+                        f"       [dim]Withdrawal id:{pv.withdrawal_id}"
+                        f" ({float(pv.withdrawal_amount):.8f} {pv.asset})"
+                        f" → Deposit id:{pv.deposit_id}"
+                        f" ({float(pv.deposit_amount):.8f} {pv.asset})"
+                        f"{_surplus_label}[/dim]"
+                    )
                 out.print(
                     "       [dim]If you own the intermediate wallet, add it with"
                     " [bold]sirop tap[/bold] and re-run boil — it will be reclassified"
@@ -1154,9 +1181,7 @@ def _cmd_destination(  # noqa: PLR0911
         return
 
     ts = tx.timestamp.strftime("%Y-%m-%d %H:%M UTC")
-    out.print(
-        f"Transaction {tx_id} — {tx.source} {tx.tx_type.value}" f"  BTC {tx.amount:.8f}  {ts}"
-    )
+    out.print(f"Transaction {tx_id} — {tx.source} {tx.tx_type.value}  BTC {tx.amount:.8f}  {ts}")
     out.print("Paste the on-chain txid (64 lowercase hex characters):")
     try:
         raw = input("> ").strip().lower()
