@@ -1,3 +1,11 @@
+---
+verified-at: b5e6b66
+tracks:
+  - src/sirop/cli/pour.py
+  - src/sirop/__main__.py
+  - src/sirop/reports
+---
+
 # sirop pour — Tax Report Generator
 
 `sirop pour` reads the computed results from the active batch and writes two

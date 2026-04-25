@@ -1,3 +1,10 @@
+---
+verified-at: b5e6b66
+tracks:
+  - src/sirop/cli/stir.py
+  - src/sirop/__main__.py
+---
+
 # sirop stir — Review and Override Transfer Matching
 
 ## What `stir` does
@@ -29,7 +36,7 @@ they persist through every subsequent re-run.
 
 ```
 sirop stir [--list]
-sirop stir --link <id1> <id2> [--fee AMOUNT]
+sirop stir --link <id1> <id2>
 sirop stir --unlink <id1> <id2>
 sirop stir --clear <id>
 ```
@@ -40,8 +47,7 @@ sirop stir --clear <id>
 |----------|-------------|
 | *(no flags)* | Launch the interactive REPL |
 | `--list` | Print current transfer state and active overrides, then exit |
-| `--link <id1> <id2>` | Force-link two transactions as a transfer pair |
-| `--fee AMOUNT` | With `--link`: implied on-chain fee (sent minus received, in asset units). Emitted as a `fee_disposal` event at boil time. |
+| `--link <id1> <id2>` | Force-link two transactions as a transfer pair. The implied on-chain fee is auto-computed as `sent - received` in the asset's units; if non-zero it is emitted as a `fee_disposal` event at boil time. There is no user-supplied fee flag — if you need to override the computed value, edit the row in `transfer_overrides` directly or use the interactive wizard. |
 | `--unlink <id1> <id2>` | Prevent the auto-matcher from pairing these two transactions |
 | `--clear <id>` | Remove all overrides that involve this transaction ID |
 
@@ -187,13 +193,13 @@ timestamps are too far apart for auto-matching).
 sirop stir --link 41 87
 ```
 
-If the sent amount differs from the received amount (on-chain fee deducted),
-pass `--fee` with the difference in asset units:
+The implied fee is auto-computed from the two transactions as
+`sent - received` in the asset's units. For the example below:
 
 ```bash
 # Sent 0.10 BTC from NDAX, received 0.09997000 BTC in Sparrow
-# On-chain fee = 0.00003000 BTC
-sirop stir --link 41 87 --fee 0.00003000
+# sirop computes the implied fee as 0.00003000 BTC automatically.
+sirop stir --link 41 87
 ```
 
 The implied fee becomes a `fee_disposal` event at `boil` time — a micro-

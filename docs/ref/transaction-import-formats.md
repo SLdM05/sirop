@@ -1,3 +1,10 @@
+---
+verified-at: b5e6b66
+tracks:
+  - src/sirop/importers
+  - config/importers
+---
+
 # Exchange & Wallet Export Format Specifications
 
 **Document purpose:** Defines the schemas for each data source sirop can import. Claude Code must implement importers that conform exactly to these specifications. Do not infer column semantics from column names alone — read the notes for each field carefully.

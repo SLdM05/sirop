@@ -1,3 +1,10 @@
+---
+verified-at: b5e6b66
+tracks:
+  - src/sirop/tui
+notes: TUI implementation does not exist yet; doc is a forward-looking design blueprint.
+---
+
 # TUI Design Guidelines
 
 ## Design Philosophy

@@ -1,3 +1,11 @@
+---
+verified-at: b5e6b66
+tracks:
+  - src/sirop/db/schema.py
+  - src/sirop/db/connection.py
+  - src/sirop/db/repositories.py
+---
+
 # sirop Database Schema
 
 Each `.sirop` file is a SQLite database representing **one batch** — one
@@ -45,7 +53,7 @@ open and refuses to process a file whose version does not match the current
 `SCHEMA_VERSION` constant in `db/schema.py`. Bump `SCHEMA_VERSION` whenever
 the schema changes.
 
-Current version: **10**
+Current version: **11**
 
 ---
 
@@ -90,11 +98,11 @@ pending ──► running ──► done
 
 Pipeline stages in execution order:
 
-| Stage | CLI verb |
+| Stage | Run by |
 |---|---|
 | `tap` | `sirop tap` |
 | `normalize` | `sirop boil` |
-| `verify` | `sirop verify` |
+| `verify` | `sirop boil` (node verification runs as part of the boil pipeline; there is no standalone `sirop verify` command today) |
 | `transfer_match` | `sirop boil` |
 | `boil` | `sirop boil` |
 | `superficial_loss` | `sirop boil` |
@@ -364,7 +372,8 @@ classified_events (
     txid            TEXT,
     source          TEXT    NOT NULL,   -- origin exchange/wallet for traceability
     is_taxable      INTEGER NOT NULL DEFAULT 1,  -- 0=transfer excluded from ACB engine
-    wallet_id       INTEGER REFERENCES wallets(id)  -- v7: source wallet FK
+    wallet_id       INTEGER REFERENCES wallets(id),  -- v7: source wallet FK
+    is_provisional  INTEGER NOT NULL DEFAULT 0   -- v11: 1=synthetic event for graph-pair delta
 )
 ```
 
@@ -784,3 +793,4 @@ that need a batch (and weren't given one explicitly) read this file first.
 | 8 | New table: `graph_transfer_pairs` — persists BTC graph-traversal matched pairs (withdrawal_id, deposit_id, hops, direction, fee_crypto) from the transfer_match stage so `sirop stir` can display them without re-running traversal. |
 | 9 | `raw_transactions.notes` — label/annotation field (e.g. Sparrow "Label" column, Shakepay recipient address when Description contains an address instead of a txid). `graph_transfer_pairs`: added `deposit_vout_count` and `deposit_vin_count` for CoinJoin and purchase+change pattern detection in `sirop stir`. |
 | 10 | New table: `transaction_txid_overrides` — stores user-supplied blockchain txids (via `sirop stir destination <id>`) for BTC transactions whose CSV did not include a txid (e.g. NDAX withdrawals). Applied in-memory by `boil --from transfer_match` before Pass 1 exact-txid matching; also applied by `sirop stir` so destination-matched pairs are visible without re-running boil. |
+| 11 | `classified_events.is_provisional` — integer flag (default 0) marking synthetic events that represent a delta from on-chain graph-pair traversal (e.g. a provisional fee_disposal injected when `graph_transfer_pairs` links a withdrawal to a deposit whose txid differs). `migrate_to_v11()` adds the column idempotently to existing files. |
