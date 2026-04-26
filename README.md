@@ -1,5 +1,16 @@
 # sirop
 
+[![version](https://img.shields.io/badge/version-0.3.3-orange)](https://github.com/SLdM05/sirop/releases)
+[![python](https://img.shields.io/badge/python-3.12%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![license](https://img.shields.io/github/license/SLdM05/sirop)](LICENSE)
+[![Poetry](https://img.shields.io/endpoint?url=https://python-poetry.org/badge/v0.json)](https://python-poetry.org/)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+[![mypy](https://img.shields.io/badge/type--checked-mypy-2A6DB2)](https://mypy-lang.org/)
+[![privacy](https://img.shields.io/badge/privacy-offline--first-brightgreen)](#why-sirop-exists)
+[![tax year](https://img.shields.io/badge/tax_year-Canada_2025-FF0000)](#)
+[![Bitcoin](https://img.shields.io/badge/Bitcoin-only-F7931A?logo=bitcoin&logoColor=white)](https://bitcoin.org)
+[![self-sovereign](https://img.shields.io/badge/self--sovereign-no_third_parties-F7931A?logo=bitcoin&logoColor=white)](#why-sirop-exists)
+
 Canadian bitcoin tax calculator. Computes capital gains, ACB, and
 superficial losses from exchange and wallet exports. Produces Schedule 3, Schedule G,
 and the Quebec TP-21.4.39-V form as Markdown reports.
