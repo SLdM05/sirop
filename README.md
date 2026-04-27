@@ -6,7 +6,7 @@
 [![privacy](https://img.shields.io/badge/privacy-offline--first-brightgreen)](#why-sirop-exists)
 [![tax year](https://img.shields.io/badge/tax_year-Canada_2025-FF0000)](#)
 [![Bitcoin](https://img.shields.io/badge/Bitcoin-only-F7931A?logo=bitcoin&logoColor=white)](https://bitcoin.org)
-[![self-sovereign](https://img.shields.io/badge/self--sovereign-no_third_parties-F7931A?logo=bitcoin&logoColor=white)](#why-sirop-exists)
+[![built with Claude Code](https://img.shields.io/badge/built_with-Claude_Code-blueviolet?logo=anthropic&logoColor=white)](https://claude.ai/code)
 
 Canadian bitcoin tax calculator. Computes capital gains, ACB, and
 superficial losses from exchange and wallet exports. Produces Schedule 3, Schedule G,
@@ -132,7 +132,7 @@ privacy rule (no real transaction data anywhere in the repo).
 ## Support
 
 sirop is free and open source. If it saved you some time (or some money with the taxman),
-consider sending a few sats — coffee for the dev, or tokens to keep the AI tools running.
+consider sending a few sats — coffee for the dev, or Claude credits to keep the lights on.
 
 ⚡ `searingfog878@walletofsatoshi.com`
 
