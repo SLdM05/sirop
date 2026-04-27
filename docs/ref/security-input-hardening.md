@@ -1,3 +1,12 @@
+---
+verified-at: b5e6b66
+tracks:
+  - src/sirop/db/connection.py
+  - src/sirop/importers/base.py
+  - src/sirop/utils/logging.py
+  - src/sirop/cli/stir.py
+---
+
 # sirop — Security Input Hardening Rules
 
 This document records the security invariants established during the 2025-02
