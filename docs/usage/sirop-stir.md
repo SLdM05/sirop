@@ -39,6 +39,11 @@ sirop stir [--list]
 sirop stir --link <id1> <id2>
 sirop stir --unlink <id1> <id2>
 sirop stir --clear <id>
+
+sirop stir --list-adjustments
+sirop stir --adjust-acquire <ASSET> <UNITS> <CAD> <DATE> --reason "..."
+sirop stir --adjust-dispose <ASSET> <UNITS> <CAD> <DATE> --reason "..."
+sirop stir --clear-adjustment <ADJ_ID>
 ```
 
 ### Arguments
@@ -56,6 +61,31 @@ no non-interactive flag equivalent). See [Interactive mode](#interactive-mode) b
 
 Transaction IDs (`id1`, `id2`, `id`) are the `id` values from the `transactions`
 table — shown in `stir --list` output and in the interactive display.
+
+### Manual reconciliation adjustments
+
+When the imported transaction history is incomplete and the calculated ACB
+pool does not match your real wallet/exchange balance, record a synthetic
+acquisition or disposition to close the gap.  Every adjustment requires a
+`--reason` and writes a permanent `audit_log` entry.
+
+| Argument | Description |
+|----------|-------------|
+| `--list-adjustments` | Print all manual reconciliation adjustments and exit |
+| `--adjust-acquire ASSET UNITS CAD DATE` | Record a synthetic acquisition (adds units + cost basis to the ACB pool). Requires `--reason`. |
+| `--adjust-dispose ASSET UNITS CAD DATE` | Record a synthetic disposition (removes units, generates a gain/loss row). Requires `--reason`. |
+| `--reason TEXT` | CRA-defensible justification for the adjustment. Mandatory; rejected if blank. |
+| `--clear-adjustment ADJ_ID` | Remove a manual adjustment by its `adj_id`. Writes a second `audit_log` row recording the removal — the original create entry is never deleted. |
+
+`DATE` accepts `YYYY-MM-DD` or full ISO 8601 with offset (`YYYY-MM-DDTHH:MM:SSZ`).
+
+After adding or removing an adjustment, re-run `sirop boil --from transfer_match`
+to apply the change.
+
+Manual entries are flagged in every `pour` report (Schedule 3 dispositions,
+TP-21.4.39-V Part 3 acquisitions, and a dedicated "Manual Reconciliation
+Entries" section).  See `docs/ref/reconciliation-and-missing-data.md` for the
+CRA framing and a worked example.
 
 ---
 

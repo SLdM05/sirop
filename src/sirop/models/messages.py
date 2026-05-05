@@ -80,6 +80,7 @@ class MessageCode(StrEnum):
     BOIL_GRAPH_PRIVACY_WARNING = "boil.graph.privacy_warning"
     BOIL_GRAPH_PRIVACY_SKIPPED = "boil.graph.privacy_skipped"
     BOIL_WARNING_REWARD_DISCOUNT = "boil.warning.reward_discount"
+    BOIL_MANUAL_ADJUSTMENTS_APPLIED = "boil.manual_adjustments_applied"
 
     # ── stir ──────────────────────────────────────────────────────────────────
     STIR_ERROR_NOT_NORMALIZED = "stir.error.not_normalized"
@@ -92,6 +93,14 @@ class MessageCode(StrEnum):
     STIR_ERROR_DESTINATION_NOT_BTC = "stir.error.destination_not_btc"
     STIR_ERROR_DESTINATION_HAS_TXID = "stir.error.destination_has_txid"
     STIR_ERROR_DESTINATION_INVALID_TXID = "stir.error.destination_invalid_txid"
+    STIR_ADJUST_APPLIED = "stir.adjust_applied"
+    STIR_ADJUST_CLEARED = "stir.adjust_cleared"
+    STIR_ERROR_ADJUST_REASON_REQUIRED = "stir.error.adjust_reason_required"
+    STIR_ERROR_ADJUST_INVALID_KIND = "stir.error.adjust_invalid_kind"
+    STIR_ERROR_ADJUST_INVALID_AMOUNT = "stir.error.adjust_invalid_amount"
+    STIR_ERROR_ADJUST_INVALID_DATE = "stir.error.adjust_invalid_date"
+    STIR_ERROR_ADJUST_INVALID_ASSET = "stir.error.adjust_invalid_asset"
+    STIR_ERROR_ADJUST_NOT_FOUND = "stir.error.adjust_not_found"
 
     # ── list ──────────────────────────────────────────────────────────────────
     LIST_NO_BATCHES = "list.no_batches"

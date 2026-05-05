@@ -16,7 +16,7 @@ class ClassifiedEvent:
     """
 
     id: int  # matches classified_events.id (0 pre-insert)
-    vtx_id: int  # FK → verified_transactions.id
+    vtx_id: int | None  # FK → verified_transactions.id (None for synthetic manual entries)
     timestamp: datetime
     event_type: str  # 'buy' | 'sell' | 'fee_disposal' | 'income' | 'other'
     asset: str  # e.g. "BTC"

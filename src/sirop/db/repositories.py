@@ -24,6 +24,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Literal, cast
 
+from sirop.models.adjustment import ManualAdjustment
 from sirop.models.disposition import ACBState, AdjustedDisposition, Disposition, IncomeEvent
 from sirop.models.enums import TransactionType
 from sirop.models.event import ClassifiedEvent
@@ -1364,3 +1365,231 @@ def delete_transaction_txid_override(conn: sqlite3.Connection, transaction_id: i
             "DELETE FROM transaction_txid_overrides WHERE transaction_id = ?",
             (transaction_id,),
         )
+
+
+# ---------------------------------------------------------------------------
+# Manual adjustments  (v12)
+# ---------------------------------------------------------------------------
+
+
+def write_manual_adjustment(  # noqa: PLR0913
+    conn: sqlite3.Connection,
+    *,
+    kind: Literal["acquire", "dispose"],
+    asset: str,
+    units: Decimal,
+    cad_value: Decimal,
+    timestamp: datetime,
+    reason: str,
+    note: str = "",
+) -> ManualAdjustment:
+    """Persist a manual reconciliation adjustment and return it with a DB ID.
+
+    The caller is responsible for validating *reason* is non-empty, *units* and
+    *cad_value* are positive Decimals, *timestamp* is timezone-aware, and *kind*
+    is one of ``'acquire'``/``'dispose'``.  This function does not validate —
+    the CLI layer rejects bad input via ``MessageCode.STIR_ERROR_*`` codes
+    before calling here.
+    """
+    now = datetime.now(tz=UTC)
+    with conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO manual_adjustments
+                (kind, asset, units, cad_value, timestamp, reason, created_at, note)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                kind,
+                asset,
+                format(units, "f"),
+                format(cad_value, "f"),
+                timestamp.isoformat(),
+                reason,
+                now.isoformat(),
+                note,
+            ),
+        )
+    return ManualAdjustment(
+        id=cursor.lastrowid or 0,
+        kind=kind,
+        asset=asset,
+        units=units,
+        cad_value=cad_value,
+        timestamp=timestamp,
+        reason=reason,
+        created_at=now,
+        note=note,
+    )
+
+
+def read_manual_adjustments(conn: sqlite3.Connection) -> list[ManualAdjustment]:
+    """Return all manual adjustments ordered by attributed timestamp.
+
+    Returns an empty list when the table is absent (pre-v12 batch opened
+    before migration).
+    """
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, kind, asset, units, cad_value, timestamp, reason,
+                   created_at, note
+            FROM manual_adjustments
+            ORDER BY timestamp, id
+            """
+        ).fetchall()
+    except Exception:
+        return []
+
+    return [
+        ManualAdjustment(
+            id=row["id"],
+            kind=cast("Literal['acquire', 'dispose']", row["kind"]),
+            asset=row["asset"],
+            units=Decimal(row["units"]),
+            cad_value=Decimal(row["cad_value"]),
+            timestamp=datetime.fromisoformat(row["timestamp"]),
+            reason=row["reason"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            note=row["note"] or "",
+        )
+        for row in rows
+    ]
+
+
+def delete_manual_adjustment(
+    conn: sqlite3.Connection, adjustment_id: int
+) -> ManualAdjustment | None:
+    """Delete a single manual adjustment by ID and return what was removed.
+
+    Returns ``None`` if no row matched.  The caller is responsible for writing
+    a corresponding ``audit_log`` entry recording the removal.
+    """
+    rows = conn.execute(
+        """
+        SELECT id, kind, asset, units, cad_value, timestamp, reason,
+               created_at, note
+        FROM manual_adjustments WHERE id = ?
+        """,
+        (adjustment_id,),
+    ).fetchall()
+    if not rows:
+        return None
+    row = rows[0]
+    removed = ManualAdjustment(
+        id=row["id"],
+        kind=cast("Literal['acquire', 'dispose']", row["kind"]),
+        asset=row["asset"],
+        units=Decimal(row["units"]),
+        cad_value=Decimal(row["cad_value"]),
+        timestamp=datetime.fromisoformat(row["timestamp"]),
+        reason=row["reason"],
+        created_at=datetime.fromisoformat(row["created_at"]),
+        note=row["note"] or "",
+    )
+    with conn:
+        conn.execute("DELETE FROM manual_adjustments WHERE id = ?", (adjustment_id,))
+    return removed
+
+
+# ---------------------------------------------------------------------------
+# Audit log
+# ---------------------------------------------------------------------------
+
+
+def write_audit_log(  # noqa: PLR0913
+    conn: sqlite3.Connection,
+    *,
+    stage: str,
+    field: str,
+    reason: str,
+    txid: str | None = None,
+    old_value: str | None = None,
+    new_value: str | None = None,
+) -> int:
+    """Append a row to ``audit_log`` and return its DB-assigned ID.
+
+    Audit log rows are append-only: never updated, never deleted.  This is the
+    permanent paper trail used to defend manual adjustments under CRA audit.
+
+    Use a single short string for *stage* (e.g. ``'manual_adjust'``,
+    ``'manual_adjust_clear'``) so the table can be filtered by event class.
+    """
+    now = datetime.now(tz=UTC).isoformat()
+    with conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO audit_log
+                (occurred_at, stage, txid, field, old_value, new_value, reason)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (now, stage, txid, field, old_value, new_value, reason),
+        )
+    return cursor.lastrowid or 0
+
+
+def read_audit_log(conn: sqlite3.Connection) -> list[dict[str, str | None]]:
+    """Return all audit log rows ordered by occurrence time.
+
+    Returns rows as plain dicts (not a dataclass) since the table is a
+    free-form audit trail rather than a typed pipeline artefact.
+    """
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, occurred_at, stage, txid, field, old_value, new_value, reason
+            FROM audit_log
+            ORDER BY occurred_at, id
+            """
+        ).fetchall()
+    except Exception:
+        return []
+    return [
+        {
+            "id": str(row["id"]),
+            "occurred_at": row["occurred_at"],
+            "stage": row["stage"],
+            "txid": row["txid"],
+            "field": row["field"],
+            "old_value": row["old_value"],
+            "new_value": row["new_value"],
+            "reason": row["reason"],
+        }
+        for row in rows
+    ]
+
+
+def read_manual_adjustment_event_ids(conn: sqlite3.Connection) -> set[int]:
+    """Return the set of ``classified_events.id`` rows that came from a manual adjustment.
+
+    Used by ``pour`` to flag manually-derived rows in the report.  Manual
+    classified events are written by the transfer_match stage with
+    ``source='manual'``.
+    """
+    try:
+        rows = conn.execute("SELECT id FROM classified_events WHERE source = 'manual'").fetchall()
+    except Exception:
+        return set()
+    return {int(row["id"]) for row in rows}
+
+
+def read_manual_disposition_ids(conn: sqlite3.Connection) -> set[int]:
+    """Return ``dispositions_adjusted.id`` values whose source event is manual.
+
+    The chain is ``dispositions_adjusted.disposition_id -> dispositions.event_id
+    -> classified_events.id`` filtered to ``source='manual'``.  Returns an
+    empty set if the upstream tables are missing.
+    """
+    try:
+        rows = conn.execute(
+            """
+            SELECT da.id
+            FROM dispositions_adjusted da
+            JOIN dispositions d ON d.id = da.disposition_id
+            JOIN classified_events ce ON ce.id = d.event_id
+            WHERE ce.source = 'manual'
+            """
+        ).fetchall()
+    except Exception:
+        return set()
+    return {int(row["id"]) for row in rows}

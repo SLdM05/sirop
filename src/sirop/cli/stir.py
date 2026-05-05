@@ -54,9 +54,9 @@ from __future__ import annotations
 
 import dataclasses
 import re
-from datetime import timedelta
-from decimal import Decimal
-from typing import TYPE_CHECKING
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal, InvalidOperation
+from typing import TYPE_CHECKING, Literal
 
 from rich.table import Table
 from rich.text import Text
@@ -80,6 +80,7 @@ from sirop.utils.messages import emit
 if TYPE_CHECKING:
     import sqlite3
 
+    from sirop.models.adjustment import ManualAdjustment
     from sirop.models.override import TransferOverride
     from sirop.models.transaction import Transaction
     from sirop.models.wallet import Wallet
@@ -164,12 +165,17 @@ class _StirError(Exception):
 # ---------------------------------------------------------------------------
 
 
-def handle_stir(
+def handle_stir(  # noqa: PLR0913
     list_only: bool = False,
     link: tuple[int, int] | None = None,
     unlink: tuple[int, int] | None = None,
     clear: int | None = None,
     settings: Settings | None = None,
+    adjust_acquire: tuple[str, ...] | None = None,
+    adjust_dispose: tuple[str, ...] | None = None,
+    reason: str | None = None,
+    clear_adjustment: int | None = None,
+    list_adjustments: bool = False,
 ) -> int:
     """Review and edit transfer pair assignments for the active batch.
 
@@ -185,12 +191,35 @@ def handle_stir(
         If given, clear all overrides for this transaction ID and exit.
     settings:
         Application settings; resolved from the environment if omitted.
+    adjust_acquire:
+        4-tuple ``(asset, units, cad_value, date)`` recording a manual
+        reconciliation acquisition.  Requires *reason*.
+    adjust_dispose:
+        4-tuple ``(asset, units, cad_value, date)`` recording a manual
+        reconciliation disposition.  Requires *reason*.
+    reason:
+        CRA-defensible justification for a manual adjustment.  Mandatory
+        whenever *adjust_acquire* or *adjust_dispose* is provided.
+    clear_adjustment:
+        Manual adjustment ID to remove.  An ``audit_log`` row recording the
+        removal is always written, even when the adjustment row is gone.
+    list_adjustments:
+        Print all manual reconciliation adjustments and exit.
     """
     if settings is None:
         settings = get_settings()
     try:
         return _run_stir(
-            list_only=list_only, link=link, unlink=unlink, clear=clear, settings=settings
+            list_only=list_only,
+            link=link,
+            unlink=unlink,
+            clear=clear,
+            settings=settings,
+            adjust_acquire=adjust_acquire,
+            adjust_dispose=adjust_dispose,
+            reason=reason,
+            clear_adjustment=clear_adjustment,
+            list_adjustments=list_adjustments,
         )
     except _StirError as exc:
         emit(exc.msg_code, **exc.msg_kwargs)
@@ -202,13 +231,18 @@ def handle_stir(
 # ---------------------------------------------------------------------------
 
 
-def _run_stir(
+def _run_stir(  # noqa: PLR0911 PLR0912 PLR0913
     *,
     list_only: bool,
     link: tuple[int, int] | None,
     unlink: tuple[int, int] | None,
     clear: int | None,
     settings: Settings,
+    adjust_acquire: tuple[str, ...] | None = None,
+    adjust_dispose: tuple[str, ...] | None = None,
+    reason: str | None = None,
+    clear_adjustment: int | None = None,
+    list_adjustments: bool = False,
 ) -> int:
     batch_name = get_active_batch_name(settings)
     if batch_name is None:
@@ -216,6 +250,18 @@ def _run_stir(
 
     conn = open_batch(batch_name, settings)
     try:
+        # Manual adjustment commands do NOT require normalize to have run —
+        # the user may want to add reconciliation entries before tapping any
+        # CSVs (e.g. starting from a known year-opening balance).
+        if list_adjustments:
+            return _print_adjustments(conn)
+        if adjust_acquire is not None:
+            return _apply_adjust(conn, "acquire", adjust_acquire, reason)
+        if adjust_dispose is not None:
+            return _apply_adjust(conn, "dispose", adjust_dispose, reason)
+        if clear_adjustment is not None:
+            return _apply_clear_adjustment(conn, clear_adjustment)
+
         normalize_status = repo.get_stage_status(conn, "normalize")
         if normalize_status != "done":
             raise _StirError(MessageCode.STIR_ERROR_NOT_NORMALIZED, name=batch_name)
@@ -236,6 +282,7 @@ def _run_stir(
         txs = _apply_txid_overrides(conn, txs)
         wallets = repo.read_wallets(conn)
         overrides = repo.read_transfer_overrides(conn)
+        adjustments = repo.read_manual_adjustments(conn)
 
         # Load graph-traversal pairs from the last boil run (empty if not yet run).
         graph_pairs = _load_graph_pairs(conn, txs)
@@ -244,9 +291,13 @@ def _run_stir(
             _print_state(
                 batch_name, txs, state, overrides, wallets, repo.read_provisional_events(conn)
             )
+            if adjustments:
+                _print_adjustments_section(adjustments)
             return 0
 
         _print_unmatched(batch_name, txs, state, wallets, tax_year)
+        if adjustments:
+            _print_adjustments_section(adjustments)
         return _interactive_loop(conn, txs, wallets, overrides, state, batch_name, tax_year)
 
     finally:
@@ -1010,6 +1061,11 @@ def _print_help() -> None:
     out.print("  destination <id>    Add the on-chain txid for a BTC transaction whose CSV")
     out.print("                      did not include one (e.g. NDAX withdrawals).")
     out.print("                      After setting, run: sirop boil --from transfer_match")
+    out.print("  adjust              Record a manual reconciliation entry (acquire or dispose)")
+    out.print("                      to align sirop's pool with your real wallet balance when")
+    out.print("                      records are incomplete. Reason is mandatory.")
+    out.print("  adjustments         List all manual reconciliation adjustments.")
+    out.print("  clear-adjustment <adj_id>  Remove a manual adjustment by its id.")
     out.print("  list                Refresh unmatched transactions.")
     out.print("  view                Open full state in pager (all sections).")
     out.print("  help                Show this help.")
@@ -1516,4 +1572,262 @@ def _interactive_loop(  # noqa: PLR0912 PLR0913 PLR0915
             state = _build_state(txs, overrides, graph_pairs=_load_graph_pairs(conn, txs))
             continue
 
+        if cmd in {"adjust", "adjustment"}:
+            _cmd_adjust(conn)
+            continue
+
+        if cmd in {"adjustments", "adj-list", "list-adjustments"}:
+            _print_adjustments_section(repo.read_manual_adjustments(conn))
+            continue
+
+        if cmd in {"unadjust", "clear-adjust", "clear-adjustment"}:
+            _cmd_clear_adjustment(conn, parts)
+            continue
+
         out.print(f"Unknown command: {cmd!r}. Type 'help' for available commands.")
+
+
+# ---------------------------------------------------------------------------
+# Manual adjustment helpers
+# ---------------------------------------------------------------------------
+
+
+_ASSET_RE: re.Pattern[str] = re.compile(r"^[A-Z0-9]{1,10}$")
+
+
+def _parse_iso_date(raw: str) -> datetime | None:
+    """Accept ``YYYY-MM-DD`` or full ISO 8601 with offset; return UTC datetime or None."""
+    raw = raw.strip()
+    if not raw:
+        return None
+    # Allow trailing 'Z' for UTC.
+    candidate = raw.replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(candidate)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        # Date-only or naive: treat as midnight UTC.
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
+
+
+def _parse_positive_decimal(raw: str) -> Decimal | None:
+    """Return a positive Decimal, or None if not parseable / not positive."""
+    try:
+        value = Decimal(raw.strip())
+    except (InvalidOperation, AttributeError):
+        return None
+    if value <= Decimal("0"):
+        return None
+    return value
+
+
+def _validate_adjustment_inputs(
+    asset_raw: str,
+    units_raw: str,
+    cad_raw: str,
+    date_raw: str,
+    reason: str | None,
+) -> tuple[str, Decimal, Decimal, datetime]:
+    """Validate raw user inputs, raising _StirError on any issue.
+
+    Returns ``(asset, units, cad_value, timestamp)`` on success — always a
+    tuple, never None.  Failures raise ``_StirError`` so the caller never sees
+    a partial result.
+    """
+    if not reason or not reason.strip():
+        raise _StirError(MessageCode.STIR_ERROR_ADJUST_REASON_REQUIRED)
+
+    asset = asset_raw.strip().upper()
+    if not _ASSET_RE.fullmatch(asset):
+        raise _StirError(MessageCode.STIR_ERROR_ADJUST_INVALID_ASSET, value=asset_raw)
+
+    units = _parse_positive_decimal(units_raw)
+    if units is None:
+        raise _StirError(
+            MessageCode.STIR_ERROR_ADJUST_INVALID_AMOUNT, field="units", value=units_raw
+        )
+
+    cad_value = _parse_positive_decimal(cad_raw)
+    if cad_value is None:
+        raise _StirError(
+            MessageCode.STIR_ERROR_ADJUST_INVALID_AMOUNT, field="CAD value", value=cad_raw
+        )
+
+    timestamp = _parse_iso_date(date_raw)
+    if timestamp is None:
+        raise _StirError(MessageCode.STIR_ERROR_ADJUST_INVALID_DATE, value=date_raw)
+
+    return asset, units, cad_value, timestamp
+
+
+def _apply_adjust(
+    conn: sqlite3.Connection,
+    kind: Literal["acquire", "dispose"],
+    args: tuple[str, ...],
+    reason: str | None,
+) -> int:
+    """Persist a manual adjustment plus an audit_log row recording it."""
+    if len(args) != 4:  # noqa: PLR2004
+        # argparse already enforces nargs=4; this is a defence-in-depth.
+        raise _StirError(MessageCode.STIR_ERROR_ADJUST_INVALID_KIND, kind=kind)
+    asset_raw, units_raw, cad_raw, date_raw = args
+
+    asset, units, cad_value, timestamp = _validate_adjustment_inputs(
+        asset_raw, units_raw, cad_raw, date_raw, reason
+    )
+
+    adj = repo.write_manual_adjustment(
+        conn,
+        kind=kind,
+        asset=asset,
+        units=units,
+        cad_value=cad_value,
+        timestamp=timestamp,
+        reason=(reason or "").strip(),
+    )
+    new_value = (
+        f"{kind}:{format(units, 'f')} {asset} @ {format(cad_value, 'f')} CAD"
+        f" on {timestamp.date().isoformat()} (adj_id={adj.id})"
+    )
+    repo.write_audit_log(
+        conn,
+        stage="manual_adjust",
+        field=f"acb_pool:{asset}",
+        old_value=None,
+        new_value=new_value,
+        reason=adj.reason,
+    )
+    emit(
+        MessageCode.STIR_ADJUST_APPLIED,
+        kind=kind,
+        units=format(units, "f"),
+        asset=asset,
+        cad_value=format(cad_value, "f"),
+        date=timestamp.date().isoformat(),
+        adj_id=adj.id,
+    )
+    return 0
+
+
+def _apply_clear_adjustment(conn: sqlite3.Connection, adjustment_id: int) -> int:
+    """Remove a manual adjustment and write an audit_log entry recording the removal."""
+    removed = repo.delete_manual_adjustment(conn, adjustment_id)
+    if removed is None:
+        raise _StirError(MessageCode.STIR_ERROR_ADJUST_NOT_FOUND, adj_id=adjustment_id)
+    old_value = (
+        f"{removed.kind}:{format(removed.units, 'f')} {removed.asset}"
+        f" @ {format(removed.cad_value, 'f')} CAD"
+        f" on {removed.timestamp.date().isoformat()} (adj_id={removed.id})"
+    )
+    repo.write_audit_log(
+        conn,
+        stage="manual_adjust_clear",
+        field=f"acb_pool:{removed.asset}",
+        old_value=old_value,
+        new_value=None,
+        reason=f"User-initiated removal of manual adjustment id:{removed.id}",
+    )
+    emit(
+        MessageCode.STIR_ADJUST_CLEARED,
+        adj_id=removed.id,
+        kind=removed.kind,
+        units=format(removed.units, "f"),
+        asset=removed.asset,
+    )
+    return 0
+
+
+def _print_adjustments(conn: sqlite3.Connection) -> int:
+    """List all manual adjustments and exit (used by --list-adjustments)."""
+    adjustments = repo.read_manual_adjustments(conn)
+    _print_adjustments_section(adjustments)
+    return 0
+
+
+def _print_adjustments_section(adjustments: list[ManualAdjustment]) -> None:
+    """Print the manual adjustments section.  No-op when none exist."""
+    if not adjustments:
+        out.print("Manual reconciliation adjustments: [dim](none)[/dim]")
+        out.print()
+        return
+
+    out.rule(f"Manual reconciliation adjustments ({len(adjustments)})", style="yellow")
+    for adj in adjustments:
+        sign = "+" if adj.kind == "acquire" else "-"
+        out.print(
+            f"  adj:{adj.id:<3}  {adj.timestamp.date().isoformat()}  "
+            f"{sign}{adj.units:>14.8f} {adj.asset}  "
+            f"CAD {float(adj.cad_value):>10,.2f}  "
+            f"({adj.kind})"
+        )
+        out.print(f"           [dim]reason:[/dim] {adj.reason}")
+    out.print()
+    out.print(
+        "  [dim]Manual entries are reasonable-basis reconciliation under CRA"
+        " record-keeping rules. Keep your supporting paperwork outside sirop.[/dim]"
+    )
+    out.print()
+
+
+def _cmd_adjust(conn: sqlite3.Connection) -> None:
+    """Interactive REPL wizard for adding a manual reconciliation adjustment."""
+    out.print()
+    out.print("  Manual reconciliation adjustment wizard")
+    out.print("  [dim]Use this when your real wallet/exchange balance does not match")
+    out.print("  what sirop calculated, and the gap cannot be closed by importing")
+    out.print("  more CSVs or fixing transfers via 'transfer'.[/dim]")
+    out.print()
+
+    try:
+        kind_raw = input("  Kind — [a]cquire (add units) or [d]ispose (remove units): ")
+    except (EOFError, KeyboardInterrupt):
+        out.print()
+        out.print("  Cancelled.")
+        return
+    k = kind_raw.strip().lower()
+    if k in {"a", "acquire", "buy", "+"}:
+        kind: Literal["acquire", "dispose"] = "acquire"
+    elif k in {"d", "dispose", "sell", "-"}:
+        kind = "dispose"
+    else:
+        out.print(f"  Invalid kind: {kind_raw!r}. Cancelled.")
+        return
+
+    asset_raw = input("  Asset (e.g. BTC): ")
+    units_raw = input("  Units: ")
+    cad_raw = input("  CAD cost basis: ") if kind == "acquire" else input("  CAD proceeds: ")
+    date_raw = input("  Date (YYYY-MM-DD): ")
+
+    out.print()
+    out.print("  [bold]Reason — required.[/bold]")
+    out.print(
+        "  [dim]This is your CRA-defensible justification. Be specific:"
+        " what evidence supports this number? Bank statements? Exchange screenshots?"
+        " Email confirmations? Where did you record them?[/dim]"
+    )
+    reason_raw = input("  Reason: ")
+
+    try:
+        _apply_adjust(conn, kind, (asset_raw, units_raw, cad_raw, date_raw), reason_raw)
+    except _StirError as exc:
+        # In the interactive loop we want to surface the error and continue,
+        # not abort the whole stir session.
+        emit(exc.msg_code, **exc.msg_kwargs)
+
+
+def _cmd_clear_adjustment(conn: sqlite3.Connection, parts: list[str]) -> None:
+    """REPL handler for ``clear-adjustment <id>``."""
+    if len(parts) != _ONE_ARG_PARTS:
+        out.print("Usage: clear-adjustment <adj_id>")
+        return
+    try:
+        adj_id = int(parts[1])
+    except ValueError:
+        out.print("Adjustment id must be an integer.")
+        return
+    try:
+        _apply_clear_adjustment(conn, adj_id)
+    except _StirError as exc:
+        emit(exc.msg_code, **exc.msg_kwargs)

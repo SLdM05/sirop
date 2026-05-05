@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 if TYPE_CHECKING:
+    from sirop.models.adjustment import ManualAdjustment
     from sirop.models.disposition import ACBState, AdjustedDisposition, IncomeEvent
     from sirop.models.event import ClassifiedEvent
 
@@ -45,8 +46,10 @@ def _date_str(ts: datetime) -> str:
 def _build_dispositions_table(
     dispositions: list[AdjustedDisposition],
     tax_year: int,
+    manual_disposition_ids: set[int] | None = None,
 ) -> str:
     lines: list[str] = []
+    manual_ids = manual_disposition_ids or set()
 
     if not dispositions:
         lines.append(f"*No dispositions recorded for {tax_year}.*")
@@ -65,7 +68,12 @@ def _build_dispositions_table(
 
     sorted_disp = sorted(dispositions, key=lambda d: (d.timestamp, d.id))
     for d in sorted_disp:
-        note = "⚠ Superficial loss" if d.is_superficial_loss else ""
+        note_parts: list[str] = []
+        if d.is_superficial_loss:
+            note_parts.append("⚠ Superficial loss")
+        if d.id in manual_ids:
+            note_parts.append("⚠ Manual reconciliation entry")
+        note = "<br>".join(note_parts)
         lines.append(
             f"| {_date_str(d.timestamp)} "
             f"| {d.asset} "
@@ -153,27 +161,34 @@ def _build_superficial_losses_section(
 def _build_tp_part3_acquisitions(
     acquisitions: list[ClassifiedEvent],
     tax_year: int,
+    manual_event_ids: set[int] | None = None,
 ) -> str:
     eligible = [e for e in acquisitions if e.event_type in ("buy", "income", "other")]
+    manual_ids = manual_event_ids or set()
 
     if not eligible:
         return f"*No acquisitions recorded for {tax_year}.*"
 
-    # Group by asset
+    # Group by asset; track which assets received any manual contribution.
     asset_units: dict[str, Decimal] = {}
     asset_cost: dict[str, Decimal] = {}
+    asset_has_manual: set[str] = set()
     for e in eligible:
         asset_units[e.asset] = asset_units.get(e.asset, Decimal("0")) + e.amount
         cost = (e.cad_cost or Decimal("0")) + (e.cad_fee or Decimal("0"))
         asset_cost[e.asset] = asset_cost.get(e.asset, Decimal("0")) + cost
+        if e.id in manual_ids:
+            asset_has_manual.add(e.asset)
 
     lines = [
-        "| Asset | Total Units Acquired | Total Cost (CAD) |",
-        "|-------|---------------------|-----------------|",
+        "| Asset | Total Units Acquired | Total Cost (CAD) | Note |",
+        "|-------|---------------------|-----------------|------|",
     ]
     for asset in sorted(asset_units.keys()):
+        note = "⚠ includes manual reconciliation entry" if asset in asset_has_manual else ""
         lines.append(
-            f"| {asset} | {_fmt_units(asset_units[asset])} | {_fmt_cad(asset_cost[asset])} |"
+            f"| {asset} | {_fmt_units(asset_units[asset])} | {_fmt_cad(asset_cost[asset])} "
+            f"| {note} |"
         )
 
     return "\n".join(lines)
@@ -329,6 +344,31 @@ def _build_schedule_g_summary(
 # ---------------------------------------------------------------------------
 
 
+def _build_manual_adjustments_section(adjustments: list[ManualAdjustment]) -> str:
+    """Markdown section listing every manual reconciliation entry with its reason.
+
+    Returns an empty string when none exist so the caller can omit the section.
+    """
+    if not adjustments:
+        return ""
+
+    lines = [
+        "| Date | Kind | Asset | Units | CAD Value | Reason |",
+        "|------|------|-------|-------|----------:|--------|",
+    ]
+    for adj in sorted(adjustments, key=lambda a: (a.timestamp, a.id)):
+        lines.append(
+            f"| {adj.timestamp.date().isoformat()} "
+            f"| {adj.kind} "
+            f"| {adj.asset} "
+            f"| {_fmt_units(adj.units)} "
+            f"| {_fmt_cad(adj.cad_value)} "
+            f"| {adj.reason} |"
+        )
+
+    return "\n".join(lines)
+
+
 def build_report(  # noqa: PLR0913 PLR0915
     dispositions: list[AdjustedDisposition],
     income_events: list[IncomeEvent],
@@ -338,6 +378,9 @@ def build_report(  # noqa: PLR0913 PLR0915
     inclusion_rate: Decimal,
     batch_name: str,
     sirop_version: str,
+    manual_disposition_ids: set[int] | None = None,
+    manual_event_ids: set[int] | None = None,
+    manual_adjustments: list[ManualAdjustment] | None = None,
 ) -> str:
     """Build the filing summary Markdown report.
 
@@ -402,11 +445,27 @@ def build_report(  # noqa: PLR0913 PLR0915
     sections.append("")
     sections.append("### Dispositions")
     sections.append("")
-    sections.append(_build_dispositions_table(dispositions, tax_year))
+    sections.append(_build_dispositions_table(dispositions, tax_year, manual_disposition_ids))
     sections.append("")
     sections.append("### Summary")
     sections.append("")
     sections.append(_build_summary_table(dispositions, inclusion_rate))
+
+    # Manual reconciliation adjustments — visible disclosure of any user-injected
+    # synthetic events so an accountant or auditor can identify them at a glance.
+    manual_section = _build_manual_adjustments_section(manual_adjustments or [])
+    if manual_section:
+        sections.append("")
+        sections.append("### Manual Reconciliation Entries")
+        sections.append("")
+        sections.append(
+            "> The following entries were added manually to reconcile sirop's calculated"
+            " ACB pool with the user's actual wallet balance, where transaction history"
+            " was incomplete. Each entry is a reasonable-basis estimate under CRA"
+            " record-keeping rules; the supporting paperwork is kept outside sirop."
+        )
+        sections.append("")
+        sections.append(manual_section)
 
     sections.append("")
     sections.append("---")
@@ -421,7 +480,7 @@ def build_report(  # noqa: PLR0913 PLR0915
     sections.append("")
     sections.append("### TP-21.4.39-V \u2014 Part 3: Acquisitions During the Year")
     sections.append("")
-    sections.append(_build_tp_part3_acquisitions(acquisitions, tax_year))
+    sections.append(_build_tp_part3_acquisitions(acquisitions, tax_year, manual_event_ids))
 
     # Part 4: Dispositions by asset
     sections.append("")
@@ -495,6 +554,7 @@ def build_detail_report(  # noqa: PLR0913
     tax_year: int,
     batch_name: str,
     sirop_version: str,
+    manual_adjustments: list[ManualAdjustment] | None = None,
 ) -> str:
     """Build the audit-trail detail backup Markdown document.
 
@@ -552,6 +612,27 @@ def build_detail_report(  # noqa: PLR0913
     sections.append("Carry-forward cost basis for next tax year.")
     sections.append("")
     sections.append(_build_tp_part5_holdings(acb_final))
+
+    # -----------------------------------------------------------------------
+    # Manual reconciliation entries — full audit detail
+    # -----------------------------------------------------------------------
+    manual_section = _build_manual_adjustments_section(manual_adjustments or [])
+    if manual_section:
+        sections.append("")
+        sections.append("---")
+        sections.append("")
+        sections.append("## Manual Reconciliation Entries")
+        sections.append("")
+        sections.append(
+            "These rows were added by the user via `sirop stir adjust` to reconcile sirop's"
+            " calculated ACB pool with the actual wallet/exchange balance where the imported"
+            " transaction history was incomplete. Each entry is a reasonable-basis estimate"
+            " under CRA record-keeping rules. The `audit_log` table inside the .sirop file"
+            " records every adjustment and removal — it is append-only and is the permanent"
+            " paper trail for these figures."
+        )
+        sections.append("")
+        sections.append(manual_section)
 
     sections.append("")
     sections.append("---")

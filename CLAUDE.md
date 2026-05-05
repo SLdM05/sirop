@@ -128,6 +128,8 @@ hard gates — obey them.
   - **⚠ Read before building or modifying any importer.**
 - `docs/ref/database-schema.md` — Schema changelog, per-wallet vs global ACB pool reconciliation, ad-hoc SQLite investigation queries
   - **⚠ Read before debugging `boil` discrepancies or querying `.sirop` files directly.**
+- `docs/ref/reconciliation-and-missing-data.md` — Workflow and CRA framing for manual reconciliation entries when transaction history is incomplete (defunct exchange, lost CSV, missing wallet history). Covers `manual_adjustments` and `audit_log` tables.
+  - **⚠ Read before adding any feature that touches `manual_adjustments`, `audit_log`, or "balance does not match" UX.**
 
 ### CLI usage manuals
 

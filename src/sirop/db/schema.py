@@ -14,7 +14,7 @@ from typing import Final
 
 # Bump this when the schema changes. The migration guard reads this value
 # and refuses to open a file whose schema_version doesn't match.
-SCHEMA_VERSION: Final[int] = 11
+SCHEMA_VERSION: Final[int] = 12
 
 # All pipeline stage names in execution order.
 PIPELINE_STAGES: Final[tuple[str, ...]] = (
@@ -326,6 +326,31 @@ CREATE TABLE IF NOT EXISTS audit_log (
 )
 """
 
+# ── v12: manual_adjustments ───────────────────────────────────────────────────
+# User-injected synthetic acquisitions or dispositions used to reconcile the
+# ACB pool with the user's actual wallet balance when the imported transaction
+# history is incomplete (defunct exchange, lost CSV, hardware-wallet history
+# the user never exported, etc.).
+#
+# Each row produces a single classified_event during the transfer_match stage,
+# typed 'buy' (acquire) or 'sell' (dispose), and flows through the ACB engine
+# unchanged.  The mandatory ``reason`` field plus a permanent audit_log entry
+# per row make these defensible under CRA "reasonable basis" record-keeping
+# rules — see docs/ref/reconciliation-and-missing-data.md.
+_MANUAL_ADJUSTMENTS_DDL = """
+CREATE TABLE IF NOT EXISTS manual_adjustments (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind        TEXT    NOT NULL CHECK(kind IN ('acquire','dispose')),
+    asset       TEXT    NOT NULL,
+    units       TEXT    NOT NULL,           -- Decimal string, always positive
+    cad_value   TEXT    NOT NULL,           -- Decimal string (cost if acquire, proceeds if dispose)
+    timestamp   TEXT    NOT NULL,           -- ISO 8601 UTC — date attributed to the event
+    reason      TEXT    NOT NULL,           -- mandatory; rejected if blank
+    created_at  TEXT    NOT NULL,           -- ISO 8601 UTC of when the user entered it
+    note        TEXT    NOT NULL DEFAULT ''
+)
+"""
+
 # ── Gap 8 fix ─────────────────────────────────────────────────────────────────
 # New table: income events (staking rewards, airdrops, mining).
 # These establish ACB (at FMV when received) and are reported separately on
@@ -364,6 +389,7 @@ _ALL_DDL: Final[tuple[str, ...]] = (
     _GRAPH_TRANSFER_PAIRS_DDL,
     _TRANSACTION_TXID_OVERRIDES_DDL,
     _AUDIT_LOG_DDL,
+    _MANUAL_ADJUSTMENTS_DDL,
 )
 
 
@@ -541,3 +567,16 @@ def migrate_to_v11(conn: sqlite3.Connection) -> None:
             conn.execute(
                 "ALTER TABLE classified_events ADD COLUMN is_provisional INTEGER NOT NULL DEFAULT 0"
             )
+
+
+def migrate_to_v12(conn: sqlite3.Connection) -> None:
+    """Apply v12 schema migrations to an existing batch file.
+
+    Idempotent — safe to call on fresh databases and already-migrated ones.
+    v12 adds ``manual_adjustments`` — a table where the user records synthetic
+    acquisitions/dispositions to reconcile the ACB pool with their actual
+    wallet balance when imports are incomplete.  Brand-new table, so the
+    ``CREATE TABLE IF NOT EXISTS`` inside ``create_tables`` is sufficient and
+    no ALTER TABLE statements are required.
+    """
+    create_tables(conn)

@@ -459,8 +459,16 @@ def _run_transfer_match(
     # FK-reference verified_transactions.id (a separate autoincrement sequence).
     # On an untouched batch these IDs coincidentally match, but after a --from re-run
     # the sequences diverge and the FK insert fails without this correction.
+    # Synthetic ClassifiedEvents (e.g. manual adjustments) carry vtx_id=None and
+    # pass through unchanged; IncomeEvents always have a real vtx_id.
     vtx_id_map = repo.read_verified_tx_id_map(conn)
-    events = [dataclasses.replace(e, vtx_id=vtx_id_map.get(e.vtx_id, e.vtx_id)) for e in events]
+    events = [
+        dataclasses.replace(
+            e,
+            vtx_id=vtx_id_map.get(e.vtx_id, e.vtx_id) if e.vtx_id is not None else None,
+        )
+        for e in events
+    ]
     income_evts = [
         dataclasses.replace(e, vtx_id=vtx_id_map.get(e.vtx_id, e.vtx_id)) for e in income_evts
     ]
@@ -472,6 +480,14 @@ def _run_transfer_match(
         len(events),
         len(income_evts),
     )
+
+    # Inject user-recorded manual adjustments as synthetic classified_events.
+    # These reconcile the ACB pool with the user's actual wallet balance when
+    # imports are incomplete (defunct exchange, lost CSV, etc.).
+    # See docs/ref/reconciliation-and-missing-data.md.
+    manual_count = _inject_manual_adjustments(conn)
+    if manual_count:
+        emit(MessageCode.BOIL_MANUAL_ADJUSTMENTS_APPLIED, count=manual_count)
 
     # Emit a single consolidated warning if future-year disposals were found.
     # Per-event W002 is suppressed by the matcher for future-year events.
@@ -491,6 +507,57 @@ def _run_transfer_match(
         discount_count = sum(1 for tx in txs if tx.tx_type.value in _discount_subtypes)
         if discount_count:
             emit(MessageCode.BOIL_WARNING_REWARD_DISCOUNT, count=discount_count)
+
+
+def _inject_manual_adjustments(conn: sqlite3.Connection) -> int:
+    """Append user-recorded manual adjustments as classified_events rows.
+
+    Reads ``manual_adjustments`` and writes one ``ClassifiedEvent`` per row
+    with ``source='manual'``, ``is_provisional=True``, ``vtx_id=NULL``.  The
+    ACB engine processes these events identically to imported ones — provenance
+    is tracked only for reporting purposes.
+
+    Returns the number of adjustments injected (0 when none exist).
+    """
+    from sirop.models.event import ClassifiedEvent  # local import to avoid cycle hint
+
+    adjustments = repo.read_manual_adjustments(conn)
+    if not adjustments:
+        return 0
+
+    events: list[ClassifiedEvent] = []
+    for adj in adjustments:
+        if adj.kind == "acquire":
+            event_type = "buy"
+            cad_proceeds: Decimal | None = None
+            cad_cost: Decimal | None = adj.cad_value
+        else:
+            event_type = "sell"
+            cad_proceeds = adj.cad_value
+            cad_cost = None
+
+        events.append(
+            ClassifiedEvent(
+                id=0,
+                vtx_id=None,
+                timestamp=adj.timestamp,
+                event_type=event_type,
+                asset=adj.asset,
+                amount=adj.units,
+                cad_proceeds=cad_proceeds,
+                cad_cost=cad_cost,
+                cad_fee=None,
+                txid=None,
+                source="manual",
+                is_taxable=True,
+                wallet_id=None,
+                is_provisional=True,
+            )
+        )
+
+    repo.write_classified_events(conn, events)
+    logger.debug("injected %d manual adjustment(s) as classified_events", len(adjustments))
+    return len(adjustments)
 
 
 def _run_acb(conn: object, tax_rules: TaxRules) -> None:

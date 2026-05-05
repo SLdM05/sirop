@@ -124,6 +124,45 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="ID",
         help="Remove all stir overrides for a transaction.",
     )
+    stir_p.add_argument(
+        "--adjust-acquire",
+        nargs=4,
+        metavar=("ASSET", "UNITS", "CAD", "DATE"),
+        help=(
+            "Record a manual reconciliation acquisition. Use when your real wallet "
+            "balance exceeds what sirop calculated (missing import). Requires --reason. "
+            "DATE is YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ."
+        ),
+    )
+    stir_p.add_argument(
+        "--adjust-dispose",
+        nargs=4,
+        metavar=("ASSET", "UNITS", "CAD", "DATE"),
+        help=(
+            "Record a manual reconciliation disposition. Use when your real wallet "
+            "balance is below what sirop calculated (extra units in pool). Requires --reason."
+        ),
+    )
+    stir_p.add_argument(
+        "--reason",
+        metavar="TEXT",
+        help=(
+            "CRA-defensible justification for a manual adjustment "
+            "(required with --adjust-acquire/--adjust-dispose)."
+        ),
+    )
+    stir_p.add_argument(
+        "--clear-adjustment",
+        type=int,
+        metavar="ADJ_ID",
+        help="Remove a manual adjustment by its id (shown in `stir --list`).",
+    )
+    stir_p.add_argument(
+        "--list-adjustments",
+        action="store_true",
+        dest="list_adjustments",
+        help="Show all manual reconciliation adjustments and exit.",
+    )
 
     # ── boil ──────────────────────────────────────────────────────────────────
     boil_p = sub.add_parser(
@@ -209,6 +248,11 @@ def main() -> None:
                 link=link,
                 unlink=unlink,
                 clear=args.clear,
+                adjust_acquire=tuple(args.adjust_acquire) if args.adjust_acquire else None,
+                adjust_dispose=tuple(args.adjust_dispose) if args.adjust_dispose else None,
+                reason=args.reason,
+                clear_adjustment=args.clear_adjustment,
+                list_adjustments=args.list_adjustments,
             )
         )
 
