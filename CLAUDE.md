@@ -183,7 +183,7 @@ cross-source transfer matching logic, and the xpub wallet-definition YAML schema
 
 The tool is `sirop` (lowercase always). Implemented CLI verbs today: `tap` (import),
 `boil` (calculate — runs normalize, verify, transfer_match, boil, superficial_loss),
-`pour` (export), `stir` (review and override transfer matching). Batch commands (no theme):
+`pour` (export), `stir` (review and override transfer matching, and record manual reconciliation entries via `stir adjust`). Batch commands (no theme):
 `create`, `list`, `switch`. Planned but not implemented: `grade` (status summary) and
 a standalone `verify` (node verification currently runs as a stage inside `boil`).
 

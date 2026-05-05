@@ -69,6 +69,20 @@ tax forms. Nothing more.
 - Schedule G capital gains summary → **TP-1-V Line 139**
 - Mandatory TP-21.4.39-V filing reminder and penalty notice
 
+### Manual reconciliation entries
+
+Rows that come from `sirop stir adjust` are flagged in three places:
+
+- The Schedule 3 dispositions table marks each affected row with `⚠ Manual reconciliation entry`.
+- The Part 3 acquisitions table flags assets that received any manual contribution.
+- A dedicated **Manual Reconciliation Entries** section after Part A lists every
+  adjustment with its date, kind, units, CAD value, and the reason the user supplied.
+
+Manual entries are never hidden — by design, an accountant or auditor reading the
+output can identify them at a glance. The detail backup file repeats the same table
+with framing about CRA "reasonable basis" record-keeping. See
+[reconciliation-and-missing-data.md](../ref/reconciliation-and-missing-data.md).
+
 ### What is not in the filing summary
 
 The per-transaction income event log (e.g. 300+ individual daily Shakepay

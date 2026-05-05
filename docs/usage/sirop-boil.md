@@ -119,9 +119,20 @@ Overrides written by `sirop stir` are applied first; auto-matching runs after.
 - Unmatched withdrawals → treated conservatively as sells. A warning is emitted
   so you can decide whether to `stir link` or tap the receiving wallet.
 
+**Pass 2 — inject manual reconciliation entries:**
+
+After classification, every row in `manual_adjustments` is appended as a
+`classified_event` with `source='manual'`, `is_provisional=1`, `vtx_id=NULL`.
+These flow through the ACB engine identically to imported acquisitions and
+dispositions. When any are present, sirop emits a `[W011]` warning to remind
+the user that the report contains reasonable-basis reconciliation entries.
+See `docs/ref/reconciliation-and-missing-data.md`.
+
 > **Tip:** Run `sirop stir` between `tap` and `boil` to review auto-detected
 > pairs, fix mismatches, and mark external transfers before tax calculations run.
 > Overrides survive `sirop boil --from transfer_match` so you only set them once.
+> The same is true for `manual_adjustments` — `stir adjust` writes to a separate
+> table that is re-injected on every `transfer_match` re-run.
 
 ### boil (ACB engine)
 
@@ -197,7 +208,7 @@ re-importing.
 |-------|------------|---------|
 | `transactions` | normalize | Normalised transactions with CAD values |
 | `verified_transactions` | verify | Promoted copy of `transactions` |
-| `classified_events` | transfer_match | Taxable events + non-taxable transfer markers |
+| `classified_events` | transfer_match | Taxable events + non-taxable transfer markers (also receives synthetic rows from `manual_adjustments`) |
 | `income_events` | transfer_match | Income sub-records for TP-21.4.39-V |
 | `dispositions` | boil | One row per disposal with gain/loss and ACB pool state |
 | `acb_state` | boil | Pool snapshot after every taxable event |

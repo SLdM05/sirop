@@ -60,7 +60,7 @@ the CLI, command palette, and any documentation.
 | `tap` | implemented | import | Reads raw transaction files from exchanges and wallets |
 | `boil` | implemented | calculate / process | Runs the full calculation pipeline (normalize, verify, transfer_match, boil, superficial_loss) |
 | `pour` | implemented | export / generate | Produces tax report outputs |
-| `stir` | implemented | — | Review and override transfer matching before `boil` |
+| `stir` | implemented | — | Review and override transfer matching, and record manual reconciliation entries (`stir adjust`), before `boil` |
 | `create`, `list`, `switch` | implemented | — | Batch management (no theme) |
 | `grade` | **planned** | summarize / status | Shows a summary of gains, losses, and ACB state |
 | `verify` | **planned as top-level verb**; today it's a stage inside `boil` | verify | Node verification (kept as-is — clear enough) |
