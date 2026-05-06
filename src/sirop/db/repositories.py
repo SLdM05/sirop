@@ -1158,6 +1158,94 @@ def read_wallets(conn: sqlite3.Connection) -> list[Wallet]:
     ]
 
 
+def find_cross_wallet_duplicates(
+    conn: sqlite3.Connection,
+    txs: list[RawTransaction],
+    current_wallet_name: str,
+    timestamp_window_seconds: int = 60,
+) -> list[tuple[RawTransaction, str]]:
+    """Return incoming transactions that appear to duplicate rows in other wallets.
+
+    A row is considered a duplicate — not a legitimate cross-wallet transfer — when
+    txid, transaction_type, AND amount all match an existing row under a different
+    wallet name.  Opposite transaction_type (withdrawal vs deposit) on the same txid
+    indicates a legitimate send/receive pair and is intentionally excluded.
+
+    For txid-less rows (most CSV sources), the fingerprint is
+    (source, asset, amount, transaction_type) with a timestamp proximity check.
+
+    Returns a list of (incoming_tx, existing_wallet_name) pairs.
+    """
+    if not txs:
+        return []
+
+    suspects: list[tuple[RawTransaction, str]] = []
+
+    # ── Pass A: txid-bearing rows ─────────────────────────────────────────────
+    txid_txs = [tx for tx in txs if tx.txid is not None]
+    if txid_txs:
+        placeholders = ",".join("?" * len(txid_txs))
+        txid_values = [tx.txid for tx in txid_txs]
+        # All values are parameterized; placeholders is only "?,?,?".
+        txid_sql = f"""
+            SELECT rt.txid, rt.transaction_type, rt.amount, w.name AS wallet_name
+            FROM raw_transactions rt
+            JOIN wallets w ON rt.wallet_id = w.id
+            WHERE w.name != ?
+              AND rt.txid IN ({placeholders})
+            """  # noqa: S608
+        rows = conn.execute(txid_sql, [current_wallet_name, *txid_values]).fetchall()
+
+        # Index existing rows by txid for O(1) lookup
+        existing_by_txid: dict[str, list[tuple[str, str, str]]] = {}
+        for row in rows:
+            existing_by_txid.setdefault(row["txid"], []).append(
+                (row["transaction_type"], row["amount"], row["wallet_name"])
+            )
+
+        for tx in txid_txs:
+            assert tx.txid is not None
+            for ex_type, ex_amount, ex_wallet in existing_by_txid.get(tx.txid, []):
+                if ex_type == tx.transaction_type and ex_amount == format(tx.amount, "f"):
+                    suspects.append((tx, ex_wallet))
+                    break  # one match per incoming tx is enough
+
+    # ── Pass B: txid-less rows ────────────────────────────────────────────────
+    for tx in txs:
+        if tx.txid is not None:
+            continue
+        row = conn.execute(
+            """
+            SELECT w.name AS wallet_name
+            FROM raw_transactions rt
+            JOIN wallets w ON rt.wallet_id = w.id
+            WHERE w.name != ?
+              AND rt.source           = ?
+              AND rt.asset            = ?
+              AND rt.amount           = ?
+              AND rt.transaction_type = ?
+              AND ABS(
+                    CAST(strftime('%s', rt.raw_timestamp) AS INTEGER)
+                  - CAST(strftime('%s', ?)               AS INTEGER)
+                ) < ?
+            LIMIT 1
+            """,
+            (
+                current_wallet_name,
+                tx.source,
+                tx.asset,
+                format(tx.amount, "f"),
+                tx.transaction_type,
+                tx.timestamp.isoformat(),
+                timestamp_window_seconds,
+            ),
+        ).fetchone()
+        if row is not None:
+            suspects.append((tx, row["wallet_name"]))
+
+    return suspects
+
+
 # ---------------------------------------------------------------------------
 # Transfer overrides (stir command)
 # ---------------------------------------------------------------------------

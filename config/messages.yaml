@@ -183,6 +183,25 @@ messages:
     category: output
     text: "Tap cancelled."
 
+  tap.warning.cross_wallet_dupe:
+    category: warning
+    code: W011
+    text: >-
+      {count} incoming transaction(s) appear to already exist under wallet
+      '{other_wallet}' in this batch — possible double-import.
+
+  tap.cross_wallet_dupe_row:
+    category: output
+    text: "  {ts}  {asset}  {amount}{txid_hint}"
+
+  tap.cross_wallet_dupe_more:
+    category: output
+    text: "  … and {count} more"
+
+  tap.cross_wallet_aborted:
+    category: output
+    text: "Tap cancelled — no transactions written."
+
   # ── boil ──────────────────────────────────────────────────────────────────
 
   boil.error.not_tapped:

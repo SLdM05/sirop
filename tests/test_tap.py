@@ -30,11 +30,13 @@ import pytest
 
 from sirop.cli.tap import (
     _IMPORTER_REGISTRY,
+    _confirm_cross_wallet_import,
     _confirm_wallet_append,
     _handle_tap_folder,
     _write_to_batch,
 )
 from sirop.config.settings import Settings
+from sirop.db import repositories as repo
 from sirop.db.schema import PIPELINE_STAGES, create_tables
 from sirop.models.raw import RawTransaction
 
@@ -372,6 +374,32 @@ def _xpub_tx(
     )
 
 
+def _csv_tx(
+    amount_btc: str = "0.50000000",
+    tx_type: str = "purchase",
+    ts: int = 1_700_000_000,
+    source: str = "shakepay",
+) -> RawTransaction:
+    """Build a txid-less CSV-style transaction for fingerprint-match tests."""
+    return RawTransaction(
+        source=source,
+        timestamp=datetime.fromtimestamp(ts, tz=UTC),
+        transaction_type=tx_type,
+        asset="BTC",
+        amount=Decimal(amount_btc),
+        amount_currency="BTC",
+        fiat_value=None,
+        fiat_currency=None,
+        fee_amount=None,
+        fee_currency=None,
+        rate=None,
+        spot_rate=None,
+        txid=None,
+        raw_type=tx_type,
+        raw_row={},
+    )
+
+
 def _count_raw(db_path: Path) -> int:
     conn = sqlite3.connect(str(db_path))
     row = conn.execute("SELECT COUNT(*) FROM raw_transactions").fetchone()
@@ -470,3 +498,154 @@ class TestWriteToBatchDedup:
         assert ins_b == 1, "second wallet's tx must not be falsely skipped as duplicate"
         assert skipped_b == 0
         assert _count_raw(db_path) == 2  # noqa: PLR2004
+
+
+# ---------------------------------------------------------------------------
+# Cross-wallet duplicate detection
+# ---------------------------------------------------------------------------
+
+
+def _open_conn(db_path: Path) -> sqlite3.Connection:
+    c = sqlite3.connect(str(db_path))
+    c.row_factory = sqlite3.Row
+    return c
+
+
+class TestFindCrossWalletDuplicates:
+    """Unit tests for repo.find_cross_wallet_duplicates."""
+
+    def test_txid_same_type_same_amount_is_suspect(self, tmp_path: Path) -> None:
+        """Same txid + same type + same amount in a different wallet → suspect."""
+        db_path = _make_batch_db(tmp_path)
+        settings = _make_settings(tmp_path)
+        factory = _open_batch_factory(db_path)
+        txid = "aaa" + "0" * 61
+
+        tx_a = _xpub_tx(txid, 100_000, tx_type="withdrawal")
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("sirop.cli.tap.open_batch", factory)
+            _write_to_batch(
+                "batch", settings, [tx_a], "wallet-a", auto_created=False, source="xpub"
+            )
+
+        tx_b = _xpub_tx(txid, 100_000, tx_type="withdrawal")  # identical — double-import
+        conn = _open_conn(db_path)
+        try:
+            suspects = repo.find_cross_wallet_duplicates(conn, [tx_b], "wallet-b")
+        finally:
+            conn.close()
+
+        assert len(suspects) == 1
+        assert suspects[0][1] == "wallet-a"
+
+    def test_txid_opposite_type_not_suspect(self, tmp_path: Path) -> None:
+        """Same txid but opposite types (send vs receive) → legitimate transfer, no suspect."""
+        db_path = _make_batch_db(tmp_path)
+        settings = _make_settings(tmp_path)
+        factory = _open_batch_factory(db_path)
+        txid = "bbb" + "0" * 61
+
+        tx_a = _xpub_tx(txid, 100_500, tx_type="withdrawal")
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("sirop.cli.tap.open_batch", factory)
+            _write_to_batch(
+                "batch", settings, [tx_a], "wallet-a", auto_created=False, source="xpub"
+            )
+
+        tx_b = _xpub_tx(txid, 99_800, tx_type="deposit")  # receive leg — legitimate
+        conn = _open_conn(db_path)
+        try:
+            suspects = repo.find_cross_wallet_duplicates(conn, [tx_b], "wallet-b")
+        finally:
+            conn.close()
+
+        assert suspects == []
+
+    def test_fingerprint_match_is_suspect(self, tmp_path: Path) -> None:
+        """Identical CSV fingerprint (source/asset/amount/type/ts) in another wallet → suspect."""
+        db_path = _make_batch_db(tmp_path)
+        settings = _make_settings(tmp_path)
+        factory = _open_batch_factory(db_path)
+
+        tx_a = _csv_tx()
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("sirop.cli.tap.open_batch", factory)
+            _write_to_batch(
+                "batch", settings, [tx_a], "wallet-a", auto_created=False, source="shakepay"
+            )
+
+        tx_b = _csv_tx()  # identical fingerprint — double-import
+        conn = _open_conn(db_path)
+        try:
+            suspects = repo.find_cross_wallet_duplicates(conn, [tx_b], "wallet-b")
+        finally:
+            conn.close()
+
+        assert len(suspects) == 1
+        assert suspects[0][1] == "wallet-a"
+
+    def test_fingerprint_outside_timestamp_window_not_suspect(self, tmp_path: Path) -> None:
+        """Same amount/source/type but timestamp differs by >60s → not a suspect."""
+        db_path = _make_batch_db(tmp_path)
+        settings = _make_settings(tmp_path)
+        factory = _open_batch_factory(db_path)
+
+        tx_a = _csv_tx(ts=1_700_000_000)
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("sirop.cli.tap.open_batch", factory)
+            _write_to_batch(
+                "batch", settings, [tx_a], "wallet-a", auto_created=False, source="shakepay"
+            )
+
+        tx_b = _csv_tx(ts=1_700_000_000 + 120)  # 2 minutes later — unrelated trade
+        conn = _open_conn(db_path)
+        try:
+            suspects = repo.find_cross_wallet_duplicates(conn, [tx_b], "wallet-b")
+        finally:
+            conn.close()
+
+        assert suspects == []
+
+    def test_same_wallet_not_returned(self, tmp_path: Path) -> None:
+        """Rows already in the current wallet are excluded — no false positive on re-tap."""
+        db_path = _make_batch_db(tmp_path)
+        settings = _make_settings(tmp_path)
+        factory = _open_batch_factory(db_path)
+        txid = "ccc" + "0" * 61
+
+        tx = _xpub_tx(txid, 100_000, tx_type="withdrawal")
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("sirop.cli.tap.open_batch", factory)
+            _write_to_batch("batch", settings, [tx], "wallet-a", auto_created=False, source="xpub")
+
+        # Re-checking the same wallet — must not report itself as a suspect
+        conn = _open_conn(db_path)
+        try:
+            suspects = repo.find_cross_wallet_duplicates(conn, [tx], "wallet-a")
+        finally:
+            conn.close()
+
+        assert suspects == []
+
+
+class TestConfirmCrossWalletImport:
+    """Unit tests for the _confirm_cross_wallet_import prompt helper."""
+
+    def _make_suspect(self) -> tuple[RawTransaction, str]:
+        tx = _xpub_tx("ddd" + "0" * 61, 50_000, tx_type="withdrawal")
+        return tx, "wallet-a"
+
+    def test_returns_false_on_no(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("builtins.input", lambda _: "n")
+        assert _confirm_cross_wallet_import([self._make_suspect()]) is False
+
+    def test_returns_true_on_yes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("builtins.input", lambda _: "y")
+        assert _confirm_cross_wallet_import([self._make_suspect()]) is True
+
+    def test_returns_false_on_eoferror(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _raise(_: str) -> str:
+            raise EOFError
+
+        monkeypatch.setattr("builtins.input", _raise)
+        assert _confirm_cross_wallet_import([self._make_suspect()]) is False

@@ -53,6 +53,10 @@ class MessageCode(StrEnum):
     TAP_WALLETFOLDER_SUBFOLDER_EMPTY = "tap.walletfolder.subfolder_empty"
     TAP_WALLETFOLDER_NO_CSV_FOUND = "tap.walletfolder.no_csv_found"
     TAP_WALLETFOLDER_ABORTED = "tap.walletfolder.aborted"
+    TAP_WARNING_CROSS_WALLET_DUPE = "tap.warning.cross_wallet_dupe"
+    TAP_CROSS_WALLET_DUPE_ROW = "tap.cross_wallet_dupe_row"
+    TAP_CROSS_WALLET_DUPE_MORE = "tap.cross_wallet_dupe_more"
+    TAP_CROSS_WALLET_ABORTED = "tap.cross_wallet_aborted"
 
     # ── boil ──────────────────────────────────────────────────────────────────
     BOIL_ERROR_NOT_TAPPED = "boil.error.not_tapped"
