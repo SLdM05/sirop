@@ -86,6 +86,12 @@ sirop boil
 # 4. Sometimes you will need to adjust your transfer pairs (wallet-to-wallet moves)
 sirop stir
 
+# 4b. If your real wallet balance does not match what sirop calculated and the
+#     gap cannot be closed by importing more CSVs, record a manual reconciliation
+#     entry. Reason is mandatory and visible in every report.
+sirop stir --adjust-acquire BTC 0.5 12500.00 2017-11-15 \
+  --reason "Reconstructed from RBC statement archived 2017-11-15"
+
 # 5. Generate your tax reports
 sirop pour
 ```
@@ -105,9 +111,10 @@ Both are plain text Markdown, not PDFs. Open in any text editor or Markdown view
 
 - [Batch management — create, list, switch](docs/usage/sirop-create.md)
 - [tap — import exchange and wallet transactions](docs/usage/sirop-tap.md)
-- [stir — review and confirm transfer pairs](docs/usage/sirop-stir.md)
+- [stir — review transfer pairs and record manual reconciliation entries](docs/usage/sirop-stir.md)
 - [boil — run the tax calculation pipeline](docs/usage/sirop-boil.md)
 - [pour — generate tax reports](docs/usage/sirop-pour.md)
+- [Reconciliation and missing data — what to do when records are incomplete](docs/ref/reconciliation-and-missing-data.md)
 
 ---
 

@@ -72,6 +72,9 @@ def _run_pour(settings: Settings, output_dir_override: Path | None) -> int:
         acb_final = repo.read_acb_state_final(conn)
         all_events = repo.read_classified_events(conn)
         acquisitions = [e for e in all_events if e.event_type in ("buy", "income", "other")]
+        manual_adjustments = repo.read_manual_adjustments(conn)
+        manual_disposition_ids = repo.read_manual_disposition_ids(conn)
+        manual_event_ids = repo.read_manual_adjustment_event_ids(conn)
 
         sirop_version = _get_version()
 
@@ -92,6 +95,9 @@ def _run_pour(settings: Settings, output_dir_override: Path | None) -> int:
             inclusion_rate=inclusion_rate,
             batch_name=batch_name,
             sirop_version=sirop_version,
+            manual_disposition_ids=manual_disposition_ids,
+            manual_event_ids=manual_event_ids,
+            manual_adjustments=manual_adjustments,
         )
 
         detail = build_detail_report(
@@ -101,6 +107,7 @@ def _run_pour(settings: Settings, output_dir_override: Path | None) -> int:
             tax_year=tax_year,
             batch_name=batch_name,
             sirop_version=sirop_version,
+            manual_adjustments=manual_adjustments,
         )
 
         out_dir = output_dir_override or settings.output_dir

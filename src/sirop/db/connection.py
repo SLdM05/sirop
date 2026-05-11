@@ -33,6 +33,8 @@ from sirop.db.schema import (
     migrate_to_v9,
     migrate_to_v10,
     migrate_to_v11,
+    migrate_to_v12,
+    migrate_to_v13,
 )
 
 # Batch names must start with a letter or digit and contain only alphanumerics,
@@ -99,6 +101,8 @@ def open_batch(name: str, settings: Settings) -> sqlite3.Connection:
     migrate_to_v9(conn)
     migrate_to_v10(conn)
     migrate_to_v11(conn)
+    migrate_to_v12(conn)
+    migrate_to_v13(conn)
     return conn
 
 

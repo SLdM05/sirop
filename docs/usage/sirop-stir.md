@@ -1,10 +1,9 @@
 ---
-verified-at: b5e6b66
+verified-at: 9157e16
 tracks:
   - src/sirop/cli/stir.py
   - src/sirop/__main__.py
 ---
-
 # sirop stir — Review and Override Transfer Matching
 
 ## What `stir` does
@@ -39,6 +38,11 @@ sirop stir [--list]
 sirop stir --link <id1> <id2>
 sirop stir --unlink <id1> <id2>
 sirop stir --clear <id>
+
+sirop stir --list-adjustments
+sirop stir --adjust-acquire <UNITS> <CAD> <DATE> --reason "..."
+sirop stir --adjust-dispose <UNITS> <CAD> <DATE> --reason "..."
+sirop stir --clear-adjustment <ADJ_ID>
 ```
 
 ### Arguments
@@ -56,6 +60,39 @@ no non-interactive flag equivalent). See [Interactive mode](#interactive-mode) b
 
 Transaction IDs (`id1`, `id2`, `id`) are the `id` values from the `transactions`
 table — shown in `stir --list` output and in the interactive display.
+
+### Manual reconciliation adjustments
+
+When the imported transaction history is incomplete and the calculated ACB
+pool does not match your real wallet/exchange balance, record a synthetic
+acquisition or disposition to close the gap.  Every adjustment requires a
+`--reason`, must be attributed to a wallet via `--wallet`, and writes a
+permanent `audit_log` entry.
+
+| Argument | Description |
+|----------|-------------|
+| `--list-adjustments` | Print all manual reconciliation adjustments and exit |
+| `--adjust-acquire UNITS CAD DATE` | Record a synthetic BTC acquisition (adds units + cost basis to the ACB pool). Requires `--reason` and `--wallet`. |
+| `--adjust-dispose UNITS CAD DATE` | Record a synthetic BTC disposition (removes units, generates a gain/loss row). Requires `--reason` and `--wallet`. |
+| `--reason TEXT` | CRA-defensible justification for the adjustment. Mandatory; rejected if blank. |
+| `--wallet NAME` | Wallet to attribute the adjustment to. Must already exist in the active batch — run `sirop stir --list` to see the available names. Mandatory with `--adjust-acquire`/`--adjust-dispose`. |
+| `--clear-adjustment ADJ_ID` | Remove a manual adjustment by its `adj_id`. Writes a second `audit_log` row recording the removal — the original create entry is never deleted. |
+
+`DATE` accepts `YYYY-MM-DD` or full ISO 8601 with offset (`YYYY-MM-DDTHH:MM:SSZ`).
+
+The wallet attribution is what lets `pour` reports re-sync a specific
+wallet's balance: an `acquire` adds units to that wallet's per-wallet
+holdings view, and a `dispose` removes them.  Legacy adjustments recorded
+before schema v13 keep `wallet_id = NULL` and continue to read back as
+batch-wide / unattributed.
+
+After adding or removing an adjustment, re-run `sirop boil --from transfer_match`
+to apply the change.
+
+Manual entries are flagged in every `pour` report (Schedule 3 dispositions,
+TP-21.4.39-V Part 3 acquisitions, and a dedicated "Manual Reconciliation
+Entries" section).  See `docs/ref/reconciliation-and-missing-data.md` for the
+CRA framing and a worked example.
 
 ---
 
