@@ -101,6 +101,9 @@ class MessageCode(StrEnum):
     STIR_ERROR_ADJUST_INVALID_DATE = "stir.error.adjust_invalid_date"
     STIR_ERROR_ADJUST_INVALID_ASSET = "stir.error.adjust_invalid_asset"
     STIR_ERROR_ADJUST_NOT_FOUND = "stir.error.adjust_not_found"
+    STIR_ERROR_ADJUST_WALLET_REQUIRED = "stir.error.adjust_wallet_required"
+    STIR_ERROR_ADJUST_WALLET_UNKNOWN = "stir.error.adjust_wallet_unknown"
+    STIR_ERROR_ADJUST_NO_WALLETS = "stir.error.adjust_no_wallets"
 
     # ── list ──────────────────────────────────────────────────────────────────
     LIST_NO_BATCHES = "list.no_batches"

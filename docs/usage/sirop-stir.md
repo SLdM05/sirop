@@ -66,17 +66,25 @@ table — shown in `stir --list` output and in the interactive display.
 When the imported transaction history is incomplete and the calculated ACB
 pool does not match your real wallet/exchange balance, record a synthetic
 acquisition or disposition to close the gap.  Every adjustment requires a
-`--reason` and writes a permanent `audit_log` entry.
+`--reason`, must be attributed to a wallet via `--wallet`, and writes a
+permanent `audit_log` entry.
 
 | Argument | Description |
 |----------|-------------|
 | `--list-adjustments` | Print all manual reconciliation adjustments and exit |
-| `--adjust-acquire UNITS CAD DATE` | Record a synthetic BTC acquisition (adds units + cost basis to the ACB pool). Requires `--reason`. |
-| `--adjust-dispose UNITS CAD DATE` | Record a synthetic BTC disposition (removes units, generates a gain/loss row). Requires `--reason`. |
+| `--adjust-acquire UNITS CAD DATE` | Record a synthetic BTC acquisition (adds units + cost basis to the ACB pool). Requires `--reason` and `--wallet`. |
+| `--adjust-dispose UNITS CAD DATE` | Record a synthetic BTC disposition (removes units, generates a gain/loss row). Requires `--reason` and `--wallet`. |
 | `--reason TEXT` | CRA-defensible justification for the adjustment. Mandatory; rejected if blank. |
+| `--wallet NAME` | Wallet to attribute the adjustment to. Must already exist in the active batch — run `sirop stir --list` to see the available names. Mandatory with `--adjust-acquire`/`--adjust-dispose`. |
 | `--clear-adjustment ADJ_ID` | Remove a manual adjustment by its `adj_id`. Writes a second `audit_log` row recording the removal — the original create entry is never deleted. |
 
 `DATE` accepts `YYYY-MM-DD` or full ISO 8601 with offset (`YYYY-MM-DDTHH:MM:SSZ`).
+
+The wallet attribution is what lets `pour` reports re-sync a specific
+wallet's balance: an `acquire` adds units to that wallet's per-wallet
+holdings view, and a `dispose` removes them.  Legacy adjustments recorded
+before schema v13 keep `wallet_id = NULL` and continue to read back as
+batch-wide / unattributed.
 
 After adding or removing an adjustment, re-run `sirop boil --from transfer_match`
 to apply the change.

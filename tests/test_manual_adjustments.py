@@ -1,10 +1,13 @@
 """Tests for manual reconciliation adjustments.
 
 Covers:
-- v12 schema migration creates the manual_adjustments table.
+- v13 schema migration adds the manual_adjustments.wallet_id column.
 - Repository CRUD for manual adjustments and audit_log.
 - Boil pipeline injects manual adjustments into the ACB engine.
-- Stir CLI adjust handler validates inputs (reason required, positive amounts).
+- Stir CLI adjust handler validates inputs (reason required, positive amounts,
+  wallet required and must exist).
+- Per-wallet holdings reflect manual adjustments via the injected
+  classified_events provisional_adj CTE.
 - Pour reports flag manual entries.
 
 All test data uses fake assets, amounts, and reasons — nothing real.
@@ -15,6 +18,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -23,6 +27,7 @@ from sirop.cli.stir import (
     _apply_clear_adjustment,
     _parse_iso_date,
     _parse_positive_decimal,
+    _resolve_adjust_wallet,
     _StirError,
 )
 from sirop.db import repositories as repo
@@ -31,13 +36,17 @@ from sirop.db.schema import (
     create_tables,
     migrate_to_v11,
     migrate_to_v12,
+    migrate_to_v13,
 )
 from sirop.models.adjustment import ManualAdjustment
 from sirop.models.messages import MessageCode
 
+if TYPE_CHECKING:
+    from sirop.models.wallet import Wallet
+
 
 def _make_conn() -> sqlite3.Connection:
-    """In-memory SQLite connection with the full sirop v12 schema."""
+    """In-memory SQLite connection with the full sirop v13 schema."""
     conn = sqlite3.connect(":memory:")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.row_factory = sqlite3.Row
@@ -45,14 +54,19 @@ def _make_conn() -> sqlite3.Connection:
     return conn
 
 
+def _make_wallet(conn: sqlite3.Connection, name: str = "test-wallet") -> Wallet:
+    """Insert a wallet row and return it.  Used to satisfy the v13 FK."""
+    return repo.find_or_create_wallet(conn, name=name, source="shakepay", auto_created=False)
+
+
 # ---------------------------------------------------------------------------
 # Schema
 # ---------------------------------------------------------------------------
 
 
-class TestSchemaV12:
-    def test_schema_version_is_12(self) -> None:
-        assert SCHEMA_VERSION == 12  # noqa: PLR2004
+class TestSchemaV13:
+    def test_schema_version_is_13(self) -> None:
+        assert SCHEMA_VERSION == 13  # noqa: PLR2004
 
     def test_manual_adjustments_table_exists(self) -> None:
         conn = _make_conn()
@@ -61,18 +75,60 @@ class TestSchemaV12:
         ).fetchall()
         assert len(rows) == 1
 
-    def test_migrate_v12_is_idempotent(self) -> None:
+    def test_wallet_id_column_exists(self) -> None:
         conn = _make_conn()
-        migrate_to_v12(conn)
-        migrate_to_v12(conn)  # second call must not error
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(manual_adjustments)")}
+        assert "wallet_id" in cols
+
+    def test_migrate_v13_is_idempotent(self) -> None:
+        conn = _make_conn()
+        migrate_to_v13(conn)
+        migrate_to_v13(conn)  # second call must not error
+
+    def test_v13_migration_adds_wallet_id_to_v12_table(self) -> None:
+        """A v12 batch (no wallet_id column) gets the column added by v13."""
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        # Simulate a pre-v13 batch: create the v12 form of manual_adjustments
+        # without the wallet_id column.  Other tables come from create_tables.
+        create_tables(conn)
+        conn.execute("DROP TABLE manual_adjustments")
+        conn.execute(
+            """
+            CREATE TABLE manual_adjustments (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind        TEXT    NOT NULL CHECK(kind IN ('acquire','dispose')),
+                asset       TEXT    NOT NULL,
+                units       TEXT    NOT NULL,
+                cad_value   TEXT    NOT NULL,
+                timestamp   TEXT    NOT NULL,
+                reason      TEXT    NOT NULL,
+                created_at  TEXT    NOT NULL,
+                note        TEXT    NOT NULL DEFAULT ''
+            )
+            """
+        )
+        # Insert a legacy row.
+        conn.execute(
+            "INSERT INTO manual_adjustments"
+            " (kind, asset, units, cad_value, timestamp, reason, created_at)"
+            " VALUES ('acquire', 'BTC', '0.5', '12000',"
+            " '2023-01-01T00:00:00+00:00', 'legacy', '2023-01-01T00:00:00+00:00')"
+        )
+        migrate_to_v13(conn)
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(manual_adjustments)")}
+        assert "wallet_id" in cols
+        row = conn.execute("SELECT wallet_id FROM manual_adjustments").fetchone()
+        assert row[0] is None
 
     def test_v12_migration_on_pre_v11_db(self) -> None:
-        """Opening a database that only has v11 schema and migrating to v12 must succeed."""
+        """Opening a database that only has v11 schema and migrating forward must succeed."""
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         create_tables(conn)
         migrate_to_v11(conn)
         migrate_to_v12(conn)
+        migrate_to_v13(conn)
         rows = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='manual_adjustments'"
         ).fetchall()
@@ -96,8 +152,9 @@ class TestSchemaV12:
 
 
 class TestManualAdjustmentRepo:
-    def test_write_and_read_round_trip(self) -> None:
+    def test_write_and_read_round_trip_with_wallet(self) -> None:
         conn = _make_conn()
+        wallet = _make_wallet(conn)
         ts = datetime(2024, 6, 15, 12, 0, 0, tzinfo=UTC)
         adj = repo.write_manual_adjustment(
             conn,
@@ -107,8 +164,10 @@ class TestManualAdjustmentRepo:
             cad_value=Decimal("12345.67"),
             timestamp=ts,
             reason="Lost defunct-exchange CSV; reconstructed from bank statement.",
+            wallet_id=wallet.id,
         )
         assert adj.id > 0
+        assert adj.wallet_id == wallet.id
 
         rows = repo.read_manual_adjustments(conn)
         assert len(rows) == 1
@@ -119,9 +178,28 @@ class TestManualAdjustmentRepo:
         assert loaded.cad_value == Decimal("12345.67")
         assert loaded.timestamp == ts
         assert "defunct-exchange" in loaded.reason
+        assert loaded.wallet_id == wallet.id
 
-    def test_delete_returns_removed_row(self) -> None:
+    def test_write_without_wallet_id_round_trips_as_none(self) -> None:
+        """Legacy / batch-wide rows continue to round-trip with NULL wallet_id."""
         conn = _make_conn()
+        ts = datetime(2024, 6, 15, tzinfo=UTC)
+        adj = repo.write_manual_adjustment(
+            conn,
+            kind="acquire",
+            asset="BTC",
+            units=Decimal("0.5"),
+            cad_value=Decimal("12000"),
+            timestamp=ts,
+            reason="legacy unattributed",
+        )
+        assert adj.wallet_id is None
+        rows = repo.read_manual_adjustments(conn)
+        assert rows[0].wallet_id is None
+
+    def test_delete_returns_wallet_id(self) -> None:
+        conn = _make_conn()
+        wallet = _make_wallet(conn)
         ts = datetime(2024, 6, 15, tzinfo=UTC)
         adj = repo.write_manual_adjustment(
             conn,
@@ -131,11 +209,13 @@ class TestManualAdjustmentRepo:
             cad_value=Decimal("500"),
             timestamp=ts,
             reason="Lost private key; treating as deemed disposition at FMV.",
+            wallet_id=wallet.id,
         )
         removed = repo.delete_manual_adjustment(conn, adj.id)
         assert removed is not None
         assert removed.id == adj.id
         assert removed.kind == "dispose"
+        assert removed.wallet_id == wallet.id
         assert repo.read_manual_adjustments(conn) == []
 
     def test_delete_missing_returns_none(self) -> None:
@@ -145,6 +225,7 @@ class TestManualAdjustmentRepo:
     def test_decimal_storage_uses_format_f(self) -> None:
         """Storing a tiny amount must not produce scientific notation."""
         conn = _make_conn()
+        wallet = _make_wallet(conn)
         ts = datetime(2024, 6, 15, tzinfo=UTC)
         repo.write_manual_adjustment(
             conn,
@@ -154,10 +235,25 @@ class TestManualAdjustmentRepo:
             cad_value=Decimal("0.0001"),
             timestamp=ts,
             reason="dust adjustment",
+            wallet_id=wallet.id,
         )
         row = conn.execute("SELECT units, cad_value FROM manual_adjustments").fetchone()
         assert "E" not in row["units"].upper()
         assert "E" not in row["cad_value"].upper()
+
+
+class TestFindWalletByName:
+    def test_returns_wallet_when_present(self) -> None:
+        conn = _make_conn()
+        created = _make_wallet(conn, name="my-wallet")
+        found = repo.find_wallet_by_name(conn, "my-wallet")
+        assert found is not None
+        assert found.id == created.id
+        assert found.name == "my-wallet"
+
+    def test_returns_none_when_missing(self) -> None:
+        conn = _make_conn()
+        assert repo.find_wallet_by_name(conn, "does-not-exist") is None
 
 
 class TestAuditLog:
@@ -168,7 +264,7 @@ class TestAuditLog:
             stage="manual_adjust",
             field="acb_pool:BTC",
             old_value=None,
-            new_value="acquire:0.5 BTC @ 12000 CAD on 2024-06-15",
+            new_value="acquire:0.5 BTC @ 12000 CAD on 2024-06-15 wallet=test-wallet",
             reason="Lost defunct-exchange CSV.",
         )
         assert log_id > 0
@@ -182,6 +278,7 @@ class TestAuditLog:
         """Removing an adjustment must produce an additional audit_log entry,
         not delete the original entry."""
         conn = _make_conn()
+        wallet = _make_wallet(conn)
         ts = datetime(2024, 6, 15, tzinfo=UTC)
         adj = repo.write_manual_adjustment(
             conn,
@@ -191,6 +288,7 @@ class TestAuditLog:
             cad_value=Decimal("12345.67"),
             timestamp=ts,
             reason="initial entry",
+            wallet_id=wallet.id,
         )
         # Simulate the CLI flow: write audit on add, then write audit on remove.
         repo.write_audit_log(
@@ -215,26 +313,30 @@ class TestAuditLog:
 class TestStirAdjustValidation:
     def test_reason_required(self) -> None:
         conn = _make_conn()
+        wallet = _make_wallet(conn)
         with pytest.raises(_StirError) as exc:
-            _apply_adjust(conn, "acquire", ("0.5", "100", "2024-06-15"), reason="   ")
+            _apply_adjust(conn, "acquire", ("0.5", "100", "2024-06-15"), "   ", wallet)
         assert exc.value.msg_code == MessageCode.STIR_ERROR_ADJUST_REASON_REQUIRED
 
     def test_negative_units_rejected(self) -> None:
         conn = _make_conn()
+        wallet = _make_wallet(conn)
         with pytest.raises(_StirError) as exc:
-            _apply_adjust(conn, "acquire", ("-1.0", "100", "2024-06-15"), reason="r")
+            _apply_adjust(conn, "acquire", ("-1.0", "100", "2024-06-15"), "r", wallet)
         assert exc.value.msg_code == MessageCode.STIR_ERROR_ADJUST_INVALID_AMOUNT
 
     def test_zero_cad_rejected(self) -> None:
         conn = _make_conn()
+        wallet = _make_wallet(conn)
         with pytest.raises(_StirError) as exc:
-            _apply_adjust(conn, "acquire", ("0.5", "0", "2024-06-15"), reason="r")
+            _apply_adjust(conn, "acquire", ("0.5", "0", "2024-06-15"), "r", wallet)
         assert exc.value.msg_code == MessageCode.STIR_ERROR_ADJUST_INVALID_AMOUNT
 
     def test_invalid_date_rejected(self) -> None:
         conn = _make_conn()
+        wallet = _make_wallet(conn)
         with pytest.raises(_StirError) as exc:
-            _apply_adjust(conn, "acquire", ("0.5", "100", "yesterday"), reason="r")
+            _apply_adjust(conn, "acquire", ("0.5", "100", "yesterday"), "r", wallet)
         assert exc.value.msg_code == MessageCode.STIR_ERROR_ADJUST_INVALID_DATE
 
     def test_clear_unknown_id_raises(self) -> None:
@@ -243,21 +345,73 @@ class TestStirAdjustValidation:
             _apply_clear_adjustment(conn, 4242)
         assert exc.value.msg_code == MessageCode.STIR_ERROR_ADJUST_NOT_FOUND
 
-    def test_happy_path_writes_adjustment_and_audit(self) -> None:
+    def test_happy_path_writes_adjustment_with_wallet_and_audit(self) -> None:
         conn = _make_conn()
+        wallet = _make_wallet(conn, name="ledger-cold")
         rc = _apply_adjust(
             conn,
             "acquire",
             ("0.50000000", "12345.67", "2024-06-15"),
-            reason="Lost private key on old laptop; reconstructed from bank statement.",
+            "Lost private key on old laptop; reconstructed from bank statement.",
+            wallet,
         )
         assert rc == 0
         adjustments = repo.read_manual_adjustments(conn)
         assert len(adjustments) == 1
-        assert adjustments[0].asset == "BTC"  # uppercased
+        assert adjustments[0].asset == "BTC"
+        assert adjustments[0].wallet_id == wallet.id
         audit = repo.read_audit_log(conn)
         assert len(audit) == 1
         assert audit[0]["stage"] == "manual_adjust"
+        new_value = audit[0]["new_value"]
+        assert new_value is not None
+        assert "wallet=ledger-cold" in new_value
+
+
+class TestResolveAdjustWallet:
+    def test_resolves_existing_wallet(self) -> None:
+        conn = _make_conn()
+        wallet = _make_wallet(conn, name="ledger-cold")
+        resolved = _resolve_adjust_wallet(conn, "ledger-cold")
+        assert resolved.id == wallet.id
+
+    def test_strips_whitespace(self) -> None:
+        conn = _make_conn()
+        wallet = _make_wallet(conn, name="ledger-cold")
+        resolved = _resolve_adjust_wallet(conn, "  ledger-cold  ")
+        assert resolved.id == wallet.id
+
+    def test_none_raises_required(self) -> None:
+        conn = _make_conn()
+        _make_wallet(conn, name="ledger-cold")
+        with pytest.raises(_StirError) as exc:
+            _resolve_adjust_wallet(conn, None)
+        assert exc.value.msg_code == MessageCode.STIR_ERROR_ADJUST_WALLET_REQUIRED
+        assert "ledger-cold" in str(exc.value.msg_kwargs.get("available", ""))
+
+    def test_empty_raises_required(self) -> None:
+        conn = _make_conn()
+        _make_wallet(conn, name="ledger-cold")
+        with pytest.raises(_StirError) as exc:
+            _resolve_adjust_wallet(conn, "   ")
+        assert exc.value.msg_code == MessageCode.STIR_ERROR_ADJUST_WALLET_REQUIRED
+
+    def test_unknown_name_raises_with_available_list(self) -> None:
+        conn = _make_conn()
+        _make_wallet(conn, name="ledger-cold")
+        _make_wallet(conn, name="shakepay")
+        with pytest.raises(_StirError) as exc:
+            _resolve_adjust_wallet(conn, "nope")
+        assert exc.value.msg_code == MessageCode.STIR_ERROR_ADJUST_WALLET_UNKNOWN
+        available = str(exc.value.msg_kwargs["available"])
+        assert "ledger-cold" in available
+        assert "shakepay" in available
+
+    def test_no_wallets_raises(self) -> None:
+        conn = _make_conn()
+        with pytest.raises(_StirError) as exc:
+            _resolve_adjust_wallet(conn, "anything")
+        assert exc.value.msg_code == MessageCode.STIR_ERROR_ADJUST_NO_WALLETS
 
 
 class TestParsers:
@@ -298,10 +452,11 @@ class TestParsers:
 
 
 class TestBoilInjection:
-    def test_inject_manual_adjustments_writes_classified_events(self) -> None:
+    def test_inject_manual_adjustments_propagates_wallet_id(self) -> None:
         from sirop.cli.boil import _inject_manual_adjustments
 
         conn = _make_conn()
+        wallet = _make_wallet(conn, name="ledger-cold")
         ts = datetime(2024, 6, 15, tzinfo=UTC)
         repo.write_manual_adjustment(
             conn,
@@ -311,6 +466,7 @@ class TestBoilInjection:
             cad_value=Decimal("12345.67"),
             timestamp=ts,
             reason="reconstructed from bank statement",
+            wallet_id=wallet.id,
         )
         repo.write_manual_adjustment(
             conn,
@@ -320,6 +476,7 @@ class TestBoilInjection:
             cad_value=Decimal("500"),
             timestamp=ts,
             reason="lost private key — deemed disposition at FMV",
+            wallet_id=wallet.id,
         )
         count = _inject_manual_adjustments(conn)
         assert count == 2  # noqa: PLR2004
@@ -332,6 +489,29 @@ class TestBoilInjection:
         assert all(e.is_provisional for e in events)
         assert all(e.is_taxable for e in events)
         assert all(e.vtx_id is None for e in events)
+        # Every injected event must carry the wallet attribution so the
+        # per-wallet holdings view picks it up via the provisional_adj CTE.
+        assert all(e.wallet_id == wallet.id for e in events)
+
+    def test_inject_preserves_null_wallet_for_legacy_rows(self) -> None:
+        """A v12-era unattributed row still flows through as wallet_id=None."""
+        from sirop.cli.boil import _inject_manual_adjustments
+
+        conn = _make_conn()
+        ts = datetime(2024, 6, 15, tzinfo=UTC)
+        repo.write_manual_adjustment(
+            conn,
+            kind="acquire",
+            asset="BTC",
+            units=Decimal("0.25"),
+            cad_value=Decimal("6000"),
+            timestamp=ts,
+            reason="legacy unattributed",
+        )
+        _inject_manual_adjustments(conn)
+        events = repo.read_classified_events(conn)
+        assert len(events) == 1
+        assert events[0].wallet_id is None
 
     def test_acb_engine_processes_manual_events(self) -> None:
         """Manual buy then sell should produce a normal disposition with correct gain."""

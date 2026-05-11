@@ -1141,6 +1141,24 @@ def wallet_exists(conn: sqlite3.Connection, name: str) -> bool:
     return row is not None
 
 
+def find_wallet_by_name(conn: sqlite3.Connection, name: str) -> Wallet | None:
+    """Return the wallet with *name*, or ``None`` if no row matches."""
+    row = conn.execute(
+        "SELECT id, name, source, auto_created, created_at, note FROM wallets WHERE name = ?",
+        (name,),
+    ).fetchone()
+    if row is None:
+        return None
+    return Wallet(
+        id=row["id"],
+        name=row["name"],
+        source=row["source"],
+        auto_created=bool(row["auto_created"]),
+        created_at=datetime.fromisoformat(row["created_at"]),
+        note=row["note"] or "",
+    )
+
+
 def read_wallets(conn: sqlite3.Connection) -> list[Wallet]:
     """Return all wallets ordered by name."""
     rows = conn.execute(
@@ -1382,22 +1400,24 @@ def write_manual_adjustment(  # noqa: PLR0913
     timestamp: datetime,
     reason: str,
     note: str = "",
+    wallet_id: int | None = None,
 ) -> ManualAdjustment:
     """Persist a manual reconciliation adjustment and return it with a DB ID.
 
     The caller is responsible for validating *reason* is non-empty, *units* and
-    *cad_value* are positive Decimals, *timestamp* is timezone-aware, and *kind*
-    is one of ``'acquire'``/``'dispose'``.  This function does not validate —
-    the CLI layer rejects bad input via ``MessageCode.STIR_ERROR_*`` codes
-    before calling here.
+    *cad_value* are positive Decimals, *timestamp* is timezone-aware, *kind*
+    is one of ``'acquire'``/``'dispose'``, and (for v13+) *wallet_id* refers
+    to an existing wallets row.  This function does not validate — the CLI
+    layer rejects bad input via ``MessageCode.STIR_ERROR_*`` codes before
+    calling here.
     """
     now = datetime.now(tz=UTC)
     with conn:
         cursor = conn.execute(
             """
             INSERT INTO manual_adjustments
-                (kind, asset, units, cad_value, timestamp, reason, created_at, note)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (kind, asset, units, cad_value, timestamp, reason, created_at, note, wallet_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 kind,
@@ -1408,6 +1428,7 @@ def write_manual_adjustment(  # noqa: PLR0913
                 reason,
                 now.isoformat(),
                 note,
+                wallet_id,
             ),
         )
     return ManualAdjustment(
@@ -1420,6 +1441,7 @@ def write_manual_adjustment(  # noqa: PLR0913
         reason=reason,
         created_at=now,
         note=note,
+        wallet_id=wallet_id,
     )
 
 
@@ -1433,7 +1455,7 @@ def read_manual_adjustments(conn: sqlite3.Connection) -> list[ManualAdjustment]:
         rows = conn.execute(
             """
             SELECT id, kind, asset, units, cad_value, timestamp, reason,
-                   created_at, note
+                   created_at, note, wallet_id
             FROM manual_adjustments
             ORDER BY timestamp, id
             """
@@ -1452,6 +1474,7 @@ def read_manual_adjustments(conn: sqlite3.Connection) -> list[ManualAdjustment]:
             reason=row["reason"],
             created_at=datetime.fromisoformat(row["created_at"]),
             note=row["note"] or "",
+            wallet_id=row["wallet_id"],
         )
         for row in rows
     ]
@@ -1468,7 +1491,7 @@ def delete_manual_adjustment(
     rows = conn.execute(
         """
         SELECT id, kind, asset, units, cad_value, timestamp, reason,
-               created_at, note
+               created_at, note, wallet_id
         FROM manual_adjustments WHERE id = ?
         """,
         (adjustment_id,),
@@ -1486,6 +1509,7 @@ def delete_manual_adjustment(
         reason=row["reason"],
         created_at=datetime.fromisoformat(row["created_at"]),
         note=row["note"] or "",
+        wallet_id=row["wallet_id"],
     )
     with conn:
         conn.execute("DELETE FROM manual_adjustments WHERE id = ?", (adjustment_id,))

@@ -57,6 +57,11 @@ class ManualAdjustment:
         UTC datetime the user entered the adjustment (write time).
     note:
         Optional additional annotation.
+    wallet_id:
+        Foreign key into ``wallets(id)`` identifying which wallet this
+        reconciliation is attributed to.  Required for new entries written
+        on schema v13+.  Legacy v12 rows migrated forward keep this
+        ``None`` and read back as batch-wide / unattributed.
     """
 
     id: int
@@ -68,3 +73,4 @@ class ManualAdjustment:
     reason: str
     created_at: datetime
     note: str = ""
+    wallet_id: int | None = None
