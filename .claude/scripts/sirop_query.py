@@ -396,7 +396,7 @@ def cmd_wallets(conn: sqlite3.Connection, args: argparse.Namespace) -> int:
     """Wallet registry plus per-wallet event counts grouped by event_type."""
     section("wallets")
     cur = conn.execute(
-        "SELECT id, name, source, auto_created, created_at, note " "FROM wallets ORDER BY id"
+        "SELECT id, name, source, auto_created, created_at, note FROM wallets ORDER BY id"
     )
     render_rows("wallets", cur, raw=args.raw, limit=args.limit)
 

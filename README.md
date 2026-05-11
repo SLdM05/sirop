@@ -52,6 +52,7 @@ penalties, or interest charges arising from its use.
 | Shakepay | CSV export | BTC and CAD accounts; fees embedded in spread |
 | NDAX | AlphaPoint Ledgers CSV | Grouped by TX\_ID; explicit fee rows |
 | Sparrow Wallet | CSV export | BTC or satoshi amounts; unit auto-detected |
+| xpub / ypub / zpub wallets | YAML wallet definition | Derives child addresses (BIP44/49/84), scans history via your own Mempool node, loads each HD branch as a named wallet |
 
 ---
 
@@ -79,6 +80,8 @@ sirop tap ~/Downloads/exports/
 sirop tap ~/Downloads/ndax_2025_ledger.csv
 sirop tap ~/Downloads/shakepay_2025_btc.csv
 sirop tap ~/Downloads/sparrow_2025.csv
+#    Or derive and scan HD wallet history via your own Mempool node:
+sirop tap ~/wallets.yaml   # xpub/ypub/zpub YAML — see config/importers/xpub_example.yaml
 
 # 3. Run the tax calculation pipeline
 sirop boil
@@ -122,8 +125,9 @@ Both are plain text Markdown, not PDFs. Open in any text editor or Markdown view
 
 - **`grade` command** — batch status and pipeline overview
 - **Textual TUI** — interactive transaction browser, ACB state viewer, and batch switcher
-- **Bitcoin node verification** — confirm on-chain transaction details via Bitcoin Core RPC
-  or Mempool REST API before ACB calculation
+- **Full on-chain node verification** — timestamp override, exact fee capture, and
+  amount cross-validation via Bitcoin Core RPC or a private Mempool node before ACB
+  calculation (graph traversal for transfer matching is already implemented)
 - **Additional import formats** — Koinly capital gains CSV (as a validation source),
   more Canadian exchanges
 

@@ -597,6 +597,5 @@ def migrate_to_v13(conn: sqlite3.Connection) -> None:
         ma_cols = {r[1] for r in conn.execute("PRAGMA table_info(manual_adjustments)")}
         if "wallet_id" not in ma_cols:
             conn.execute(
-                "ALTER TABLE manual_adjustments ADD COLUMN "
-                "wallet_id INTEGER REFERENCES wallets(id)"
+                "ALTER TABLE manual_adjustments ADD COLUMN wallet_id INTEGER REFERENCES wallets(id)"
             )

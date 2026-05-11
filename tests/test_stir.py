@@ -717,19 +717,19 @@ class TestParseFeeAmount:
         assert fee == Decimal("0")
 
     def test_zero_rejected(self) -> None:
-        fee, err = _parse_fee_amount("0", "BTC", Decimal("0.01"))
+        _fee, err = _parse_fee_amount("0", "BTC", Decimal("0.01"))
         assert err != ""
 
     def test_negative_rejected(self) -> None:
-        fee, err = _parse_fee_amount("-0.001", "BTC", Decimal("0.01"))
+        _fee, err = _parse_fee_amount("-0.001", "BTC", Decimal("0.01"))
         assert err != ""
 
     def test_fee_equal_to_amount_rejected(self) -> None:
-        fee, err = _parse_fee_amount("0.01", "BTC", Decimal("0.01"))
+        _fee, err = _parse_fee_amount("0.01", "BTC", Decimal("0.01"))
         assert err != ""
 
     def test_fee_greater_than_amount_rejected(self) -> None:
-        fee, err = _parse_fee_amount("0.02", "BTC", Decimal("0.01"))
+        _fee, err = _parse_fee_amount("0.02", "BTC", Decimal("0.01"))
         assert err != ""
 
     def test_fee_just_below_amount_accepted(self) -> None:
@@ -1194,9 +1194,9 @@ class TestProvisionalConsolidation:
 
         result = repo.read_provisional_events(conn)
 
-        assert (
-            len(result) == 1
-        ), f"Expected 1 provisional event row, got {len(result)} — cartesian product bug"
+        assert len(result) == 1, (
+            f"Expected 1 provisional event row, got {len(result)} — cartesian product bug"
+        )
         assert result[0].deposit_id == 16  # noqa: PLR2004
         assert result[0].withdrawal_count == 2  # noqa: PLR2004
         assert result[0].amount == Decimal("0.00026670")

@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from sirop.cli.boil import _inject_manual_adjustments
 from sirop.cli.stir import (
     _apply_adjust,
     _apply_clear_adjustment,
@@ -38,8 +39,13 @@ from sirop.db.schema import (
     migrate_to_v12,
     migrate_to_v13,
 )
+from sirop.engine.acb import TaxRules
+from sirop.engine.acb import run as run_acb
 from sirop.models.adjustment import ManualAdjustment
+from sirop.models.disposition import AdjustedDisposition
+from sirop.models.event import ClassifiedEvent
 from sirop.models.messages import MessageCode
+from sirop.reports.formatter import _build_dispositions_table, _build_tp_part3_acquisitions
 
 if TYPE_CHECKING:
     from sirop.models.wallet import Wallet
@@ -453,8 +459,6 @@ class TestParsers:
 
 class TestBoilInjection:
     def test_inject_manual_adjustments_propagates_wallet_id(self) -> None:
-        from sirop.cli.boil import _inject_manual_adjustments
-
         conn = _make_conn()
         wallet = _make_wallet(conn, name="ledger-cold")
         ts = datetime(2024, 6, 15, tzinfo=UTC)
@@ -495,8 +499,6 @@ class TestBoilInjection:
 
     def test_inject_preserves_null_wallet_for_legacy_rows(self) -> None:
         """A v12-era unattributed row still flows through as wallet_id=None."""
-        from sirop.cli.boil import _inject_manual_adjustments
-
         conn = _make_conn()
         ts = datetime(2024, 6, 15, tzinfo=UTC)
         repo.write_manual_adjustment(
@@ -515,8 +517,6 @@ class TestBoilInjection:
 
     def test_acb_engine_processes_manual_events(self) -> None:
         """Manual buy then sell should produce a normal disposition with correct gain."""
-        from sirop.engine.acb import TaxRules, run
-
         ts1 = datetime(2024, 1, 15, tzinfo=UTC)
         ts2 = datetime(2024, 2, 15, tzinfo=UTC)
 
@@ -542,8 +542,6 @@ class TestBoilInjection:
         )
 
         # Convert to ClassifiedEvent the same way _inject_manual_adjustments does.
-        from sirop.models.event import ClassifiedEvent
-
         events = [
             ClassifiedEvent(
                 id=1,
@@ -583,7 +581,7 @@ class TestBoilInjection:
             superficial_loss_window_days=30,
             reward_treatment={},
         )
-        disps, _states, pools, _last, underruns = run(events, rules)
+        disps, _states, pools, _last, underruns = run_acb(events, rules)
 
         assert underruns == []
         assert len(disps) == 1
@@ -603,9 +601,6 @@ class TestBoilInjection:
 
 class TestReportFlagging:
     def test_dispositions_table_marks_manual_rows(self) -> None:
-        from sirop.models.disposition import AdjustedDisposition
-        from sirop.reports.formatter import _build_dispositions_table
-
         ts = datetime(2024, 6, 15, tzinfo=UTC)
         d_normal = AdjustedDisposition(
             id=1,
@@ -652,9 +647,6 @@ class TestReportFlagging:
         assert "0.05" in manual_line or "50" in manual_line
 
     def test_acquisitions_table_flags_manual_assets(self) -> None:
-        from sirop.models.event import ClassifiedEvent
-        from sirop.reports.formatter import _build_tp_part3_acquisitions
-
         ts = datetime(2024, 6, 15, tzinfo=UTC)
         normal = ClassifiedEvent(
             id=10,

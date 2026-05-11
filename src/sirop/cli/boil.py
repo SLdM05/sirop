@@ -34,6 +34,7 @@ from sirop.db.schema import PIPELINE_STAGES
 from sirop.engine import acb as acb_engine
 from sirop.engine import superficial_loss as sld_engine
 from sirop.engine.acb import TaxRules
+from sirop.models.event import ClassifiedEvent
 from sirop.models.messages import MessageCode
 from sirop.node.privacy import is_private_node_url
 from sirop.normalizer import normalizer
@@ -519,8 +520,6 @@ def _inject_manual_adjustments(conn: sqlite3.Connection) -> int:
 
     Returns the number of adjustments injected (0 when none exist).
     """
-    from sirop.models.event import ClassifiedEvent  # local import to avoid cycle hint
-
     adjustments = repo.read_manual_adjustments(conn)
     if not adjustments:
         return 0
