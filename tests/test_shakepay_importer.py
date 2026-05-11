@@ -181,9 +181,9 @@ def test_buy_and_sell_timestamps_disjoint(transactions: list[RawTransaction]) ->
     """No timestamp should appear in both the buy and sell lists."""
     buy_ts = {t.timestamp for t in _find(transactions, "buy", "BTC")}
     sell_ts = {t.timestamp for t in _find(transactions, "sell", "BTC")}
-    assert buy_ts.isdisjoint(
-        sell_ts
-    ), "Same timestamp appears in both buy and sell lists — direction detection broken"
+    assert buy_ts.isdisjoint(sell_ts), (
+        "Same timestamp appears in both buy and sell lists — direction detection broken"
+    )
 
 
 # ---------------------------------------------------------------------------
