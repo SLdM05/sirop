@@ -216,31 +216,25 @@ class TestStirAdjustValidation:
     def test_reason_required(self) -> None:
         conn = _make_conn()
         with pytest.raises(_StirError) as exc:
-            _apply_adjust(conn, "acquire", ("BTC", "0.5", "100", "2024-06-15"), reason="   ")
+            _apply_adjust(conn, "acquire", ("0.5", "100", "2024-06-15"), reason="   ")
         assert exc.value.msg_code == MessageCode.STIR_ERROR_ADJUST_REASON_REQUIRED
-
-    def test_invalid_asset_rejected(self) -> None:
-        conn = _make_conn()
-        with pytest.raises(_StirError) as exc:
-            _apply_adjust(conn, "acquire", ("not-an-asset", "0.5", "100", "2024-06-15"), reason="r")
-        assert exc.value.msg_code == MessageCode.STIR_ERROR_ADJUST_INVALID_ASSET
 
     def test_negative_units_rejected(self) -> None:
         conn = _make_conn()
         with pytest.raises(_StirError) as exc:
-            _apply_adjust(conn, "acquire", ("BTC", "-1.0", "100", "2024-06-15"), reason="r")
+            _apply_adjust(conn, "acquire", ("-1.0", "100", "2024-06-15"), reason="r")
         assert exc.value.msg_code == MessageCode.STIR_ERROR_ADJUST_INVALID_AMOUNT
 
     def test_zero_cad_rejected(self) -> None:
         conn = _make_conn()
         with pytest.raises(_StirError) as exc:
-            _apply_adjust(conn, "acquire", ("BTC", "0.5", "0", "2024-06-15"), reason="r")
+            _apply_adjust(conn, "acquire", ("0.5", "0", "2024-06-15"), reason="r")
         assert exc.value.msg_code == MessageCode.STIR_ERROR_ADJUST_INVALID_AMOUNT
 
     def test_invalid_date_rejected(self) -> None:
         conn = _make_conn()
         with pytest.raises(_StirError) as exc:
-            _apply_adjust(conn, "acquire", ("BTC", "0.5", "100", "yesterday"), reason="r")
+            _apply_adjust(conn, "acquire", ("0.5", "100", "yesterday"), reason="r")
         assert exc.value.msg_code == MessageCode.STIR_ERROR_ADJUST_INVALID_DATE
 
     def test_clear_unknown_id_raises(self) -> None:
@@ -254,7 +248,7 @@ class TestStirAdjustValidation:
         rc = _apply_adjust(
             conn,
             "acquire",
-            ("btc", "0.50000000", "12345.67", "2024-06-15"),
+            ("0.50000000", "12345.67", "2024-06-15"),
             reason="Lost private key on old laptop; reconstructed from bank statement.",
         )
         assert rc == 0

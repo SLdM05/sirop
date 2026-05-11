@@ -126,20 +126,20 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     stir_p.add_argument(
         "--adjust-acquire",
-        nargs=4,
-        metavar=("ASSET", "UNITS", "CAD", "DATE"),
+        nargs=3,
+        metavar=("UNITS", "CAD", "DATE"),
         help=(
-            "Record a manual reconciliation acquisition. Use when your real wallet "
+            "Record a manual reconciliation BTC acquisition. Use when your real wallet "
             "balance exceeds what sirop calculated (missing import). Requires --reason. "
             "DATE is YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ."
         ),
     )
     stir_p.add_argument(
         "--adjust-dispose",
-        nargs=4,
-        metavar=("ASSET", "UNITS", "CAD", "DATE"),
+        nargs=3,
+        metavar=("UNITS", "CAD", "DATE"),
         help=(
-            "Record a manual reconciliation disposition. Use when your real wallet "
+            "Record a manual reconciliation BTC disposition. Use when your real wallet "
             "balance is below what sirop calculated (extra units in pool). Requires --reason."
         ),
     )

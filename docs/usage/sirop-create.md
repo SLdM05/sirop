@@ -1,5 +1,5 @@
 ---
-verified-at: b5e6b66
+verified-at: 9157e16
 tracks:
   - src/sirop/cli/create.py
   - src/sirop/cli/list_batches.py
@@ -7,7 +7,6 @@ tracks:
   - src/sirop/__main__.py
   - src/sirop/db/connection.py
 ---
-
 # sirop create — Batch Management
 
 ## What is a batch?

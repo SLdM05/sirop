@@ -1592,9 +1592,6 @@ def _interactive_loop(  # noqa: PLR0912 PLR0913 PLR0915
 # ---------------------------------------------------------------------------
 
 
-_ASSET_RE: re.Pattern[str] = re.compile(r"^[A-Z0-9]{1,10}$")
-
-
 def _parse_iso_date(raw: str) -> datetime | None:
     """Accept ``YYYY-MM-DD`` or full ISO 8601 with offset; return UTC datetime or None."""
     raw = raw.strip()
@@ -1624,7 +1621,6 @@ def _parse_positive_decimal(raw: str) -> Decimal | None:
 
 
 def _validate_adjustment_inputs(
-    asset_raw: str,
     units_raw: str,
     cad_raw: str,
     date_raw: str,
@@ -1639,9 +1635,7 @@ def _validate_adjustment_inputs(
     if not reason or not reason.strip():
         raise _StirError(MessageCode.STIR_ERROR_ADJUST_REASON_REQUIRED)
 
-    asset = asset_raw.strip().upper()
-    if not _ASSET_RE.fullmatch(asset):
-        raise _StirError(MessageCode.STIR_ERROR_ADJUST_INVALID_ASSET, value=asset_raw)
+    asset = "BTC"
 
     units = _parse_positive_decimal(units_raw)
     if units is None:
@@ -1669,13 +1663,13 @@ def _apply_adjust(
     reason: str | None,
 ) -> int:
     """Persist a manual adjustment plus an audit_log row recording it."""
-    if len(args) != 4:  # noqa: PLR2004
-        # argparse already enforces nargs=4; this is a defence-in-depth.
+    if len(args) != 3:  # noqa: PLR2004
+        # argparse already enforces nargs=3; this is a defence-in-depth.
         raise _StirError(MessageCode.STIR_ERROR_ADJUST_INVALID_KIND, kind=kind)
-    asset_raw, units_raw, cad_raw, date_raw = args
+    units_raw, cad_raw, date_raw = args
 
     asset, units, cad_value, timestamp = _validate_adjustment_inputs(
-        asset_raw, units_raw, cad_raw, date_raw, reason
+        units_raw, cad_raw, date_raw, reason
     )
 
     adj = repo.write_manual_adjustment(
@@ -1775,9 +1769,9 @@ def _cmd_adjust(conn: sqlite3.Connection) -> None:
     """Interactive REPL wizard for adding a manual reconciliation adjustment."""
     out.print()
     out.print("  Manual reconciliation adjustment wizard")
-    out.print("  [dim]Use this when your real wallet/exchange balance does not match")
-    out.print("  what sirop calculated, and the gap cannot be closed by importing")
-    out.print("  more CSVs or fixing transfers via 'transfer'.[/dim]")
+    out.print("  [dim]Use this when your real wallet/exchange balance does not match[/dim]")
+    out.print("  [dim]what sirop calculated, and the gap cannot be closed by importing[/dim]")
+    out.print("  [dim]more CSVs or fixing transfers via 'transfer'.[/dim]")
     out.print()
 
     try:
@@ -1795,7 +1789,6 @@ def _cmd_adjust(conn: sqlite3.Connection) -> None:
         out.print(f"  Invalid kind: {kind_raw!r}. Cancelled.")
         return
 
-    asset_raw = input("  Asset (e.g. BTC): ")
     units_raw = input("  Units: ")
     cad_raw = input("  CAD cost basis: ") if kind == "acquire" else input("  CAD proceeds: ")
     date_raw = input("  Date (YYYY-MM-DD): ")
@@ -1810,7 +1803,7 @@ def _cmd_adjust(conn: sqlite3.Connection) -> None:
     reason_raw = input("  Reason: ")
 
     try:
-        _apply_adjust(conn, kind, (asset_raw, units_raw, cad_raw, date_raw), reason_raw)
+        _apply_adjust(conn, kind, (units_raw, cad_raw, date_raw), reason_raw)
     except _StirError as exc:
         # In the interactive loop we want to surface the error and continue,
         # not abort the whole stir session.

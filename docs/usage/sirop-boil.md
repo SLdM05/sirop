@@ -1,5 +1,5 @@
 ---
-verified-at: b5e6b66
+verified-at: 9157e16
 tracks:
   - src/sirop/cli/boil.py
   - src/sirop/__main__.py
@@ -7,7 +7,6 @@ tracks:
   - src/sirop/normalizer
   - src/sirop/transfer_match
 ---
-
 # sirop boil — Run the Tax Calculation Pipeline
 
 ## What `boil` does

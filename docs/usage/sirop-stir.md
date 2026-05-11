@@ -1,10 +1,9 @@
 ---
-verified-at: b5e6b66
+verified-at: 9157e16
 tracks:
   - src/sirop/cli/stir.py
   - src/sirop/__main__.py
 ---
-
 # sirop stir — Review and Override Transfer Matching
 
 ## What `stir` does
@@ -41,8 +40,8 @@ sirop stir --unlink <id1> <id2>
 sirop stir --clear <id>
 
 sirop stir --list-adjustments
-sirop stir --adjust-acquire <ASSET> <UNITS> <CAD> <DATE> --reason "..."
-sirop stir --adjust-dispose <ASSET> <UNITS> <CAD> <DATE> --reason "..."
+sirop stir --adjust-acquire <UNITS> <CAD> <DATE> --reason "..."
+sirop stir --adjust-dispose <UNITS> <CAD> <DATE> --reason "..."
 sirop stir --clear-adjustment <ADJ_ID>
 ```
 
@@ -72,8 +71,8 @@ acquisition or disposition to close the gap.  Every adjustment requires a
 | Argument | Description |
 |----------|-------------|
 | `--list-adjustments` | Print all manual reconciliation adjustments and exit |
-| `--adjust-acquire ASSET UNITS CAD DATE` | Record a synthetic acquisition (adds units + cost basis to the ACB pool). Requires `--reason`. |
-| `--adjust-dispose ASSET UNITS CAD DATE` | Record a synthetic disposition (removes units, generates a gain/loss row). Requires `--reason`. |
+| `--adjust-acquire UNITS CAD DATE` | Record a synthetic BTC acquisition (adds units + cost basis to the ACB pool). Requires `--reason`. |
+| `--adjust-dispose UNITS CAD DATE` | Record a synthetic BTC disposition (removes units, generates a gain/loss row). Requires `--reason`. |
 | `--reason TEXT` | CRA-defensible justification for the adjustment. Mandatory; rejected if blank. |
 | `--clear-adjustment ADJ_ID` | Remove a manual adjustment by its `adj_id`. Writes a second `audit_log` row recording the removal — the original create entry is never deleted. |
 

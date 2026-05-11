@@ -1,12 +1,11 @@
 ---
-verified-at: b5e6b66
+verified-at: 9157e16
 tracks:
   - src/sirop/__main__.py
   - config/messages.yaml
   - src/sirop/models/messages.py
   - src/sirop/utils/messages.py
 ---
-
 # sirop — Language and Naming Guide
 
 ## The Theme

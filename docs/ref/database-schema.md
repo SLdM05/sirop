@@ -1,11 +1,10 @@
 ---
-verified-at: b5e6b66
+verified-at: 9157e16
 tracks:
   - src/sirop/db/schema.py
   - src/sirop/db/connection.py
   - src/sirop/db/repositories.py
 ---
-
 # sirop Database Schema
 
 Each `.sirop` file is a SQLite database representing **one batch** — one
