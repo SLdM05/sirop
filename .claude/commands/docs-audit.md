@@ -1,11 +1,12 @@
-Audit `docs/` for staleness against the code each doc tracks. Use after touching `src/`, before opening a PR, or when starting work in an unfamiliar area to confirm the reference docs are still accurate.
+Audit `docs/` for staleness against the code each doc tracks. Run only when explicitly requested — not automatically on commit, file touch, or PR prep.
 
 ## When to use
 
-- A reference doc looked authoritative but a `git log` on the related code shows recent changes — confirm whether the doc is still correct.
-- You just merged a feature that touched code referenced by one of the reference docs and want to know which docs need a re-read.
-- Before quoting `docs/ref/<file>.md` as ground truth in a PR description, technical decision, or another doc.
-- During a release / PR-prep pass: enumerate suspect docs and clear the list.
+Run this skill only when the user explicitly asks for a docs audit or doc drift check. Do not invoke proactively.
+
+Typical explicit requests:
+- "Run the docs audit" / "check for doc drift" / `/docs-audit`
+- The user asks whether a specific reference doc is still accurate.
 
 If the question is *"do the docs match the code right now?"* — use this skill. If the question is *"what does the code currently do?"* — read the code directly.
 
