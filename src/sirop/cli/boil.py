@@ -550,7 +550,7 @@ def _inject_manual_adjustments(conn: sqlite3.Connection) -> int:
                 txid=None,
                 source="manual",
                 is_taxable=True,
-                wallet_id=None,
+                wallet_id=adj.wallet_id,
                 is_provisional=True,
             )
         )

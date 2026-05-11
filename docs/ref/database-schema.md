@@ -582,7 +582,8 @@ manual_adjustments (
     timestamp   TEXT    NOT NULL,           -- ISO 8601 UTC — date attributed to the event
     reason      TEXT    NOT NULL,           -- mandatory; rejected if blank
     created_at  TEXT    NOT NULL,           -- ISO 8601 UTC of when the user entered it
-    note        TEXT    NOT NULL DEFAULT ''
+    note        TEXT    NOT NULL DEFAULT '',
+    wallet_id   INTEGER REFERENCES wallets(id)  -- v13; NULL for legacy/batch-wide
 )
 ```
 
@@ -592,9 +593,12 @@ incomplete (defunct exchanges, lost CSVs, hardware wallet history that was
 never exported, etc.).
 
 Each row produces a single `classified_events` row during the `transfer_match`
-stage with `source='manual'`, `is_provisional=1`, `vtx_id=NULL`. The ACB
-engine processes these events identically to imported ones — provenance is
-tracked only for reporting purposes.
+stage with `source='manual'`, `is_provisional=1`, `vtx_id=NULL`, and
+`wallet_id` propagated from `manual_adjustments.wallet_id`. The ACB engine
+processes these events identically to imported ones — provenance is tracked
+only for reporting purposes. The wallet attribution flows through the
+`provisional_adj` CTE inside `read_per_wallet_holdings` so the per-wallet
+holdings view reflects the reconciliation.
 
 The mandatory `reason` field plus a permanent `audit_log` entry per row are
 the CRA-defensible record-keeping pattern. See
@@ -830,3 +834,4 @@ that need a batch (and weren't given one explicitly) read this file first.
 | 10 | New table: `transaction_txid_overrides` — stores user-supplied blockchain txids (via `sirop stir destination <id>`) for BTC transactions whose CSV did not include a txid (e.g. NDAX withdrawals). Applied in-memory by `boil --from transfer_match` before Pass 1 exact-txid matching; also applied by `sirop stir` so destination-matched pairs are visible without re-running boil. |
 | 11 | `classified_events.is_provisional` — integer flag (default 0) marking synthetic events that represent a delta from on-chain graph-pair traversal (e.g. a provisional fee_disposal injected when `graph_transfer_pairs` links a withdrawal to a deposit whose txid differs). `migrate_to_v11()` adds the column idempotently to existing files. |
 | 12 | New table: `manual_adjustments` — user-recorded synthetic acquisitions or dispositions used to reconcile the ACB pool with the user's actual wallet balance when imports are incomplete. Required `reason` field. Each row produces a single `classified_events` row with `source='manual'`, `is_provisional=1`, `vtx_id=NULL` during the `transfer_match` stage. The `audit_log` table is now actively used: every adjustment add and remove appends a row recording the change. `ClassifiedEvent.vtx_id` widened from `int` to `int | None` so synthetic events can carry no underlying transaction. See `docs/ref/reconciliation-and-missing-data.md`. |
+| 13 | `manual_adjustments.wallet_id` — nullable FK into `wallets(id)`. New adjustments are required to attribute themselves to a wallet via `sirop stir --wallet NAME`; the value propagates into the synthetic `classified_events.wallet_id` and is picked up by the existing `provisional_adj` CTE inside `read_per_wallet_holdings`, so a manual adjustment now re-syncs that wallet's balance in `pour` reports. Legacy v12 rows keep `wallet_id = NULL` and continue to read back as batch-wide / unattributed. `migrate_to_v13()` adds the column idempotently. |

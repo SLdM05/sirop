@@ -96,7 +96,9 @@ sirop boil
 
 # 2. Add an acquisition (or disposition) to close the gap.
 #    This example reconstructs an early BTC purchase from a 2017 bank statement.
-sirop stir --adjust-acquire BTC 0.5 12500.00 2017-11-15 \
+#    --wallet names the wallet whose per-wallet holdings view should re-sync.
+sirop stir --adjust-acquire 0.5 12500.00 2017-11-15 \
+  --wallet quadriga \
   --reason "Reconstructed from RBC chequing statement showing CAD 12,500 transfer
             to QuadrigaCX on 2017-11-15. Statement saved at ~/Records/2017/rbc.pdf.
             BTC quantity from QCX dashboard screenshot, archived 2018-12-04."
@@ -107,6 +109,31 @@ sirop boil --from transfer_match
 # 4. Confirm the underrun is gone, and review the result.
 sirop pour
 ```
+
+### Attributing an adjustment to a wallet
+
+`--wallet NAME` is required.  It points at an existing wallet in the active
+batch (run `sirop stir --list` to see available names) and tells sirop which
+per-wallet holdings line should absorb the adjustment.  Concretely:
+
+- `--adjust-acquire ... --wallet ledger-cold` adds units to `ledger-cold`'s
+  net holdings — useful when you imported a partial CSV from that wallet
+  and the on-chain balance shows more BTC than sirop calculated.
+- `--adjust-dispose ... --wallet shakepay` removes units from `shakepay`'s
+  holdings — useful when sirop's number is higher than what your exchange
+  statement actually shows.
+
+The attribution flows through to `classified_events.wallet_id`, which the
+existing `provisional_adj` CTE inside `read_per_wallet_holdings` picks up
+automatically — so the next `sirop pour` shows the resynced balance with
+no further ceremony.  The global ACB pool is also adjusted, exactly as
+before.
+
+If the discrepancy is genuinely batch-wide (a category-level cost basis
+correction, not a single wallet's gap), there is no way to leave wallet
+attribution empty from the CLI — instead, pick the wallet whose ledger you
+most want the entry to live in and document the situation in `--reason`.
+Legacy v12 entries with `wallet_id = NULL` continue to read back unchanged.
 
 The dispositions table in the resulting tax report will mark any row that
 came from a manual adjustment with `⚠ Manual reconciliation entry`, and the

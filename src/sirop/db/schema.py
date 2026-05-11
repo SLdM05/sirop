@@ -14,7 +14,7 @@ from typing import Final
 
 # Bump this when the schema changes. The migration guard reads this value
 # and refuses to open a file whose schema_version doesn't match.
-SCHEMA_VERSION: Final[int] = 12
+SCHEMA_VERSION: Final[int] = 13
 
 # All pipeline stage names in execution order.
 PIPELINE_STAGES: Final[tuple[str, ...]] = (
@@ -347,7 +347,8 @@ CREATE TABLE IF NOT EXISTS manual_adjustments (
     timestamp   TEXT    NOT NULL,           -- ISO 8601 UTC — date attributed to the event
     reason      TEXT    NOT NULL,           -- mandatory; rejected if blank
     created_at  TEXT    NOT NULL,           -- ISO 8601 UTC of when the user entered it
-    note        TEXT    NOT NULL DEFAULT ''
+    note        TEXT    NOT NULL DEFAULT '',
+    wallet_id   INTEGER REFERENCES wallets(id)  -- v13; NULL for legacy/batch-wide
 )
 """
 
@@ -580,3 +581,22 @@ def migrate_to_v12(conn: sqlite3.Connection) -> None:
     no ALTER TABLE statements are required.
     """
     create_tables(conn)
+
+
+def migrate_to_v13(conn: sqlite3.Connection) -> None:
+    """Apply v13 schema migrations to an existing batch file.
+
+    Idempotent — safe to call on fresh databases and already-migrated ones.
+    v13 adds ``manual_adjustments.wallet_id`` so reconciliation entries can
+    be attributed to a specific wallet; this lets the per-wallet holdings
+    view "resync" a wallet whose imported CSV is incomplete.  Existing v12
+    rows keep ``wallet_id = NULL`` and continue to read back as batch-wide.
+    """
+    create_tables(conn)
+    with conn:
+        ma_cols = {r[1] for r in conn.execute("PRAGMA table_info(manual_adjustments)")}
+        if "wallet_id" not in ma_cols:
+            conn.execute(
+                "ALTER TABLE manual_adjustments ADD COLUMN "
+                "wallet_id INTEGER REFERENCES wallets(id)"
+            )

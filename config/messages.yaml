@@ -362,7 +362,7 @@ messages:
 
   stir.adjust_applied:
     category: output
-    text: "Manual {kind} recorded: {units} {asset} @ {cad_value} CAD on {date} (adjustment id:{adj_id}). Run 'sirop boil --from transfer_match' to apply."
+    text: "Manual {kind} recorded: {units} {asset} @ {cad_value} CAD on {date} for wallet {wallet!r} (adjustment id:{adj_id}). Run 'sirop boil --from transfer_match' to apply."
 
   stir.adjust_cleared:
     category: output
@@ -397,6 +397,21 @@ messages:
     category: error
     code: E036
     text: "Manual adjustment id:{adj_id} not found in the active batch."
+
+  stir.error.adjust_wallet_required:
+    category: error
+    code: E037
+    text: "Manual adjustment requires --wallet NAME. Available wallets: {available}."
+
+  stir.error.adjust_wallet_unknown:
+    category: error
+    code: E038
+    text: "Unknown wallet {name!r}. Available wallets in this batch: {available}."
+
+  stir.error.adjust_no_wallets:
+    category: error
+    code: E039
+    text: "No wallets in the active batch. Run 'sirop tap' to import one first."
 
   # ── list ──────────────────────────────────────────────────────────────────
 

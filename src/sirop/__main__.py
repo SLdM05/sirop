@@ -152,6 +152,16 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     stir_p.add_argument(
+        "--wallet",
+        dest="adjust_wallet",
+        metavar="NAME",
+        help=(
+            "Wallet to attribute this manual adjustment to. Required with "
+            "--adjust-acquire/--adjust-dispose. Must be an existing wallet in "
+            "the active batch — run `sirop stir --list` to see available names."
+        ),
+    )
+    stir_p.add_argument(
         "--clear-adjustment",
         type=int,
         metavar="ADJ_ID",
@@ -253,6 +263,7 @@ def main() -> None:
                 reason=args.reason,
                 clear_adjustment=args.clear_adjustment,
                 list_adjustments=args.list_adjustments,
+                adjust_wallet=args.adjust_wallet,
             )
         )
 
