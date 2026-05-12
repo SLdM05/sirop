@@ -34,6 +34,7 @@ class OnChainTx:
     block_time: datetime | None  # UTC; None when unconfirmed
     vin_txids: tuple[str, ...] = field(default_factory=tuple)
     vout_count: int = 0
+    block_height: int | None = None  # confirmed block height; None when unconfirmed
 
 
 @dataclass(frozen=True)

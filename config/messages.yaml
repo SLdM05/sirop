@@ -314,6 +314,15 @@ messages:
     code: W008
     text: "Graph traversal skipped — public Mempool endpoint not confirmed. Set BTC_TRAVERSAL_ALLOW_PUBLIC=true or use --allow-public-mempool to proceed."
 
+  boil.verify.node_override:
+    category: output
+    text: "  Node fee validation — {checked} tx(s) checked, {overrides} fee override(s), {verified} confirmed on-chain"
+
+  boil.verify.node_unreachable:
+    category: warning
+    code: W012
+    text: "Node fee validation skipped — {url} unreachable; verify stage fell back to pass-through. Imported fees retained."
+
   boil.warning.reward_discount:
     category: warning
     code: W010

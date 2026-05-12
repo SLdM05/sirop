@@ -194,7 +194,7 @@ def _execute_stage(  # noqa: PLR0913
             _run_normalize(conn, cache_conn=cache_conn)
 
         elif stage == "verify":
-            _run_verify(conn)
+            _run_verify(conn, graph_traversal_allowed=graph_traversal_allowed)
 
         elif stage == "transfer_match":
             _run_transfer_match(
@@ -351,12 +351,74 @@ def _prefetch_crypto_prices_bulk(
         emit(MessageCode.BOIL_NORMALIZE_BOC_ATTRIBUTION)
 
 
-def _run_verify(conn: object) -> None:
+def _run_verify(conn: object, *, graph_traversal_allowed: bool = True) -> None:
     assert isinstance(conn, sqlite3.Connection)
 
-    logger.debug("promoting transactions to verified (pass-through — no node)")
-    count = repo.promote_to_verified(conn)
-    logger.debug("%d row(s) promoted to verified_transactions", count)
+    settings = get_settings()
+    if not _node_fee_validation_enabled(settings, graph_traversal_allowed):
+        logger.debug("promoting transactions to verified (pass-through — no node)")
+        count = repo.promote_to_verified(conn)
+        logger.debug("%d row(s) promoted to verified_transactions", count)
+        return
+
+    from sirop.node import mempool_client
+    from sirop.node import verify as node_verify
+
+    txs = repo.read_transactions(conn)
+    if not txs:
+        repo.promote_to_verified(conn)
+        return
+
+    total = len(txs)
+    logger.debug("fee validation against %s — %d row(s)", settings.btc_mempool_url, total)
+    try:
+        with spinner(f"Validating fees against node… [0/{total}]") as status:
+
+            def _progress(done: int, _total: int) -> None:
+                status.update(f"Validating fees against node… [{done}/{_total}]")
+
+            verified, audit = node_verify.validate_fees(
+                txs,
+                fetch_tx=mempool_client.fetch_tx,
+                mempool_url=settings.btc_mempool_url,
+                on_progress=_progress,
+            )
+    except OSError as exc:
+        logger.info(
+            "verify: node unreachable (%s) — falling back to pass-through",
+            exc,
+        )
+        emit(MessageCode.BOIL_VERIFY_NODE_UNREACHABLE, url=settings.btc_mempool_url)
+        repo.promote_to_verified(conn)
+        return
+
+    rows_inserted, overrides = repo.promote_to_verified_with_node(conn, verified, audit)
+    verified_count = sum(1 for v in verified if v.node_verified)
+    logger.debug(
+        "verify: %d row(s) promoted, %d node-verified, %d override(s)",
+        rows_inserted,
+        verified_count,
+        overrides,
+    )
+    emit(
+        MessageCode.BOIL_VERIFY_NODE_OVERRIDE,
+        checked=total,
+        overrides=overrides,
+        verified=verified_count,
+    )
+
+
+def _node_fee_validation_enabled(settings: Settings, graph_traversal_allowed: bool) -> bool:
+    """Return True if the verify stage should query the configured node.
+
+    Reuses the same privacy/permission gates as Pass 1b graph traversal:
+    - ``BTC_TRAVERSAL_MAX_HOPS > 0`` (also gates whether the user has
+      meaningfully configured node access)
+    - caller already cleared the public-endpoint prompt
+    """
+    if settings.btc_traversal_max_hops <= 0:
+        return False
+    return graph_traversal_allowed
 
 
 def _resolve_graph_traversal_permission(

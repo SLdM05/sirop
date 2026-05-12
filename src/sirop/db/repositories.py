@@ -36,6 +36,8 @@ from sirop.node.models import GraphMatch
 
 if TYPE_CHECKING:
     import sqlite3
+
+    from sirop.node.verify import AuditEntry, VerifiedRow
 from sirop.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -261,35 +263,51 @@ def write_transactions(conn: sqlite3.Connection, txs: list[Transaction]) -> list
 
 
 def read_transactions(conn: sqlite3.Connection) -> list[Transaction]:
-    """Deserialize all rows from ``transactions`` into ``Transaction`` dataclasses."""
+    """Deserialize all rows from ``transactions`` into ``Transaction`` dataclasses.
+
+    Overlay any node-verified ``fee_crypto`` and ``timestamp`` from
+    ``verified_transactions`` when ``node_verified=1``.  This lets downstream
+    stages (transfer_match, boil) read a single ``Transaction`` stream whose
+    fees and timestamps reflect on-chain corrections applied by the verify
+    stage, without each stage having to query both tables.
+    """
     rows = conn.execute(
         """
-        SELECT id, source, timestamp, transaction_type, asset, amount,
-               cad_amount, cad_fee, fee_crypto, txid, is_transfer, counterpart_id, notes,
-               wallet_id
-        FROM transactions
-        ORDER BY timestamp
+        SELECT t.id, t.source, t.timestamp AS t_timestamp,
+               t.transaction_type, t.asset, t.amount,
+               t.cad_amount, t.cad_fee, t.fee_crypto AS t_fee_crypto, t.txid,
+               t.is_transfer, t.counterpart_id, t.notes, t.wallet_id,
+               vt.node_verified AS v_node_verified,
+               vt.timestamp     AS v_timestamp,
+               vt.fee_crypto    AS v_fee_crypto
+        FROM transactions t
+        LEFT JOIN verified_transactions vt ON vt.tx_id = t.id
+        ORDER BY t.timestamp
         """
     ).fetchall()
 
     result: list[Transaction] = []
     for row in rows:
+        node_verified = bool(row["v_node_verified"]) if row["v_node_verified"] else False
+        timestamp_str = row["v_timestamp"] if node_verified else row["t_timestamp"]
+        fee_crypto_str = row["v_fee_crypto"] if node_verified else row["t_fee_crypto"]
         result.append(
             Transaction(
                 id=row["id"],
                 source=row["source"],
-                timestamp=datetime.fromisoformat(row["timestamp"]),
+                timestamp=datetime.fromisoformat(timestamp_str),
                 tx_type=TransactionType(row["transaction_type"]),
                 asset=row["asset"],
                 amount=Decimal(row["amount"]),
                 cad_value=Decimal(row["cad_amount"]),
                 fee_cad=Decimal(row["cad_fee"]) if row["cad_fee"] else Decimal("0"),
-                fee_crypto=Decimal(row["fee_crypto"]) if row["fee_crypto"] else Decimal("0"),
+                fee_crypto=Decimal(fee_crypto_str) if fee_crypto_str else Decimal("0"),
                 txid=row["txid"],
                 is_transfer=bool(row["is_transfer"]),
                 counterpart_id=row["counterpart_id"],
                 notes=row["notes"] or "",
                 wallet_id=row["wallet_id"],
+                node_verified=node_verified,
             )
         )
     return result
@@ -327,6 +345,71 @@ def promote_to_verified(conn: sqlite3.Connection) -> int:
         )
     count = conn.execute("SELECT COUNT(*) FROM verified_transactions").fetchone()[0]
     return int(count)
+
+
+def promote_to_verified_with_node(
+    conn: sqlite3.Connection,
+    verified: list[VerifiedRow],
+    audit: list[AuditEntry],
+) -> tuple[int, int]:
+    """Insert node-enriched verified rows + record audit_log entries.
+
+    Single SQLite transaction.  Returns ``(rows_inserted, overrides_recorded)``.
+
+    The caller (``cli/boil._run_verify``) is responsible for producing
+    *verified* and *audit* via :func:`sirop.node.verify.validate_fees`.  This
+    keeps the repository free of node I/O while still wrapping persistence in
+    one atomic write.
+    """
+    now = datetime.now(tz=UTC).isoformat()
+    rows_inserted = 0
+    with conn:
+        for vrow in verified:
+            tx = vrow.tx
+            conn.execute(
+                """
+                INSERT INTO verified_transactions
+                    (tx_id, timestamp, transaction_type, asset, amount,
+                     fee_crypto, fee_currency, cad_amount, cad_fee, cad_rate,
+                     txid, source, is_transfer, counterpart_id,
+                     node_verified, block_height, confirmations, wallet_id)
+                SELECT
+                    t.id, ?, t.transaction_type, t.asset, t.amount,
+                    ?, t.fee_currency, t.cad_amount, t.cad_fee, t.cad_rate,
+                    t.txid, t.source, t.is_transfer, t.counterpart_id,
+                    ?, ?, ?, t.wallet_id
+                FROM transactions t
+                WHERE t.id = ?
+                """,
+                (
+                    tx.timestamp.isoformat(),
+                    format(tx.fee_crypto, "f") if tx.fee_crypto else None,
+                    1 if vrow.node_verified else 0,
+                    vrow.block_height,
+                    vrow.confirmations,
+                    tx.id,
+                ),
+            )
+            rows_inserted += 1
+
+        for entry in audit:
+            conn.execute(
+                """
+                INSERT INTO audit_log
+                    (occurred_at, stage, txid, field, old_value, new_value, reason)
+                VALUES (?, 'verify', ?, ?, ?, ?, ?)
+                """,
+                (
+                    now,
+                    entry.txid,
+                    entry.field,
+                    entry.old_value,
+                    entry.new_value,
+                    entry.reason,
+                ),
+            )
+
+    return rows_inserted, len(audit)
 
 
 # ---------------------------------------------------------------------------
