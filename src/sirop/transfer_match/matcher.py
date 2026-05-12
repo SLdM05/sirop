@@ -328,11 +328,17 @@ def match_transfers(  # noqa: PLR0912 PLR0913 PLR0915
         # Emit a fee micro-disposition for the amount that left the outgoing wallet
         # but did not arrive at the incoming wallet (network fee, miner fee, or
         # multi-payee output where only one leg is visible).
-        # Prefer the observed on-chain difference; fall back to exchange-reported fee.
-        _observed_diff = tx.amount - match.amount
-        _fee_amount = (
-            _observed_diff if _observed_diff > Decimal("0") else (tx.fee_crypto or Decimal("0"))
-        )
+        # When the verify stage validated this withdrawal against a Bitcoin node,
+        # tx.fee_crypto is the authoritative on-chain fee — trust it directly and
+        # skip the amount-delta heuristic. Otherwise prefer the observed on-chain
+        # difference; fall back to exchange-reported fee.
+        if tx.node_verified:
+            _fee_amount = tx.fee_crypto or Decimal("0")
+        else:
+            _observed_diff = tx.amount - match.amount
+            _fee_amount = (
+                _observed_diff if _observed_diff > Decimal("0") else (tx.fee_crypto or Decimal("0"))
+            )
         if _fee_amount > Decimal("0") and tx.cad_value > Decimal("0"):
             cad_rate = tx.cad_value / tx.amount if tx.amount else Decimal("0")
             fee_proceeds = _fee_amount * cad_rate

@@ -83,6 +83,8 @@ class MessageCode(StrEnum):
     BOIL_GRAPH_TRAVERSAL_UNAVAILABLE = "boil.graph.traversal_unavailable"
     BOIL_GRAPH_PRIVACY_WARNING = "boil.graph.privacy_warning"
     BOIL_GRAPH_PRIVACY_SKIPPED = "boil.graph.privacy_skipped"
+    BOIL_VERIFY_NODE_OVERRIDE = "boil.verify.node_override"
+    BOIL_VERIFY_NODE_UNREACHABLE = "boil.verify.node_unreachable"
     BOIL_WARNING_REWARD_DISCOUNT = "boil.warning.reward_discount"
     BOIL_MANUAL_ADJUSTMENTS_APPLIED = "boil.manual_adjustments_applied"
 
