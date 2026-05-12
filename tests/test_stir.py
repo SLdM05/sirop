@@ -11,7 +11,7 @@ import dataclasses
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -1122,9 +1122,21 @@ class TestProvisionalConsolidation:
             ),
         ]
 
-        with patch(
-            "sirop.transfer_match.matcher.find_graph_matches",
-            return_value=fake_matches,
+        fake_settings = MagicMock()
+        fake_settings.btc_traversal_max_hops = 3
+        fake_settings.btc_mempool_url = "http://localhost:3006/api"
+        fake_settings.btc_traversal_request_delay = 0.0
+        fake_settings.btc_traversal_allow_public = False
+
+        with (
+            patch(
+                "sirop.transfer_match.matcher.get_settings",
+                return_value=fake_settings,
+            ),
+            patch(
+                "sirop.transfer_match.matcher.find_graph_matches",
+                return_value=fake_matches,
+            ),
         ):
             events, _income, _pairs = match_transfers(
                 [withdrawal_9, withdrawal_12, deposit_16],
@@ -1194,9 +1206,9 @@ class TestProvisionalConsolidation:
 
         result = repo.read_provisional_events(conn)
 
-        assert len(result) == 1, (
-            f"Expected 1 provisional event row, got {len(result)} — cartesian product bug"
-        )
+        assert (
+            len(result) == 1
+        ), f"Expected 1 provisional event row, got {len(result)} — cartesian product bug"
         assert result[0].deposit_id == 16  # noqa: PLR2004
         assert result[0].withdrawal_count == 2  # noqa: PLR2004
         assert result[0].amount == Decimal("0.00026670")
