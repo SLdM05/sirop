@@ -293,9 +293,8 @@ Rules for privacy:
   address: `bc1qfakeaddressfortesting`)
 - `.gitignore` must include: `.env`, `data/`, `output/`, `.node_cache/`,
   `*.csv`, any file that could contain real transaction data
-- Log output should redact sensitive values by default. A `--verbose` flag
-  can reveal txids/amounts for local debugging but this mode should print
-  a clear warning that sensitive data is being logged.
+- Log output should redact sensitive values by default. `--debug` bypasses
+  redaction (shows txids/amounts/addresses) and prints a clear warning banner.
 - **BTC graph traversal privacy**: `is_private_node_url()` in `src/node/privacy.py`
   determines whether `BTC_MEMPOOL_URL` is a private address. Public endpoints
   trigger an interactive Y/n prompt (or `[W008]` skip) before any txid is sent.
@@ -442,7 +441,7 @@ All diagnostic and audit output goes through `src/sirop/utils/logging.py`.
 No module imports Python's `logging` directly or calls `logging.basicConfig()`.
 
 **Setup:**
-- Call `configure_logging(verbose, debug)` **once** at CLI entry point only
+- Call `configure_logging(debug)` **once** at CLI entry point only
 - Every other module: `from sirop.utils.logging import get_logger; logger = get_logger(__name__)`
 - Wrap each pipeline stage: `with StageContext(batch_id, stage): ...` — all logs inside carry context
 - Pure engine modules use `logging.getLogger(__name__)` directly
@@ -454,8 +453,6 @@ No module imports Python's `logging` directly or calls `logging.basicConfig()`.
 | `WARNING` | always | Data quality issues, node fallback, superficial losses. Never themed. |
 | `INFO` | always | Stage progress milestones with no `emit()` pair (e.g. `"Checking sap levels..."`). Maple theme OK. |
 | `DEBUG` | `--debug` only | Field transforms, SQL queries, ACB step-by-step, raw values. |
-
-`--debug` implies `--verbose`.
 
 **Key rule — no double-printing:** When `emit()` already covers a milestone,
 the adjacent `logger` call must be `logger.debug()`, not `logger.info()`.
@@ -469,7 +466,7 @@ Default: `SensitiveDataFilter` replaces in every log message:
 - BTC amounts near `BTC` keyword → `[amount redacted]`
 - CAD amounts near tax keywords → `[amount redacted]`
 
-`--verbose`: redaction bypassed; warning banner printed once.
+`--debug`: redaction bypassed; warning banner printed once.
 
 Per-module log message guidelines: `docs/ref/logging-spec.md`
 

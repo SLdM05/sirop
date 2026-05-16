@@ -42,20 +42,14 @@ _EPILOG = (
     epilog=_EPILOG,
 )
 @click.option(
-    "--verbose",
-    is_flag=True,
-    default=False,
-    help="Show sensitive values in log output.",
-)
-@click.option(
     "--debug",
     is_flag=True,
     default=False,
-    help="Set log level to DEBUG (implies --verbose).",
+    help="Set log level to DEBUG and show sensitive values (txids, amounts, addresses) unredacted.",
 )
-def cli(verbose: bool, debug: bool) -> None:
+def cli(debug: bool) -> None:
     """Top-level ``sirop`` command group."""
-    configure_logging(verbose=verbose, debug=debug)
+    configure_logging(debug=debug)
 
 
 cli.add_command(tap_command)
