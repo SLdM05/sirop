@@ -36,9 +36,14 @@ src = ["src", "tests"]
 [tool.ruff.lint]
 select = [
     "E", "W", "F", "I", "N", "UP", "B", "SIM",
-    "TCH", "RUF", "S", "PTH", "ERA", "PL",
+    "TCH", "RUF", "S", "PTH", "ERA", "PL", "T20",
 ]
 ignore = ["S101"]
+
+[tool.ruff.lint.per-file-ignores]
+# Standalone Claude Code skill scripts legitimately print to stdout
+# for piping into other tools.
+".claude/scripts/*.py" = ["T201"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["sirop"]
