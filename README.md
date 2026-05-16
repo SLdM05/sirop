@@ -130,8 +130,7 @@ Both are plain text Markdown, not PDFs. Open in any text editor or Markdown view
   RPC or a private Mempool node before ACB calculation. Graph traversal for transfer
   matching, exact fee capture, and on-chain timestamp override are already implemented;
   amount cross-validation is the remaining piece.
-- **Additional import formats** — Koinly capital gains CSV (as a validation source),
-  more Canadian exchanges
+- **Additional import formats** — more Canadian exchanges
 
 ---
 
