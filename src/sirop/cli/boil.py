@@ -41,7 +41,7 @@ from sirop.models.messages import MessageCode
 from sirop.node.privacy import is_private_node_url
 from sirop.normalizer import normalizer
 from sirop.transfer_match import matcher
-from sirop.ui import NonInteractiveError, confirm
+from sirop.ui import NonInteractiveError, confirm, make_table
 from sirop.utils.boc import BoCRateError, fill_rate_gaps, prefetch_rates
 from sirop.utils.console import out as _out
 from sirop.utils.crypto_prices import prefetch_crypto_prices
@@ -967,9 +967,9 @@ def _print_income_and_costs(conn: sqlite3.Connection) -> None:
     ).fetchall()
     if income_rows:
         total_income = sum(float(r["total"]) for r in income_rows)
-        print(f"  Income:                {total_income:>12,.2f} CAD")
+        _out.print(f"  Income:                [bold]{total_income:>12,.2f} CAD[/bold]")
         for r in income_rows:
-            print(f"    {r['income_type']:<20} {float(r['total']):>10,.2f} CAD")
+            _out.print(f"    [dim]{r['income_type']:<20}[/dim] {float(r['total']):>10,.2f} CAD")
 
     costs_row = conn.execute(
         "SELECT COALESCE(SUM(CAST(cad_fee AS REAL)), 0) "
@@ -977,7 +977,7 @@ def _print_income_and_costs(conn: sqlite3.Connection) -> None:
         "WHERE is_taxable = 1 AND cad_fee IS NOT NULL"
     ).fetchone()
     if costs_row and costs_row[0]:
-        print(f"  Costs & expenses:      {float(costs_row[0]):>12,.2f} CAD")
+        _out.print(f"  Costs & expenses:      [bold]{float(costs_row[0]):>12,.2f} CAD[/bold]")
 
 
 def _wallet_holding_rows(
@@ -1038,33 +1038,54 @@ def _wallet_holding_rows(
     return rows
 
 
-def _print_summary(conn: object, batch_name: str) -> None:
-    """Print a summary of row counts written to the batch."""
-    assert isinstance(conn, sqlite3.Connection)
+_STAGE_STATUS_STYLE = {
+    "done": "green",
+    "running": "yellow",
+    "invalidated": "red",
+    "pending": "dim",
+}
+
+
+def _print_row_counts(conn: sqlite3.Connection) -> None:
+    """Render the per-table row counts as a Rich table."""
 
     def _count(table: str) -> int:
         row = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()  # noqa: S608
         return int(row[0]) if row else 0
 
-    emit(MessageCode.BOIL_SUMMARY_COMPLETE, name=batch_name)
-    print(f"  transactions:          {_count('transactions'):>6}")
-    print(f"  classified_events:     {_count('classified_events'):>6}")
-    print(f"  income_events:         {_count('income_events'):>6}")
-    print(f"  dispositions:          {_count('dispositions'):>6}")
-    print(f"  dispositions_adjusted: {_count('dispositions_adjusted'):>6}")
+    table = make_table()
+    table.add_column("Table", style="dim", no_wrap=True)
+    table.add_column("Rows", justify="right", style="bold", no_wrap=True)
+    for label in (
+        "transactions",
+        "classified_events",
+        "income_events",
+        "dispositions",
+        "dispositions_adjusted",
+    ):
+        table.add_row(label, f"{_count(label):>6}")
+    _out.print(table)
 
-    # Realised gain/loss.
+
+def _print_realised_gain_loss(conn: sqlite3.Connection) -> None:
+    """Render the realised gain/loss line, coloured by sign."""
     row = conn.execute(
         "SELECT SUM(CAST(adjusted_gain_loss AS REAL)) FROM dispositions_adjusted"
     ).fetchone()
-    if row and row[0] is not None:
-        net = row[0]
-        sign = "+" if net >= 0 else ""
-        print(f"\n  Realised gain/loss:    {sign}{net:,.2f} CAD (before inclusion rate)")
+    if not row or row[0] is None:
+        return
+    net = row[0]
+    sign_style = "green" if net >= 0 else "red"
+    sign = "+" if net >= 0 else ""
+    _out.print(
+        f"\n  Realised gain/loss:    "
+        f"[bold {sign_style}]{sign}{net:,.2f} CAD[/]"
+        f" [dim](before inclusion rate)[/dim]"
+    )
 
-    _print_income_and_costs(conn)
 
-    # Year-end holdings — cost basis for open positions.
+def _print_year_end_holdings(conn: sqlite3.Connection) -> None:
+    """Render the year-end holdings (cost basis) table for open positions."""
     holdings = conn.execute(
         """
         SELECT asset, pool_cost, units
@@ -1074,22 +1095,25 @@ def _print_summary(conn: object, batch_name: str) -> None:
         ORDER BY asset
         """
     ).fetchall()
-    if holdings:
-        _out.print("\n  [bold]Year-end holdings (cost basis)[/bold]")
-        per_unit_acb: dict[str, float] = {}
-        total_rows: list[tuple[str, str, float, float, float, bool]] = []
-        for h in holdings:
-            units_val = float(h["units"])
-            cost_val = float(h["pool_cost"])
-            per_unit = cost_val / units_val if units_val else 0.0
-            per_unit_acb[h["asset"]] = per_unit
-            total_rows.append(("total", h["asset"], units_val, cost_val, per_unit, True))
+    if not holdings:
+        return
+    _out.print("\n  [bold]Year-end holdings (cost basis)[/bold]")
+    per_unit_acb: dict[str, float] = {}
+    total_rows: list[tuple[str, str, float, float, float, bool]] = []
+    for h in holdings:
+        units_val = float(h["units"])
+        cost_val = float(h["pool_cost"])
+        per_unit = cost_val / units_val if units_val else 0.0
+        per_unit_acb[h["asset"]] = per_unit
+        total_rows.append(("total", h["asset"], units_val, cost_val, per_unit, True))
 
-        tax_year = repo.read_tax_year(conn)
-        wallet_rows = _wallet_holding_rows(conn, per_unit_acb, tax_year)
-        _out.print(_holdings_table(total_rows + wallet_rows))
+    tax_year = repo.read_tax_year(conn)
+    wallet_rows = _wallet_holding_rows(conn, per_unit_acb, tax_year)
+    _out.print(_holdings_table(total_rows + wallet_rows))
 
-    # Superficial losses — show details if any were found.
+
+def _print_superficial_losses(conn: sqlite3.Connection) -> None:
+    """Render the table of dispositions adjusted by the superficial-loss rule."""
     sld_rows = conn.execute(
         """
         SELECT asset, timestamp, gain_loss, superficial_loss_denied, allowable_loss
@@ -1098,33 +1122,47 @@ def _print_summary(conn: object, batch_name: str) -> None:
         ORDER BY timestamp
         """
     ).fetchall()
-    if sld_rows:
-        hr = "─" * 68
-        print(f"\n  Superficial losses adjusted ({len(sld_rows)}):")
-        print(f"  {hr}")
-        for r in sld_rows:
-            date_str = r["timestamp"][:10]
-            denied = float(r["superficial_loss_denied"])
-            allow = float(r["allowable_loss"])
-            loss = float(r["gain_loss"])
-            print(
-                f"    {r['asset']:<5}  {date_str}"
-                f"  loss: {loss:>10,.2f} CAD"
-                f"  denied: {denied:>8,.2f}  allowable: {allow:>18.8f} CAD"
-            )
+    if not sld_rows:
+        return
+    _out.print(f"\n  [bold]Superficial losses adjusted ({len(sld_rows)})[/bold]")
+    table = make_table()
+    table.add_column("Asset", style="bold cyan", no_wrap=True)
+    table.add_column("Date", no_wrap=True)
+    table.add_column("Loss (CAD)", justify="right", style="red", no_wrap=True)
+    table.add_column("Denied (CAD)", justify="right", no_wrap=True)
+    table.add_column("Allowable (CAD)", justify="right", no_wrap=True)
+    for r in sld_rows:
+        table.add_row(
+            r["asset"],
+            r["timestamp"][:10],
+            f"{float(r['gain_loss']):,.2f}",
+            f"{float(r['superficial_loss_denied']):,.2f}",
+            f"{float(r['allowable_loss']):.8f}",
+        )
+    _out.print(table)
 
-    # Pipeline stage statuses.
-    print()
+
+def _print_stage_statuses(conn: sqlite3.Connection) -> None:
+    """Render the pipeline-stage status table."""
+    _out.print()
+    table = make_table()
+    table.add_column("Status", style="bold", no_wrap=True)
+    table.add_column("Stage", style="cyan", no_wrap=True)
+    table.add_column("Completed", style="dim", no_wrap=True)
     for stage in PIPELINE_STAGES:
         row = conn.execute(
             "SELECT status, completed_at FROM stage_status WHERE stage = ?", (stage,)
         ).fetchone()
         if row:
             status = row["status"]
-            completed = row["completed_at"] or ""
-            print(f"  [{status:>11}]  {stage}  {completed[:10]}")
+            completed = (row["completed_at"] or "")[:10]
+            style = _STAGE_STATUS_STYLE.get(status, "")
+            table.add_row(f"[{style}]{status}[/]", stage, completed)
+    _out.print(table)
 
-    # Consolidated stir hint — only shown when unmatched transfers exist.
+
+def _print_unmatched_transfer_hint(conn: sqlite3.Connection) -> None:
+    """Emit the stir hint when unmatched transfer rows remain."""
     unmatched = conn.execute(
         """
         SELECT
@@ -1137,12 +1175,25 @@ def _print_summary(conn: object, batch_name: str) -> None:
         """
     ).fetchone()
     if unmatched and (unmatched["w"] or unmatched["d"]):
-        print()
+        _out.print()
         emit(
             MessageCode.BOIL_SUMMARY_STIR_HINT,
             w=unmatched["w"] or 0,
             d=unmatched["d"] or 0,
         )
+
+
+def _print_summary(conn: object, batch_name: str) -> None:
+    """Print a summary of row counts written to the batch."""
+    assert isinstance(conn, sqlite3.Connection)
+    emit(MessageCode.BOIL_SUMMARY_COMPLETE, name=batch_name)
+    _print_row_counts(conn)
+    _print_realised_gain_loss(conn)
+    _print_income_and_costs(conn)
+    _print_year_end_holdings(conn)
+    _print_superficial_losses(conn)
+    _print_stage_statuses(conn)
+    _print_unmatched_transfer_hint(conn)
 
 
 @click.command(
