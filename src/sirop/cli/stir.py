@@ -1936,120 +1936,137 @@ def _cmd_clear_adjustment(conn: sqlite3.Connection, parts: list[str]) -> None:
         emit(exc.msg_code, **exc.msg_kwargs)
 
 
-@click.command(
+@click.group(
     "stir",
+    invoke_without_command=True,
     short_help=("Review transactions, inspect transfer pairs, link/unlink, record adjustments"),
 )
-@click.option(
-    "--list",
-    "list_only",
-    is_flag=True,
-    default=False,
-    help="Show current transfer match state and exit (no interactive prompt).",
+@click.pass_context
+def stir_command(ctx: click.Context) -> None:
+    """Review imported transactions, inspect auto-detected transfer pairs, and
+    manually link or unlink pairs before boil.
+
+    Running ``sirop stir`` with no subcommand launches an interactive REPL.
+    The subcommands below are one-shot equivalents of the REPL actions —
+    use them in scripts or when you want a single change without entering
+    the prompt loop.
+    """
+    if ctx.invoked_subcommand is None:
+        sys.exit(handle_stir())
+
+
+@stir_command.command("list", short_help="Show current transfer match state and exit")
+def stir_list_command() -> None:
+    """Print the auto-matched pairs, unmatched rows, and manual overrides."""
+    sys.exit(handle_stir(list_only=True))
+
+
+@stir_command.command("link", short_help="Force two transactions to be paired")
+@click.argument("id1", type=int)
+@click.argument("id2", type=int)
+def stir_link_command(id1: int, id2: int) -> None:
+    """Force transactions ID1 and ID2 to be treated as a transfer pair."""
+    sys.exit(handle_stir(link=(id1, id2)))
+
+
+@stir_command.command("unlink", short_help="Prevent two transactions from auto-pairing")
+@click.argument("id1", type=int)
+@click.argument("id2", type=int)
+def stir_unlink_command(id1: int, id2: int) -> None:
+    """Prevent transactions ID1 and ID2 from being auto-paired."""
+    sys.exit(handle_stir(unlink=(id1, id2)))
+
+
+@stir_command.command("clear", short_help="Remove all stir overrides for a transaction")
+@click.argument("tx_id", type=int)
+def stir_clear_command(tx_id: int) -> None:
+    """Remove every stir override touching transaction TX_ID."""
+    sys.exit(handle_stir(clear=tx_id))
+
+
+@stir_command.command("adjustments", short_help="List manual reconciliation adjustments")
+def stir_adjustments_command() -> None:
+    """Show all manual reconciliation adjustments recorded for the active batch."""
+    sys.exit(handle_stir(list_adjustments=True))
+
+
+@stir_command.command("unadjust", short_help="Remove a manual reconciliation adjustment")
+@click.argument("adj_id", type=int)
+def stir_unadjust_command(adj_id: int) -> None:
+    """Remove manual reconciliation adjustment ADJ_ID."""
+    sys.exit(handle_stir(clear_adjustment=adj_id))
+
+
+@stir_command.group(
+    "adjust",
+    short_help="Record a manual reconciliation acquisition or disposition",
 )
-@click.option(
-    "--link",
-    nargs=2,
-    type=int,
-    metavar="ID1 ID2",
-    default=None,
-    help="Force two transactions to be treated as a transfer pair.",
-)
-@click.option(
-    "--unlink",
-    nargs=2,
-    type=int,
-    metavar="ID1 ID2",
-    default=None,
-    help="Prevent two transactions from being auto-paired.",
-)
-@click.option(
-    "--clear",
-    type=int,
-    metavar="ID",
-    default=None,
-    help="Remove all stir overrides for a transaction.",
-)
-@click.option(
-    "--adjust-acquire",
-    "adjust_acquire",
-    nargs=3,
-    type=str,
-    metavar="UNITS CAD DATE",
-    default=None,
-    help=(
-        "Record a manual reconciliation BTC acquisition. Requires --reason. "
-        "DATE is YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ."
-    ),
-)
-@click.option(
-    "--adjust-dispose",
-    "adjust_dispose",
-    nargs=3,
-    type=str,
-    metavar="UNITS CAD DATE",
-    default=None,
-    help="Record a manual reconciliation BTC disposition. Requires --reason.",
-)
+def stir_adjust_command() -> None:
+    """Record a manual reconciliation adjustment.
+
+    Use the ``acquire`` subcommand when your real wallet balance exceeds
+    what sirop calculated (missing import). Use ``dispose`` when sirop's
+    pool has units that no longer exist on-chain.
+    """
+
+
+@stir_adjust_command.command("acquire", short_help="Add units via a manual adjustment")
+@click.argument("units")
+@click.argument("cad")
+@click.argument("date")
 @click.option(
     "--reason",
+    required=True,
     metavar="TEXT",
-    default=None,
-    help=(
-        "CRA-defensible justification for a manual adjustment "
-        "(required with --adjust-acquire/--adjust-dispose)."
-    ),
+    help="CRA-defensible justification for this adjustment.",
 )
 @click.option(
     "--wallet",
-    "adjust_wallet",
+    "wallet",
+    required=True,
     metavar="NAME",
-    default=None,
-    help=(
-        "Wallet to attribute this manual adjustment to. Required with "
-        "--adjust-acquire/--adjust-dispose."
-    ),
+    help="Wallet to attribute this adjustment to.",
 )
-@click.option(
-    "--clear-adjustment",
-    "clear_adjustment",
-    type=int,
-    metavar="ADJ_ID",
-    default=None,
-    help="Remove a manual adjustment by its id (shown in `stir --list`).",
-)
-@click.option(
-    "--list-adjustments",
-    "list_adjustments",
-    is_flag=True,
-    default=False,
-    help="Show all manual reconciliation adjustments and exit.",
-)
-def stir_command(  # noqa: PLR0913
-    list_only: bool,
-    link: tuple[int, int] | None,
-    unlink: tuple[int, int] | None,
-    clear: int | None,
-    adjust_acquire: tuple[str, str, str] | None,
-    adjust_dispose: tuple[str, str, str] | None,
-    reason: str | None,
-    adjust_wallet: str | None,
-    clear_adjustment: int | None,
-    list_adjustments: bool,
-) -> None:
-    """Review imported transactions, inspect auto-detected transfer pairs, and
-    manually link or unlink pairs before boil."""
+def stir_adjust_acquire_command(units: str, cad: str, date: str, reason: str, wallet: str) -> None:
+    """Record a manual BTC acquisition (UNITS at CAD cost basis on DATE).
+
+    DATE is YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ.
+    """
     sys.exit(
         handle_stir(
-            list_only=list_only,
-            link=link,
-            unlink=unlink,
-            clear=clear,
-            adjust_acquire=adjust_acquire,
-            adjust_dispose=adjust_dispose,
+            adjust_acquire=(units, cad, date),
             reason=reason,
-            clear_adjustment=clear_adjustment,
-            list_adjustments=list_adjustments,
-            adjust_wallet=adjust_wallet,
+            adjust_wallet=wallet,
+        )
+    )
+
+
+@stir_adjust_command.command("dispose", short_help="Remove units via a manual adjustment")
+@click.argument("units")
+@click.argument("cad")
+@click.argument("date")
+@click.option(
+    "--reason",
+    required=True,
+    metavar="TEXT",
+    help="CRA-defensible justification for this adjustment.",
+)
+@click.option(
+    "--wallet",
+    "wallet",
+    required=True,
+    metavar="NAME",
+    help="Wallet to attribute this adjustment to.",
+)
+def stir_adjust_dispose_command(units: str, cad: str, date: str, reason: str, wallet: str) -> None:
+    """Record a manual BTC disposition (UNITS for CAD proceeds on DATE).
+
+    DATE is YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ.
+    """
+    sys.exit(
+        handle_stir(
+            adjust_dispose=(units, cad, date),
+            reason=reason,
+            adjust_wallet=wallet,
         )
     )
