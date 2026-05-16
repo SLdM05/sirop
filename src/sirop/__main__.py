@@ -1,232 +1,69 @@
+"""sirop — Quebec maple syrup-themed crypto tax tool.
+
+Entry point for the ``sirop`` CLI. Wires Click subcommands to their handlers
+and initialises logging before dispatching.
+
+All subcommand handlers live in :mod:`sirop.cli.*`. This module contains only
+the top-level :class:`click.Group` and dispatch — no business logic.
 """
-sirop — Quebec maple syrup-themed crypto tax tool.
 
-Entry point for the `sirop` CLI. Wires argparse subcommands to their
-handlers and initialises logging before dispatching.
+import rich_click as click
 
-All subcommand handlers live in sirop.cli.*. This module contains only
-argument parsing and dispatch — no business logic.
-"""
-
-import argparse
-import sys
-from pathlib import Path
-
-from sirop.cli.boil import handle_boil
-from sirop.cli.create import handle_create
-from sirop.cli.list_batches import handle_list
-from sirop.cli.pour import handle_pour
-from sirop.cli.stir import handle_stir
-from sirop.cli.switch import handle_switch
-from sirop.cli.tap import handle_tap, handle_tap_walletfolder
+from sirop.cli.boil import boil_command
+from sirop.cli.create import create_command
+from sirop.cli.list_batches import list_command
+from sirop.cli.pour import pour_command
+from sirop.cli.stir import stir_command
+from sirop.cli.switch import switch_command
+from sirop.cli.tap import tap_command
 from sirop.utils.logging import configure_logging
 
+click.rich_click.USE_RICH_MARKUP = True
+click.rich_click.USE_MARKDOWN = False
+click.rich_click.SHOW_ARGUMENTS = True
+click.rich_click.GROUP_ARGUMENTS_OPTIONS = False
+click.rich_click.STYLE_OPTION = "bold cyan"
+click.rich_click.STYLE_ARGUMENT = "bold cyan"
+click.rich_click.STYLE_COMMAND = "bold green"
+click.rich_click.STYLE_SWITCH = "bold green"
+click.rich_click.STYLE_HEADER_TEXT = "bold"
 
-def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="sirop",
-        description="Quebec crypto tax calculator — boil your gains, grade your season.",
-        epilog=(
-            "Tip: if you have an existing .sirop file but no active batch set, "
-            "run `sirop switch <name>` (where <name> is the filename without .sirop) "
-            "to make it active."
-        ),
-    )
-    parser.add_argument(
-        "--verbose", action="store_true", help="Show sensitive values in log output"
-    )
-    parser.add_argument(
-        "--debug", action="store_true", help="Set log level to DEBUG (implies --verbose)"
-    )
 
-    sub = parser.add_subparsers(dest="command", metavar="<command>")
+_EPILOG = (
+    "Tip: if you have an existing .sirop file but no active batch set, "
+    "run `sirop switch <name>` (where <name> is the filename without .sirop) "
+    "to make it active."
+)
 
-    # ── tap ───────────────────────────────────────────────────────────────────
-    tap_p = sub.add_parser("tap", help="Import a CSV exchange export into the active batch")
-    tap_p.add_argument("file", type=Path, help="Path to the exchange CSV export")
-    tap_p.add_argument(
-        "--source",
-        metavar="NAME",
-        help=(
-            "Exchange format to use (e.g. ndax, shakepay). Auto-detected from headers when omitted."
-        ),
-    )
-    tap_p.add_argument(
-        "--wallet",
-        metavar="NAME",
-        help=(
-            "Wallet name to assign these transactions to (e.g. 'ledger-cold', 'shakepay-savings'). "
-            "Defaults to the detected source format name. Use this to distinguish two accounts "
-            "at the same exchange, or to label a hardware wallet before tapping its CSV."
-        ),
-    )
-    tap_p.add_argument(
-        "--walletfolder",
-        "--wf",
-        action="store_true",
-        dest="walletfolder",
-        default=False,
-        help=(
-            "Treat each immediate subfolder of the given directory as a separate wallet. "
-            "CSV files in each subfolder are imported under a wallet named after that subfolder. "
-            "Example: tap data/ --wf  imports data/ledger-cold/*.csv as wallet 'ledger-cold'."
-        ),
-    )
 
-    # ── create ────────────────────────────────────────────────────────────────
-    create_p = sub.add_parser("create", help="Tap a new batch (tax year file)")
-    create_p.add_argument("name", help="Batch name, e.g. my2025tax")
-    create_p.add_argument(
-        "--year",
-        type=int,
-        metavar="YYYY",
-        help="Tax year (inferred from name if omitted)",
-    )
+@click.group(
+    context_settings={"help_option_names": ["-h", "--help"]},
+    help="Quebec crypto tax calculator — boil your gains, grade your season.",
+    epilog=_EPILOG,
+)
+@click.option(
+    "--debug",
+    is_flag=True,
+    default=False,
+    help="Set log level to DEBUG and show sensitive values (txids, amounts, addresses) unredacted.",
+)
+def cli(debug: bool) -> None:
+    """Top-level ``sirop`` command group."""
+    configure_logging(debug=debug)
 
-    # ── list ──────────────────────────────────────────────────────────────────
-    sub.add_parser("list", help="List all batches in DATA_DIR")
 
-    # ── switch ────────────────────────────────────────────────────────────────
-    switch_p = sub.add_parser("switch", help="Set the active batch")
-    switch_p.add_argument("name", help="Batch name to activate")
-
-    # ── stir ──────────────────────────────────────────────────────────────────
-    stir_p = sub.add_parser(
-        "stir",
-        help=(
-            "Review imported transactions, inspect auto-detected transfer pairs, "
-            "and manually link or unlink pairs before boil."
-        ),
-    )
-    stir_p.add_argument(
-        "--list",
-        action="store_true",
-        dest="list_only",
-        help="Show current transfer match state and exit (no interactive prompt).",
-    )
-    stir_p.add_argument(
-        "--link",
-        nargs=2,
-        type=int,
-        metavar=("ID1", "ID2"),
-        help="Force two transactions to be treated as a transfer pair.",
-    )
-    stir_p.add_argument(
-        "--unlink",
-        nargs=2,
-        type=int,
-        metavar=("ID1", "ID2"),
-        help="Prevent two transactions from being auto-paired.",
-    )
-    stir_p.add_argument(
-        "--clear",
-        type=int,
-        metavar="ID",
-        help="Remove all stir overrides for a transaction.",
-    )
-
-    # ── boil ──────────────────────────────────────────────────────────────────
-    boil_p = sub.add_parser(
-        "boil",
-        help="Run the tax calculation pipeline (normalize → ACB → superficial loss)",
-    )
-    boil_p.add_argument(
-        "--from",
-        dest="from_stage",
-        metavar="STAGE",
-        choices=["normalize", "verify", "transfer_match", "boil", "superficial_loss"],
-        default=None,
-        help=(
-            "Re-run from this stage onward, invalidating downstream stages. "
-            "Choices: normalize, verify, transfer_match, boil, superficial_loss"
-        ),
-    )
-    boil_p.add_argument(
-        "--audit",
-        action="store_true",
-        default=False,
-        help=(
-            "After calculation, write a CSV ledger of all events and ACB math "
-            "to <DATA_DIR>/<batch>-audit.csv for manual verification in Excel."
-        ),
-    )
-    boil_p.add_argument(
-        "--allow-public-mempool",
-        dest="allow_public_mempool",
-        action="store_true",
-        default=False,
-        help=(
-            "Skip the interactive privacy prompt when BTC_MEMPOOL_URL points to a public "
-            "host. Use this in non-interactive environments after reviewing the privacy "
-            "implications (your txids will be sent to the public Mempool endpoint). "
-            "Equivalent to setting BTC_TRAVERSAL_ALLOW_PUBLIC=true in .env."
-        ),
-    )
-
-    # ── pour ──────────────────────────────────────────────────────────────────
-    pour_p = sub.add_parser(
-        "pour",
-        help="Generate a Markdown tax report for the active batch (Schedule 3, TP-21.4.39-V)",
-    )
-    pour_p.add_argument(
-        "--output-dir",
-        dest="output_dir",
-        type=Path,
-        metavar="DIR",
-        default=None,
-        help="Override output directory (default: OUTPUT_DIR from .env)",
-    )
-
-    return parser
+cli.add_command(tap_command)
+cli.add_command(create_command)
+cli.add_command(list_command)
+cli.add_command(switch_command)
+cli.add_command(stir_command)
+cli.add_command(boil_command)
+cli.add_command(pour_command)
 
 
 def main() -> None:
-    parser = _build_parser()
-    args = parser.parse_args()
-
-    configure_logging(verbose=args.verbose, debug=args.debug)
-
-    if args.command == "tap":
-        if args.walletfolder:
-            sys.exit(handle_tap_walletfolder(args.file, args.source))
-        sys.exit(handle_tap(args.file, args.source, getattr(args, "wallet", None)))
-
-    elif args.command == "create":
-        sys.exit(handle_create(args.name, args.year))
-
-    elif args.command == "list":
-        sys.exit(handle_list())
-
-    elif args.command == "switch":
-        sys.exit(handle_switch(args.name))
-
-    elif args.command == "stir":
-        link: tuple[int, int] | None = (args.link[0], args.link[1]) if args.link else None
-        unlink: tuple[int, int] | None = (args.unlink[0], args.unlink[1]) if args.unlink else None
-        sys.exit(
-            handle_stir(
-                list_only=args.list_only,
-                link=link,
-                unlink=unlink,
-                clear=args.clear,
-            )
-        )
-
-    elif args.command == "boil":
-        sys.exit(
-            handle_boil(
-                args.from_stage,
-                audit=args.audit,
-                allow_public_mempool=args.allow_public_mempool,
-            )
-        )
-
-    elif args.command == "pour":
-        sys.exit(handle_pour(output_dir_override=args.output_dir))
-
-    else:
-        parser.print_help()
-        sys.exit(0)
+    """Console-script entry point declared in ``pyproject.toml``."""
+    cli()
 
 
 if __name__ == "__main__":

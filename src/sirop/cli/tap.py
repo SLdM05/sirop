@@ -30,8 +30,12 @@ Error behaviour
 import csv
 import json
 import sqlite3
+import sys
+from collections import defaultdict
 from collections.abc import Callable
 from pathlib import Path
+
+import rich_click as click
 
 from sirop.config.settings import Settings, get_settings
 from sirop.db import repositories as repo
@@ -45,10 +49,13 @@ from sirop.importers.sparrow import SparrowImporter
 from sirop.importers.xpub import XpubImporter
 from sirop.models.messages import MessageCode
 from sirop.models.raw import RawTransaction
+from sirop.ui import NonInteractiveError, confirm
 from sirop.utils.logging import get_logger
 from sirop.utils.messages import emit, spinner
 
 logger = get_logger(__name__)
+
+_CROSS_WALLET_MAX_SHOWN = 5
 
 # Directory that contains the built-in importer YAML configs.
 _BUILTIN_CONFIG_DIR = Path("config/importers")
@@ -125,11 +132,11 @@ def handle_tap_walletfolder(
 
     # ── Confirmation ──────────────────────────────────────────────────────────
     try:
-        answer = input(f"\nTap {len(tappable)} wallet folder(s)? [y/N] ").strip().lower()
-    except EOFError:
-        answer = ""
+        proceed = confirm(f"\nTap {len(tappable)} wallet folder(s)?", default=False)
+    except NonInteractiveError:
+        proceed = False
 
-    if answer not in {"y", "yes"}:
+    if not proceed:
         emit(MessageCode.TAP_WALLETFOLDER_ABORTED)
         return 0
 
@@ -244,11 +251,11 @@ def _handle_tap_folder(
 
     # ── Confirmation ──────────────────────────────────────────────────────────
     try:
-        answer = input(f"\nTap {len(tappable)} file(s)? [y/N] ").strip().lower()
-    except EOFError:
-        answer = ""
+        proceed = confirm(f"\nTap {len(tappable)} file(s)?", default=False)
+    except NonInteractiveError:
+        proceed = False
 
-    if answer not in {"y", "yes"}:
+    if not proceed:
         emit(MessageCode.TAP_FOLDER_ABORTED)
         return 0
 
@@ -326,7 +333,9 @@ def _run_tap_xpub(
     return 0
 
 
-def _run_tap(file_path: Path, source: str | None, wallet: str | None, settings: Settings) -> int:
+def _run_tap(  # noqa: PLR0911
+    file_path: Path, source: str | None, wallet: str | None, settings: Settings
+) -> int:
     """Core tap logic; raises ``_TapError`` on any user-facing error."""
     # ── 1. Active batch ───────────────────────────────────────────────────────
     batch_name = get_active_batch_name(settings)
@@ -400,6 +409,12 @@ def _run_tap(file_path: Path, source: str | None, wallet: str | None, settings: 
         emit(MessageCode.TAP_WALLET_CONFLICT_ABORTED, wallet=wallet_name)
         return 0
 
+    # ── 5c. Cross-wallet duplicate check ─────────────────────────────────────
+    suspects = _find_cross_wallet_suspects(batch_name, settings, txs, wallet_name)
+    if suspects and not _confirm_cross_wallet_import(suspects):
+        emit(MessageCode.TAP_CROSS_WALLET_ABORTED)
+        return 0
+
     # ── 6. Write to DB ────────────────────────────────────────────────────────
     inserted, skipped = _write_to_batch(
         batch_name, settings, txs, wallet_name, auto_created, detected_source
@@ -444,6 +459,58 @@ def _run_tap(file_path: Path, source: str | None, wallet: str | None, settings: 
     return 0
 
 
+def _find_cross_wallet_suspects(
+    batch_name: str,
+    settings: Settings,
+    txs: list[RawTransaction],
+    wallet_name: str,
+) -> list[tuple[RawTransaction, str]]:
+    """Query the batch for cross-wallet duplicate candidates for *txs*.
+
+    Opens and closes its own connection so it can be called before _write_to_batch.
+    """
+    conn = open_batch(batch_name, settings)
+    try:
+        return repo.find_cross_wallet_duplicates(conn, txs, wallet_name)
+    finally:
+        conn.close()
+
+
+def _confirm_cross_wallet_import(suspects: list[tuple[RawTransaction, str]]) -> bool:
+    """Emit W011 warnings and prompt the user to confirm or abort.
+
+    Groups suspects by the wallet they conflict with and shows up to 5 rows
+    per group.  Returns True only if the user explicitly confirms.
+    EOFError (non-interactive stdin) returns False — safe default.
+    """
+    by_wallet: dict[str, list[RawTransaction]] = defaultdict(list)
+    for tx, wallet in suspects:
+        by_wallet[wallet].append(tx)
+
+    for other_wallet, group in by_wallet.items():
+        emit(
+            MessageCode.TAP_WARNING_CROSS_WALLET_DUPE,
+            count=len(group),
+            other_wallet=other_wallet,
+        )
+        for tx in group[:_CROSS_WALLET_MAX_SHOWN]:
+            txid_hint = f"  (txid: {tx.txid[:12]}…)" if tx.txid else ""
+            emit(
+                MessageCode.TAP_CROSS_WALLET_DUPE_ROW,
+                ts=tx.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+                asset=tx.asset,
+                amount=format(tx.amount, "f"),
+                txid_hint=txid_hint,
+            )
+        if len(group) > _CROSS_WALLET_MAX_SHOWN:
+            emit(MessageCode.TAP_CROSS_WALLET_DUPE_MORE, count=len(group) - _CROSS_WALLET_MAX_SHOWN)
+
+    try:
+        return confirm("\nTap anyway?", default=False)
+    except NonInteractiveError:
+        return False
+
+
 def _confirm_wallet_append(batch_name: str, settings: Settings, wallet_name: str) -> bool:
     """Return True if it is OK to append rows to *wallet_name*.
 
@@ -463,18 +530,13 @@ def _confirm_wallet_append(batch_name: str, settings: Settings, wallet_name: str
         return True
 
     try:
-        answer = (
-            input(
-                f'\nWallet "{wallet_name}" already exists. Append to it? [Y/n]'
-                " (use --wallet NAME to create a new wallet) "
-            )
-            .strip()
-            .lower()
+        return confirm(
+            f'\nWallet "{wallet_name}" already exists. Append to it?'
+            " (use --wallet NAME to create a new wallet)",
+            default=True,
         )
-    except EOFError:
+    except NonInteractiveError:
         return True
-
-    return answer not in {"n", "no"}
 
 
 def _write_to_batch(  # noqa: PLR0912 PLR0913
@@ -707,3 +769,41 @@ def _read_headers(csv_path: Path) -> set[str]:
         except StopIteration:
             return set()
     return {h.strip() for h in header_row if h.strip()}
+
+
+@click.command("tap", short_help="Import a CSV exchange export into the active batch")
+@click.argument("file", type=click.Path(path_type=Path))
+@click.option(
+    "--source",
+    metavar="NAME",
+    default=None,
+    help=(
+        "Exchange format to use (e.g. ndax, shakepay). " "Auto-detected from headers when omitted."
+    ),
+)
+@click.option(
+    "--wallet",
+    metavar="NAME",
+    default=None,
+    help=(
+        "Wallet name to assign these transactions to (e.g. 'ledger-cold'). "
+        "Defaults to the detected source format name."
+    ),
+)
+@click.option(
+    "--walletfolder",
+    "--wf",
+    "walletfolder",
+    is_flag=True,
+    default=False,
+    help=(
+        "Treat each immediate subfolder of the given directory as a separate wallet. "
+        "CSV files in each subfolder are imported under a wallet named after that "
+        "subfolder."
+    ),
+)
+def tap_command(file: Path, source: str | None, wallet: str | None, walletfolder: bool) -> None:
+    """Import the CSV export at FILE into the active batch."""
+    if walletfolder:
+        sys.exit(handle_tap_walletfolder(file, source))
+    sys.exit(handle_tap(file, source, wallet))

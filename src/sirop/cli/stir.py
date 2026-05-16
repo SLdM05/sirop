@@ -54,10 +54,12 @@ from __future__ import annotations
 
 import dataclasses
 import re
-from datetime import timedelta
-from decimal import Decimal
-from typing import TYPE_CHECKING
+import sys
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal, InvalidOperation
+from typing import TYPE_CHECKING, Literal
 
+import rich_click as click
 from rich.table import Table
 from rich.text import Text
 
@@ -73,6 +75,8 @@ from sirop.transfer_match.matcher import (
     FEE_TOLERANCE_RELATIVE,
     MATCH_WINDOW_HOURS,
 )
+from sirop.ui import NonInteractiveError, ask
+from sirop.ui import confirm as ui_confirm
 from sirop.utils.console import out
 from sirop.utils.logging import get_logger
 from sirop.utils.messages import emit
@@ -80,6 +84,7 @@ from sirop.utils.messages import emit
 if TYPE_CHECKING:
     import sqlite3
 
+    from sirop.models.adjustment import ManualAdjustment
     from sirop.models.override import TransferOverride
     from sirop.models.transaction import Transaction
     from sirop.models.wallet import Wallet
@@ -164,12 +169,18 @@ class _StirError(Exception):
 # ---------------------------------------------------------------------------
 
 
-def handle_stir(
+def handle_stir(  # noqa: PLR0913
     list_only: bool = False,
     link: tuple[int, int] | None = None,
     unlink: tuple[int, int] | None = None,
     clear: int | None = None,
     settings: Settings | None = None,
+    adjust_acquire: tuple[str, ...] | None = None,
+    adjust_dispose: tuple[str, ...] | None = None,
+    reason: str | None = None,
+    clear_adjustment: int | None = None,
+    list_adjustments: bool = False,
+    adjust_wallet: str | None = None,
 ) -> int:
     """Review and edit transfer pair assignments for the active batch.
 
@@ -185,12 +196,40 @@ def handle_stir(
         If given, clear all overrides for this transaction ID and exit.
     settings:
         Application settings; resolved from the environment if omitted.
+    adjust_acquire:
+        4-tuple ``(asset, units, cad_value, date)`` recording a manual
+        reconciliation acquisition.  Requires *reason*.
+    adjust_dispose:
+        4-tuple ``(asset, units, cad_value, date)`` recording a manual
+        reconciliation disposition.  Requires *reason*.
+    reason:
+        CRA-defensible justification for a manual adjustment.  Mandatory
+        whenever *adjust_acquire* or *adjust_dispose* is provided.
+    clear_adjustment:
+        Manual adjustment ID to remove.  An ``audit_log`` row recording the
+        removal is always written, even when the adjustment row is gone.
+    list_adjustments:
+        Print all manual reconciliation adjustments and exit.
+    adjust_wallet:
+        Wallet name to attribute the adjustment to.  Required when
+        *adjust_acquire* or *adjust_dispose* is provided; must reference an
+        existing wallet in the active batch.
     """
     if settings is None:
         settings = get_settings()
     try:
         return _run_stir(
-            list_only=list_only, link=link, unlink=unlink, clear=clear, settings=settings
+            list_only=list_only,
+            link=link,
+            unlink=unlink,
+            clear=clear,
+            settings=settings,
+            adjust_acquire=adjust_acquire,
+            adjust_dispose=adjust_dispose,
+            reason=reason,
+            clear_adjustment=clear_adjustment,
+            list_adjustments=list_adjustments,
+            adjust_wallet=adjust_wallet,
         )
     except _StirError as exc:
         emit(exc.msg_code, **exc.msg_kwargs)
@@ -202,13 +241,19 @@ def handle_stir(
 # ---------------------------------------------------------------------------
 
 
-def _run_stir(
+def _run_stir(  # noqa: PLR0911 PLR0912 PLR0913
     *,
     list_only: bool,
     link: tuple[int, int] | None,
     unlink: tuple[int, int] | None,
     clear: int | None,
     settings: Settings,
+    adjust_acquire: tuple[str, ...] | None = None,
+    adjust_dispose: tuple[str, ...] | None = None,
+    reason: str | None = None,
+    clear_adjustment: int | None = None,
+    list_adjustments: bool = False,
+    adjust_wallet: str | None = None,
 ) -> int:
     batch_name = get_active_batch_name(settings)
     if batch_name is None:
@@ -216,6 +261,20 @@ def _run_stir(
 
     conn = open_batch(batch_name, settings)
     try:
+        # Manual adjustment commands do NOT require normalize to have run —
+        # the user may want to add reconciliation entries before tapping any
+        # CSVs (e.g. starting from a known year-opening balance).
+        if list_adjustments:
+            return _print_adjustments(conn)
+        if adjust_acquire is not None:
+            wallet = _resolve_adjust_wallet(conn, adjust_wallet)
+            return _apply_adjust(conn, "acquire", adjust_acquire, reason, wallet)
+        if adjust_dispose is not None:
+            wallet = _resolve_adjust_wallet(conn, adjust_wallet)
+            return _apply_adjust(conn, "dispose", adjust_dispose, reason, wallet)
+        if clear_adjustment is not None:
+            return _apply_clear_adjustment(conn, clear_adjustment)
+
         normalize_status = repo.get_stage_status(conn, "normalize")
         if normalize_status != "done":
             raise _StirError(MessageCode.STIR_ERROR_NOT_NORMALIZED, name=batch_name)
@@ -236,17 +295,23 @@ def _run_stir(
         txs = _apply_txid_overrides(conn, txs)
         wallets = repo.read_wallets(conn)
         overrides = repo.read_transfer_overrides(conn)
+        adjustments = repo.read_manual_adjustments(conn)
 
         # Load graph-traversal pairs from the last boil run (empty if not yet run).
         graph_pairs = _load_graph_pairs(conn, txs)
         state = _build_state(txs, overrides, graph_pairs=graph_pairs)
+        wallet_names = {w.id: w.name for w in wallets}
         if list_only:
             _print_state(
                 batch_name, txs, state, overrides, wallets, repo.read_provisional_events(conn)
             )
+            if adjustments:
+                _print_adjustments_section(adjustments, wallet_names)
             return 0
 
         _print_unmatched(batch_name, txs, state, wallets, tax_year)
+        if adjustments:
+            _print_adjustments_section(adjustments, wallet_names)
         return _interactive_loop(conn, txs, wallets, overrides, state, batch_name, tax_year)
 
     finally:
@@ -1010,6 +1075,11 @@ def _print_help() -> None:
     out.print("  destination <id>    Add the on-chain txid for a BTC transaction whose CSV")
     out.print("                      did not include one (e.g. NDAX withdrawals).")
     out.print("                      After setting, run: sirop boil --from transfer_match")
+    out.print("  adjust              Record a manual reconciliation entry (acquire or dispose)")
+    out.print("                      to align sirop's pool with your real wallet balance when")
+    out.print("                      records are incomplete. Reason is mandatory.")
+    out.print("  adjustments         List all manual reconciliation adjustments.")
+    out.print("  clear-adjustment <adj_id>  Remove a manual adjustment by its id.")
     out.print("  list                Refresh unmatched transactions.")
     out.print("  view                Open full state in pager (all sections).")
     out.print("  help                Show this help.")
@@ -1062,8 +1132,11 @@ def _cmd_link(  # noqa: PLR0911 PLR0913
             f"  Difference: {implied_fee:.8f} {tx_a.asset} — "
             f"will be recorded as a network fee (fee micro-disposal at boil time)."
         )
-        confirm = input("  Proceed? [y/N] ").strip().lower()
-        if confirm not in ("y", "yes"):
+        try:
+            proceed = ui_confirm("  Proceed?", default=False)
+        except NonInteractiveError:
+            proceed = False
+        if not proceed:
             out.print("  Cancelled.")
             return None
 
@@ -1184,8 +1257,8 @@ def _cmd_destination(  # noqa: PLR0911
     out.print(f"Transaction {tx_id} — {tx.source} {tx.tx_type.value}  BTC {tx.amount:.8f}  {ts}")
     out.print("Paste the on-chain txid (64 lowercase hex characters):")
     try:
-        raw = input("> ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
+        raw = ask("> ").strip().lower()
+    except (EOFError, KeyboardInterrupt, NonInteractiveError):
         out.print()
         out.print("Cancelled.")
         return
@@ -1259,7 +1332,7 @@ def _cmd_transfer(  # noqa: PLR0911 PLR0912 PLR0915 PLR0913
         out.print(f"    [{i}] {label}")
     out.print()
 
-    choice_raw = input("  Choice (number or wallet name): ").strip()
+    choice_raw = ask("  Choice (number or wallet name)").strip()
     wallet_name: str | None = None
     is_external = False
 
@@ -1270,7 +1343,7 @@ def _cmd_transfer(  # noqa: PLR0911 PLR0912 PLR0915 PLR0913
             if special == "__external__":
                 is_external = True
             elif special == "__new__":
-                wallet_name = input("  Wallet name: ").strip() or None
+                wallet_name = ask("  Wallet name").strip() or None
             else:
                 wallet_name = special
     except ValueError:
@@ -1279,7 +1352,7 @@ def _cmd_transfer(  # noqa: PLR0911 PLR0912 PLR0915 PLR0913
 
     # Step 2: untracked wallet path.
     if is_external:
-        ext_label = input("  Label for this external wallet (optional): ").strip()
+        ext_label = ask("  Label for this external wallet (optional)", default="").strip()
         wallet_err = _validate_wallet_name(ext_label)
         if wallet_err:
             out.print(f"  {wallet_err}")
@@ -1290,10 +1363,10 @@ def _cmd_transfer(  # noqa: PLR0911 PLR0912 PLR0915 PLR0913
         out.print("  Was there a network fee for this transfer?")
         out.print("    [N] No fee to record (exchange covered it, or already embedded)")
         out.print("    [F] Enter fee amount manually")
-        fee_choice = input("  Choice [N/F]: ").strip().upper()
+        fee_choice = ask("  Choice [N/F]", default="N").strip().upper()
         implied_fee = Decimal("0")
         if fee_choice == "F":
-            fee_raw = input(f"  Fee amount (in {tx.asset}): ").strip()
+            fee_raw = ask(f"  Fee amount (in {tx.asset})").strip()
             implied_fee, fee_err = _parse_fee_amount(fee_raw, tx.asset, tx.amount)
             if fee_err:
                 out.print(f"  {fee_err}")
@@ -1351,7 +1424,7 @@ def _cmd_transfer(  # noqa: PLR0911 PLR0912 PLR0915 PLR0913
         out.print(_cand_line)
     out.print()
 
-    sel_raw = input("  Select the counterpart transaction (number or 'none'): ").strip().lower()
+    sel_raw = ask("  Select the counterpart transaction (number or 'none')").strip().lower()
     if sel_raw in ("none", "n", ""):
         out.print("  Cancelled.")
         return None
@@ -1387,15 +1460,18 @@ def _cmd_transfer(  # noqa: PLR0911 PLR0912 PLR0915 PLR0913
         out.print("    [F] Network fee   (fee micro-disposal at boil time — most common)")
         out.print("    [C] Cancel        (go back, do not save)")
         out.print()
-        fee_choice = input("  Choice [F/C]: ").strip().upper()
+        fee_choice = ask("  Choice [F/C]", default="C").strip().upper()
         if fee_choice != "F":
             out.print("  Cancelled.")
             return None
     else:
-        confirm = (
-            input("  Clean transfer — no fee difference. Confirm link? [y/N] ").strip().lower()
-        )
-        if confirm not in ("y", "yes"):
+        try:
+            proceed = ui_confirm(
+                "  Clean transfer — no fee difference. Confirm link?", default=False
+            )
+        except NonInteractiveError:
+            proceed = False
+        if not proceed:
             out.print("  Cancelled.")
             return None
 
@@ -1437,7 +1513,7 @@ def _interactive_loop(  # noqa: PLR0912 PLR0913 PLR0915
 
     while True:
         try:
-            raw = input("stir> ").strip()
+            raw = out.input("[bold green]stir>[/] ").strip()
         except (EOFError, KeyboardInterrupt):
             out.print()
             emit(MessageCode.STIR_EXIT)
@@ -1516,4 +1592,481 @@ def _interactive_loop(  # noqa: PLR0912 PLR0913 PLR0915
             state = _build_state(txs, overrides, graph_pairs=_load_graph_pairs(conn, txs))
             continue
 
+        if cmd in {"adjust", "adjustment"}:
+            _cmd_adjust(conn)
+            continue
+
+        if cmd in {"adjustments", "adj-list", "list-adjustments"}:
+            _print_adjustments_section(
+                repo.read_manual_adjustments(conn),
+                {w.id: w.name for w in repo.read_wallets(conn)},
+            )
+            continue
+
+        if cmd in {"unadjust", "clear-adjust", "clear-adjustment"}:
+            _cmd_clear_adjustment(conn, parts)
+            continue
+
         out.print(f"Unknown command: {cmd!r}. Type 'help' for available commands.")
+
+
+# ---------------------------------------------------------------------------
+# Manual adjustment helpers
+# ---------------------------------------------------------------------------
+
+
+def _parse_iso_date(raw: str) -> datetime | None:
+    """Accept ``YYYY-MM-DD`` or full ISO 8601 with offset; return UTC datetime or None."""
+    raw = raw.strip()
+    if not raw:
+        return None
+    # Allow trailing 'Z' for UTC.
+    candidate = raw.replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(candidate)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        # Date-only or naive: treat as midnight UTC.
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
+
+
+def _parse_positive_decimal(raw: str) -> Decimal | None:
+    """Return a positive Decimal, or None if not parseable / not positive."""
+    try:
+        value = Decimal(raw.strip())
+    except (InvalidOperation, AttributeError):
+        return None
+    if value <= Decimal("0"):
+        return None
+    return value
+
+
+def _validate_adjustment_inputs(
+    units_raw: str,
+    cad_raw: str,
+    date_raw: str,
+    reason: str | None,
+) -> tuple[str, Decimal, Decimal, datetime]:
+    """Validate raw user inputs, raising _StirError on any issue.
+
+    Returns ``(asset, units, cad_value, timestamp)`` on success — always a
+    tuple, never None.  Failures raise ``_StirError`` so the caller never sees
+    a partial result.
+    """
+    if not reason or not reason.strip():
+        raise _StirError(MessageCode.STIR_ERROR_ADJUST_REASON_REQUIRED)
+
+    asset = "BTC"
+
+    units = _parse_positive_decimal(units_raw)
+    if units is None:
+        raise _StirError(
+            MessageCode.STIR_ERROR_ADJUST_INVALID_AMOUNT, field="units", value=units_raw
+        )
+
+    cad_value = _parse_positive_decimal(cad_raw)
+    if cad_value is None:
+        raise _StirError(
+            MessageCode.STIR_ERROR_ADJUST_INVALID_AMOUNT, field="CAD value", value=cad_raw
+        )
+
+    timestamp = _parse_iso_date(date_raw)
+    if timestamp is None:
+        raise _StirError(MessageCode.STIR_ERROR_ADJUST_INVALID_DATE, value=date_raw)
+
+    return asset, units, cad_value, timestamp
+
+
+def _resolve_adjust_wallet(conn: sqlite3.Connection, wallet_name: str | None) -> Wallet:
+    """Resolve a wallet name to a Wallet row, raising _StirError on miss.
+
+    Manual adjustments must be attributed to a wallet so the per-wallet
+    holdings view can re-sync once the synthetic event flows through boil.
+    Unknown names raise with the list of available wallets so the user can
+    correct their input without leaving the command.
+    """
+    wallets = repo.read_wallets(conn)
+    if not wallets:
+        raise _StirError(MessageCode.STIR_ERROR_ADJUST_NO_WALLETS)
+    available = ", ".join(w.name for w in wallets)
+    if wallet_name is None or not wallet_name.strip():
+        raise _StirError(MessageCode.STIR_ERROR_ADJUST_WALLET_REQUIRED, available=available)
+    found = repo.find_wallet_by_name(conn, wallet_name.strip())
+    if found is None:
+        raise _StirError(
+            MessageCode.STIR_ERROR_ADJUST_WALLET_UNKNOWN,
+            name=wallet_name,
+            available=available,
+        )
+    return found
+
+
+def _apply_adjust(
+    conn: sqlite3.Connection,
+    kind: Literal["acquire", "dispose"],
+    args: tuple[str, ...],
+    reason: str | None,
+    wallet: Wallet,
+) -> int:
+    """Persist a manual adjustment plus an audit_log row recording it."""
+    if len(args) != 3:  # noqa: PLR2004
+        # argparse already enforces nargs=3; this is a defence-in-depth.
+        raise _StirError(MessageCode.STIR_ERROR_ADJUST_INVALID_KIND, kind=kind)
+    units_raw, cad_raw, date_raw = args
+
+    asset, units, cad_value, timestamp = _validate_adjustment_inputs(
+        units_raw, cad_raw, date_raw, reason
+    )
+
+    adj = repo.write_manual_adjustment(
+        conn,
+        kind=kind,
+        asset=asset,
+        units=units,
+        cad_value=cad_value,
+        timestamp=timestamp,
+        reason=(reason or "").strip(),
+        wallet_id=wallet.id,
+    )
+    new_value = (
+        f"{kind}:{format(units, 'f')} {asset} @ {format(cad_value, 'f')} CAD"
+        f" on {timestamp.date().isoformat()} wallet={wallet.name} (adj_id={adj.id})"
+    )
+    repo.write_audit_log(
+        conn,
+        stage="manual_adjust",
+        field=f"acb_pool:{asset}",
+        old_value=None,
+        new_value=new_value,
+        reason=adj.reason,
+    )
+    emit(
+        MessageCode.STIR_ADJUST_APPLIED,
+        kind=kind,
+        units=format(units, "f"),
+        asset=asset,
+        cad_value=format(cad_value, "f"),
+        date=timestamp.date().isoformat(),
+        adj_id=adj.id,
+        wallet=wallet.name,
+    )
+    return 0
+
+
+def _apply_clear_adjustment(conn: sqlite3.Connection, adjustment_id: int) -> int:
+    """Remove a manual adjustment and write an audit_log entry recording the removal."""
+    removed = repo.delete_manual_adjustment(conn, adjustment_id)
+    if removed is None:
+        raise _StirError(MessageCode.STIR_ERROR_ADJUST_NOT_FOUND, adj_id=adjustment_id)
+    old_value = (
+        f"{removed.kind}:{format(removed.units, 'f')} {removed.asset}"
+        f" @ {format(removed.cad_value, 'f')} CAD"
+        f" on {removed.timestamp.date().isoformat()} (adj_id={removed.id})"
+    )
+    repo.write_audit_log(
+        conn,
+        stage="manual_adjust_clear",
+        field=f"acb_pool:{removed.asset}",
+        old_value=old_value,
+        new_value=None,
+        reason=f"User-initiated removal of manual adjustment id:{removed.id}",
+    )
+    emit(
+        MessageCode.STIR_ADJUST_CLEARED,
+        adj_id=removed.id,
+        kind=removed.kind,
+        units=format(removed.units, "f"),
+        asset=removed.asset,
+    )
+    return 0
+
+
+def _print_adjustments(conn: sqlite3.Connection) -> int:
+    """List all manual adjustments and exit (used by --list-adjustments)."""
+    adjustments = repo.read_manual_adjustments(conn)
+    wallet_names = {w.id: w.name for w in repo.read_wallets(conn)}
+    _print_adjustments_section(adjustments, wallet_names)
+    return 0
+
+
+def _print_adjustments_section(
+    adjustments: list[ManualAdjustment],
+    wallet_names: dict[int, str] | None = None,
+) -> None:
+    """Print the manual adjustments section.  No-op when none exist.
+
+    If *wallet_names* maps wallet id → name, each row shows the attributed
+    wallet (or ``unattributed`` for legacy v12 rows with ``wallet_id=NULL``).
+    """
+    if not adjustments:
+        out.print("Manual reconciliation adjustments: [dim](none)[/dim]")
+        out.print()
+        return
+
+    wallet_names = wallet_names or {}
+    out.rule(f"Manual reconciliation adjustments ({len(adjustments)})", style="yellow")
+    for adj in adjustments:
+        sign = "+" if adj.kind == "acquire" else "-"
+        if adj.wallet_id is None:
+            wallet_tag = "unattributed"
+        else:
+            wallet_tag = wallet_names.get(adj.wallet_id, f"wallet#{adj.wallet_id}")
+        out.print(
+            f"  adj:{adj.id:<3}  {adj.timestamp.date().isoformat()}  "
+            f"{sign}{adj.units:>14.8f} {adj.asset}  "
+            f"CAD {float(adj.cad_value):>10,.2f}  "
+            f"({adj.kind})  [dim]wallet:[/dim] {wallet_tag}"
+        )
+        out.print(f"           [dim]reason:[/dim] {adj.reason}")
+    out.print()
+    out.print(
+        "  [dim]Manual entries are reasonable-basis reconciliation under CRA"
+        " record-keeping rules. Keep your supporting paperwork outside sirop.[/dim]"
+    )
+    out.print()
+
+
+def _prompt_adjust_wallet(wallets: list[Wallet]) -> Wallet | None:
+    """Print a numbered wallet picker and return the user's selection.
+
+    Returns ``None`` when the user cancels (Ctrl-C / EOF) or enters a value
+    that doesn't match any wallet — in the latter case the caller is
+    responsible for emitting the unknown-wallet error.
+    """
+    out.print()
+    out.print("  Which wallet does this reconciliation belong to?")
+    out.print("  [dim]The adjustment will resync this wallet's balance in pour reports.[/dim]")
+    out.print()
+    for i, w in enumerate(wallets, 1):
+        tag = "" if w.auto_created else " *"
+        out.print(f"    [{i}] {w.name}{tag}")
+    out.print()
+    try:
+        raw = ask("  Wallet (number or name)").strip()
+    except (EOFError, KeyboardInterrupt, NonInteractiveError):
+        out.print()
+        out.print("  Cancelled.")
+        return None
+
+    try:
+        idx = int(raw) - 1
+    except ValueError:
+        match = next((w for w in wallets if w.name == raw), None)
+    else:
+        match = wallets[idx] if 0 <= idx < len(wallets) else None
+
+    if match is None:
+        emit(
+            MessageCode.STIR_ERROR_ADJUST_WALLET_UNKNOWN,
+            name=raw,
+            available=", ".join(w.name for w in wallets),
+        )
+    return match
+
+
+def _cmd_adjust(conn: sqlite3.Connection) -> None:
+    """Interactive REPL wizard for adding a manual reconciliation adjustment."""
+    out.print()
+    out.print("  Manual reconciliation adjustment wizard")
+    out.print("  [dim]Use this when your real wallet/exchange balance does not match[/dim]")
+    out.print("  [dim]what sirop calculated, and the gap cannot be closed by importing[/dim]")
+    out.print("  [dim]more CSVs or fixing transfers via 'transfer'.[/dim]")
+    out.print()
+
+    wallets = repo.read_wallets(conn)
+    if not wallets:
+        emit(MessageCode.STIR_ERROR_ADJUST_NO_WALLETS)
+        return
+
+    try:
+        kind_raw = ask("  Kind — [a]cquire (add units) or [d]ispose (remove units)")
+    except (EOFError, KeyboardInterrupt, NonInteractiveError):
+        out.print()
+        out.print("  Cancelled.")
+        return
+    k = kind_raw.strip().lower()
+    if k in {"a", "acquire", "buy", "+"}:
+        kind: Literal["acquire", "dispose"] = "acquire"
+    elif k in {"d", "dispose", "sell", "-"}:
+        kind = "dispose"
+    else:
+        out.print(f"  Invalid kind: {kind_raw!r}. Cancelled.")
+        return
+
+    units_raw = ask("  Units")
+    cad_raw = ask("  CAD cost basis") if kind == "acquire" else ask("  CAD proceeds")
+    date_raw = ask("  Date (YYYY-MM-DD)")
+
+    wallet_obj = _prompt_adjust_wallet(wallets)
+    if wallet_obj is None:
+        return
+
+    out.print()
+    out.print("  [bold]Reason — required.[/bold]")
+    out.print(
+        "  [dim]This is your CRA-defensible justification. Be specific:"
+        " what evidence supports this number? Bank statements? Exchange screenshots?"
+        " Email confirmations? Where did you record them?[/dim]"
+    )
+    reason_raw = ask("  Reason")
+
+    try:
+        _apply_adjust(conn, kind, (units_raw, cad_raw, date_raw), reason_raw, wallet_obj)
+    except _StirError as exc:
+        # In the interactive loop we want to surface the error and continue,
+        # not abort the whole stir session.
+        emit(exc.msg_code, **exc.msg_kwargs)
+
+
+def _cmd_clear_adjustment(conn: sqlite3.Connection, parts: list[str]) -> None:
+    """REPL handler for ``clear-adjustment <id>``."""
+    if len(parts) != _ONE_ARG_PARTS:
+        out.print("Usage: clear-adjustment <adj_id>")
+        return
+    try:
+        adj_id = int(parts[1])
+    except ValueError:
+        out.print("Adjustment id must be an integer.")
+        return
+    try:
+        _apply_clear_adjustment(conn, adj_id)
+    except _StirError as exc:
+        emit(exc.msg_code, **exc.msg_kwargs)
+
+
+@click.group(
+    "stir",
+    invoke_without_command=True,
+    short_help=("Review transactions, inspect transfer pairs, link/unlink, record adjustments"),
+)
+@click.pass_context
+def stir_command(ctx: click.Context) -> None:
+    """Review imported transactions, inspect auto-detected transfer pairs, and
+    manually link or unlink pairs before boil.
+
+    Running ``sirop stir`` with no subcommand launches an interactive REPL.
+    The subcommands below are one-shot equivalents of the REPL actions —
+    use them in scripts or when you want a single change without entering
+    the prompt loop.
+    """
+    if ctx.invoked_subcommand is None:
+        sys.exit(handle_stir())
+
+
+@stir_command.command("list", short_help="Show current transfer match state and exit")
+def stir_list_command() -> None:
+    """Print the auto-matched pairs, unmatched rows, and manual overrides."""
+    sys.exit(handle_stir(list_only=True))
+
+
+@stir_command.command("link", short_help="Force two transactions to be paired")
+@click.argument("id1", type=int)
+@click.argument("id2", type=int)
+def stir_link_command(id1: int, id2: int) -> None:
+    """Force transactions ID1 and ID2 to be treated as a transfer pair."""
+    sys.exit(handle_stir(link=(id1, id2)))
+
+
+@stir_command.command("unlink", short_help="Prevent two transactions from auto-pairing")
+@click.argument("id1", type=int)
+@click.argument("id2", type=int)
+def stir_unlink_command(id1: int, id2: int) -> None:
+    """Prevent transactions ID1 and ID2 from being auto-paired."""
+    sys.exit(handle_stir(unlink=(id1, id2)))
+
+
+@stir_command.command("clear", short_help="Remove all stir overrides for a transaction")
+@click.argument("tx_id", type=int)
+def stir_clear_command(tx_id: int) -> None:
+    """Remove every stir override touching transaction TX_ID."""
+    sys.exit(handle_stir(clear=tx_id))
+
+
+@stir_command.command("adjustments", short_help="List manual reconciliation adjustments")
+def stir_adjustments_command() -> None:
+    """Show all manual reconciliation adjustments recorded for the active batch."""
+    sys.exit(handle_stir(list_adjustments=True))
+
+
+@stir_command.command("unadjust", short_help="Remove a manual reconciliation adjustment")
+@click.argument("adj_id", type=int)
+def stir_unadjust_command(adj_id: int) -> None:
+    """Remove manual reconciliation adjustment ADJ_ID."""
+    sys.exit(handle_stir(clear_adjustment=adj_id))
+
+
+@stir_command.group(
+    "adjust",
+    short_help="Record a manual reconciliation acquisition or disposition",
+)
+def stir_adjust_command() -> None:
+    """Record a manual reconciliation adjustment.
+
+    Use the ``acquire`` subcommand when your real wallet balance exceeds
+    what sirop calculated (missing import). Use ``dispose`` when sirop's
+    pool has units that no longer exist on-chain.
+    """
+
+
+@stir_adjust_command.command("acquire", short_help="Add units via a manual adjustment")
+@click.argument("units")
+@click.argument("cad")
+@click.argument("date")
+@click.option(
+    "--reason",
+    required=True,
+    metavar="TEXT",
+    help="CRA-defensible justification for this adjustment.",
+)
+@click.option(
+    "--wallet",
+    "wallet",
+    required=True,
+    metavar="NAME",
+    help="Wallet to attribute this adjustment to.",
+)
+def stir_adjust_acquire_command(units: str, cad: str, date: str, reason: str, wallet: str) -> None:
+    """Record a manual BTC acquisition (UNITS at CAD cost basis on DATE).
+
+    DATE is YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ.
+    """
+    sys.exit(
+        handle_stir(
+            adjust_acquire=(units, cad, date),
+            reason=reason,
+            adjust_wallet=wallet,
+        )
+    )
+
+
+@stir_adjust_command.command("dispose", short_help="Remove units via a manual adjustment")
+@click.argument("units")
+@click.argument("cad")
+@click.argument("date")
+@click.option(
+    "--reason",
+    required=True,
+    metavar="TEXT",
+    help="CRA-defensible justification for this adjustment.",
+)
+@click.option(
+    "--wallet",
+    "wallet",
+    required=True,
+    metavar="NAME",
+    help="Wallet to attribute this adjustment to.",
+)
+def stir_adjust_dispose_command(units: str, cad: str, date: str, reason: str, wallet: str) -> None:
+    """Record a manual BTC disposition (UNITS for CAD proceeds on DATE).
+
+    DATE is YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ.
+    """
+    sys.exit(
+        handle_stir(
+            adjust_dispose=(units, cad, date),
+            reason=reason,
+            adjust_wallet=wallet,
+        )
+    )

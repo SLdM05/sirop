@@ -11,7 +11,7 @@ import dataclasses
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -717,19 +717,19 @@ class TestParseFeeAmount:
         assert fee == Decimal("0")
 
     def test_zero_rejected(self) -> None:
-        fee, err = _parse_fee_amount("0", "BTC", Decimal("0.01"))
+        _fee, err = _parse_fee_amount("0", "BTC", Decimal("0.01"))
         assert err != ""
 
     def test_negative_rejected(self) -> None:
-        fee, err = _parse_fee_amount("-0.001", "BTC", Decimal("0.01"))
+        _fee, err = _parse_fee_amount("-0.001", "BTC", Decimal("0.01"))
         assert err != ""
 
     def test_fee_equal_to_amount_rejected(self) -> None:
-        fee, err = _parse_fee_amount("0.01", "BTC", Decimal("0.01"))
+        _fee, err = _parse_fee_amount("0.01", "BTC", Decimal("0.01"))
         assert err != ""
 
     def test_fee_greater_than_amount_rejected(self) -> None:
-        fee, err = _parse_fee_amount("0.02", "BTC", Decimal("0.01"))
+        _fee, err = _parse_fee_amount("0.02", "BTC", Decimal("0.01"))
         assert err != ""
 
     def test_fee_just_below_amount_accepted(self) -> None:
@@ -1122,9 +1122,21 @@ class TestProvisionalConsolidation:
             ),
         ]
 
-        with patch(
-            "sirop.transfer_match.matcher.find_graph_matches",
-            return_value=fake_matches,
+        fake_settings = MagicMock()
+        fake_settings.btc_traversal_max_hops = 3
+        fake_settings.btc_mempool_url = "http://localhost:3006/api"
+        fake_settings.btc_traversal_request_delay = 0.0
+        fake_settings.btc_traversal_allow_public = False
+
+        with (
+            patch(
+                "sirop.transfer_match.matcher.get_settings",
+                return_value=fake_settings,
+            ),
+            patch(
+                "sirop.transfer_match.matcher.find_graph_matches",
+                return_value=fake_matches,
+            ),
         ):
             events, _income, _pairs = match_transfers(
                 [withdrawal_9, withdrawal_12, deposit_16],

@@ -1,5 +1,5 @@
 ---
-verified-at: b5e6b66
+verified-at: 8938c26
 tracks:
   - src/sirop/db/schema.py
 ---
@@ -51,18 +51,22 @@ flowchart TD
         subgraph DBCACHE ["  Cached External Data  "]
             T_BOC[("boc_rates<br/><i>date · currency_pair · rate · fetched_at</i>")]:::dbtable
             T_CRYPTO[("crypto_prices<br/><i>date · asset · price_usd · price_cad · source · fetched_at</i><br/><i>source: mempool</i>")]:::dbtable
+            T_CUSTOM_IMP[("custom_importers<br/><i>name · source_name · yaml_config · embedded_at</i><br/><i>v3: user-supplied importer YAML embedded so .sirop is portable</i>")]:::dbtable
         end
 
         subgraph DBSUPPORT ["  Support Tables  "]
             T_WALLETS[("wallets<br/><i>id · name · source · auto_created</i><br/><i>one row per tap source</i>")]:::dbtable
-            T_OVRD[("transfer_overrides<br/><i>tx_id_a · tx_id_b · action · note</i><br/><i>link | unlink | external-out | external-in</i><br/><i>written by stir · read by transfer_match</i>")]:::dbtable
+            T_OVRD[("transfer_overrides<br/><i>tx_id_a · tx_id_b · action · note</i><br/><i>implied_fee_crypto · external_wallet (v5)</i><br/><i>link | unlink | external-out | external-in</i><br/><i>written by stir · read by transfer_match</i>")]:::dbtable
+            T_GRAPH_PAIRS[("graph_transfer_pairs<br/><i>withdrawal_id · deposit_id · hops · direction</i><br/><i>fee_crypto · deposit_vout_count · deposit_vin_count</i><br/><i>v8: persisted output of BTC UTXO graph traversal so stir can display it</i>")]:::dbtable
+            T_TXID_OVRD[("transaction_txid_overrides<br/><i>transaction_id · txid · created_at</i><br/><i>v10: user-supplied on-chain txid for txs whose CSV omitted one</i><br/><i>written by stir destination · read by transfer_match</i>")]:::dbtable
+            T_MANUAL_ADJ[("manual_adjustments<br/><i>kind · asset · units · cad_value · timestamp</i><br/><i>reason (mandatory) · created_at · note</i><br/><i>v12: user reconciliation entries when imports are incomplete</i><br/><i>written by stir adjust · injected as classified_events at transfer_match</i>")]:::dbtable
         end
 
         subgraph DBPIPE ["  Pipeline Tables  "]
             T_RAW[("raw_transactions<br/><i>models/raw.py → rows</i><br/><i>wallet_id → wallets</i>")]:::dbtable
             T_TX[("transactions<br/><i>models/transaction.py → rows</i><br/><i>wallet_id → wallets</i>")]:::dbtable
             T_VTX[("verified_transactions<br/><i>node_verified · block_height · confirmations</i>")]:::dbtable
-            T_EVT[("classified_events<br/><i>buys · sells · fee micro-dispositions</i><br/><i>transfers excluded · income as acquisitions</i>")]:::dbtable
+            T_EVT[("classified_events<br/><i>buys · sells · fee micro-dispositions</i><br/><i>transfers excluded · income as acquisitions</i><br/><i>is_provisional (v11): synthetic events — graph-pair surplus or manual adjustments</i>")]:::dbtable
             T_INCOME[("income_events<br/><i>staking · airdrop · mining</i><br/><i>models/disposition.py → IncomeEvent</i><br/><i>TP-21.4.39-V Part 6 source</i>")]:::dbtable
             T_DISP[("dispositions<br/><i>models/disposition.py → Disposition</i><br/><i>selling_fees · disposition_type · year_acquired</i><br/><i>full before/after ACB pool state</i>")]:::dbtable
             T_ACB[("acb_state<br/><i>event_id → classified_events</i><br/><i>asset · pool_cost · units · snapshot_date</i><br/><i>snapshots after buys AND sells</i>")]:::dbtable
@@ -70,7 +74,7 @@ flowchart TD
         end
 
         subgraph DBAUDIT ["  Audit  "]
-            T_AUDIT[("audit_log<br/><i>occurred_at · stage · txid · field</i><br/><i>old_value · new_value · reason</i>")]:::dbtable
+            T_AUDIT[("audit_log<br/><i>occurred_at · stage · txid · field</i><br/><i>old_value · new_value · reason</i><br/><i>append-only · stages: node-verify · manual_adjust · manual_adjust_clear</i>")]:::dbtable
         end
     end
 
@@ -128,6 +132,7 @@ flowchart TD
     MEMPOOL_TAP -.->|"address tx history · BTC_MEMPOOL_URL"| IMP_XPUB
 
     IMP_SP & IMP_ND & IMP_SW & IMP_KN & IMP_XPUB -->|"via repo → atomic write"| T_RAW
+    YAML_IMP -.->|"embedded in batch when --source uses user YAML"| T_CUSTOM_IMP
 
     %% ═══════════════════════════════════════════
     %% STAGE 2 — normalize
@@ -160,27 +165,35 @@ flowchart TD
 
     %% ═══════════════════════════════════════════
     %% STIR — interactive override editor
-    %% Optional step between tap and boil.
-    %% Reads transactions; writes transfer_overrides.
-    %% transfer_match reads overrides before auto-matching.
+    %% Optional step between tap and boil.  Four sub-commands today:
+    %%   transfer/link/unlink/clear → transfer_overrides
+    %%   destination                → transaction_txid_overrides
+    %%   adjust / clear-adjustment  → manual_adjustments + audit_log
+    %% transfer_match reads all four override tables before auto-matching.
     %% ═══════════════════════════════════════════
 
-    STIR["sirop stir<br/><i>interactive transfer review</i><br/><i>force-link · force-unlink</i><br/><i>mark external-out / external-in</i><br/><i>overrides persist across re-runs</i>"]:::tui
+    STIR["sirop stir<br/><i>interactive transfer review</i><br/><i>force-link · force-unlink · external-out / external-in</i><br/><i>destination — supply on-chain txid for CSV rows that lacked one</i><br/><i>adjust — manual reconciliation entries for incomplete records</i><br/><i>all overrides persist across boil --from re-runs</i>"]:::tui
 
     T_TX -.->|"reads transactions"| STIR
-    STIR -->|"via repo → atomic write"| T_OVRD
+    STIR -->|"transfer / link / unlink / external-* → repo"| T_OVRD
+    STIR -->|"destination → repo"| T_TXID_OVRD
+    STIR -->|"adjust / clear-adjustment → repo"| T_MANUAL_ADJ
+    STIR -->|"every adjustment add and remove → append-only"| T_AUDIT
 
     %% ═══════════════════════════════════════════
     %% STAGE 4 — transfer matching
     %% ═══════════════════════════════════════════
 
-    MATCH["Transfer Matcher<br/><i>Pass 0: apply stir overrides first</i><br/><i>Pass 1: txid matching across sources</i><br/><i>Pass 1b: BTC UTXO graph traversal (optional)</i><br/><i> — backward BFS from deposit vin[]</i><br/><i> — forward BFS through output spends</i><br/><i> — gated by BTC_TRAVERSAL_MAX_HOPS &gt; 0</i><br/><i> — privacy guard before any Mempool API calls</i><br/><i>Pass 2: amount ± fee tolerance + timestamp proximity</i><br/><i>emits fee micro-dispositions for implied fees</i><br/><i>marks transfers as non-dispositions</i><br/><i>warns on same-wallet transfers (coin consolidation)</i><br/><i>propagates wallet_id to classified_events</i>"]:::process
+    MATCH["Transfer Matcher<br/><i>Pass 0: apply stir overrides first</i><br/><i>Pass 1: txid matching across sources (uses transaction_txid_overrides)</i><br/><i>Pass 1b: BTC UTXO graph traversal (optional)</i><br/><i> — backward BFS from deposit vin[]</i><br/><i> — forward BFS through output spends</i><br/><i> — gated by BTC_TRAVERSAL_MAX_HOPS &gt; 0</i><br/><i> — privacy guard before any Mempool API calls</i><br/><i> — matched pairs persisted to graph_transfer_pairs (v8)</i><br/><i> — surplus deposits emit provisional buy events (v11)</i><br/><i>Pass 2: amount ± fee tolerance + timestamp proximity</i><br/><i>Pass 3 (v12): inject manual_adjustments as classified_events</i><br/><i>emits fee micro-dispositions for implied fees</i><br/><i>marks transfers as non-dispositions</i><br/><i>warns on same-wallet transfers (coin consolidation)</i><br/><i>propagates wallet_id to classified_events</i>"]:::process
 
     T_VTX -->|"via repo"| MATCH
-    T_OVRD -.->|"overrides applied before auto-match"| MATCH
+    T_OVRD -.->|"transfer overrides applied before auto-match"| MATCH
+    T_TXID_OVRD -.->|"v10: user-supplied txids patched in before Pass 1"| MATCH
+    T_MANUAL_ADJ -.->|"v12: injected as synthetic classified_events"| MATCH
     PRICE_API -.->|"Pass 1b: BTC UTXO graph traversal<br/><i>GET /tx/{txid} · GET /tx/{txid}/outspends</i><br/><i>privacy-gated · only when BTC_TRAVERSAL_MAX_HOPS &gt; 0</i>"| MATCH
     MATCH -->|"via repo → atomic write"| T_EVT
     MATCH -->|"via repo → atomic write"| T_INCOME
+    MATCH -->|"v8: persist graph-traversal matches"| T_GRAPH_PAIRS
 
     %% ═══════════════════════════════════════════
     %% STAGE 5 — boil  (ACB engine)
@@ -212,11 +225,12 @@ flowchart TD
     %% ═══════════════════════════════════════════
 
     YAML_RPT[("reports.yaml")]:::external
-    RPT["Report Generator<br/><i>config-driven formatter</i>"]:::output
+    RPT["Report Generator<br/><i>config-driven formatter</i><br/><i>flags manual reconciliation rows in Schedule 3 + Part 3</i><br/><i>dedicated Manual Reconciliation Entries section</i>"]:::output
 
     T_DISP_ADJ -->|"via repo"| RPT
     T_INCOME -->|"via repo — TP-21.4.39-V Part 6"| RPT
     T_ACB -.->|"via repo"| RPT
+    T_MANUAL_ADJ -.->|"v12: list adjustments in report with mandatory reasons"| RPT
     YAML_RPT -.-> RPT
 
     S3["Schedule 3<br/><i>Federal — Line 10</i><br/><i>→ T1 Line 12700</i>"]:::output

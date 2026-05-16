@@ -13,9 +13,11 @@ Usage
 from __future__ import annotations
 
 import importlib.metadata
+import sys
 from decimal import Decimal
 from pathlib import Path
 
+import rich_click as click
 import yaml
 
 from sirop.config.settings import Settings, get_settings
@@ -72,6 +74,9 @@ def _run_pour(settings: Settings, output_dir_override: Path | None) -> int:
         acb_final = repo.read_acb_state_final(conn)
         all_events = repo.read_classified_events(conn)
         acquisitions = [e for e in all_events if e.event_type in ("buy", "income", "other")]
+        manual_adjustments = repo.read_manual_adjustments(conn)
+        manual_disposition_ids = repo.read_manual_disposition_ids(conn)
+        manual_event_ids = repo.read_manual_adjustment_event_ids(conn)
 
         sirop_version = _get_version()
 
@@ -92,6 +97,9 @@ def _run_pour(settings: Settings, output_dir_override: Path | None) -> int:
             inclusion_rate=inclusion_rate,
             batch_name=batch_name,
             sirop_version=sirop_version,
+            manual_disposition_ids=manual_disposition_ids,
+            manual_event_ids=manual_event_ids,
+            manual_adjustments=manual_adjustments,
         )
 
         detail = build_detail_report(
@@ -101,6 +109,7 @@ def _run_pour(settings: Settings, output_dir_override: Path | None) -> int:
             tax_year=tax_year,
             batch_name=batch_name,
             sirop_version=sirop_version,
+            manual_adjustments=manual_adjustments,
         )
 
         out_dir = output_dir_override or settings.output_dir
@@ -130,3 +139,21 @@ def _get_version() -> str:
         return importlib.metadata.version("sirop")
     except importlib.metadata.PackageNotFoundError:
         return "unknown"
+
+
+@click.command(
+    "pour",
+    short_help="Generate a Markdown tax report for the active batch",
+)
+@click.option(
+    "--output-dir",
+    "output_dir",
+    type=click.Path(path_type=Path, file_okay=False),
+    metavar="DIR",
+    default=None,
+    help="Override output directory (default: OUTPUT_DIR from .env).",
+)
+def pour_command(output_dir: Path | None) -> None:
+    """Generate a Markdown tax report (Schedule 3, TP-21.4.39-V) from the
+    active batch's computed data."""
+    sys.exit(handle_pour(output_dir_override=output_dir))

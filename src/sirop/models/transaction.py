@@ -30,3 +30,7 @@ class Transaction:
     counterpart_id: int | None  # FK → transactions.id of the matching leg
     notes: str
     wallet_id: int | None = None  # FK → wallets.id; None for pre-v5 rows
+    # True when the verify stage replaced fee_crypto/timestamp with on-chain
+    # data fetched from a Bitcoin node.  Downstream stages can trust these
+    # values as authoritative and skip amount-delta fee imputation.
+    node_verified: bool = False

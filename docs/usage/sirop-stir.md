@@ -1,10 +1,9 @@
 ---
-verified-at: b5e6b66
+verified-at: 9157e16
 tracks:
   - src/sirop/cli/stir.py
   - src/sirop/__main__.py
 ---
-
 # sirop stir — Review and Override Transfer Matching
 
 ## What `stir` does
@@ -35,27 +34,70 @@ they persist through every subsequent re-run.
 ## Syntax
 
 ```
-sirop stir [--list]
-sirop stir --link <id1> <id2>
-sirop stir --unlink <id1> <id2>
-sirop stir --clear <id>
+sirop stir                                     # launch interactive REPL
+sirop stir list                                # one-shot state dump
+sirop stir link <id1> <id2>
+sirop stir unlink <id1> <id2>
+sirop stir clear <id>
+
+sirop stir adjustments                         # list manual reconciliation adjustments
+sirop stir adjust acquire <UNITS> <CAD> <DATE> --reason "..." --wallet NAME
+sirop stir adjust dispose <UNITS> <CAD> <DATE> --reason "..." --wallet NAME
+sirop stir unadjust <ADJ_ID>
 ```
 
-### Arguments
+### Subcommands
 
-| Argument | Description |
-|----------|-------------|
-| *(no flags)* | Launch the interactive REPL |
-| `--list` | Print current transfer state and active overrides, then exit |
-| `--link <id1> <id2>` | Force-link two transactions as a transfer pair. The implied on-chain fee is auto-computed as `sent - received` in the asset's units; if non-zero it is emitted as a `fee_disposal` event at boil time. There is no user-supplied fee flag — if you need to override the computed value, edit the row in `transfer_overrides` directly or use the interactive wizard. |
-| `--unlink <id1> <id2>` | Prevent the auto-matcher from pairing these two transactions |
-| `--clear <id>` | Remove all overrides that involve this transaction ID |
+| Subcommand | Effect |
+|------------|--------|
+| *(none)* | Launch the interactive REPL |
+| `list` | Print current transfer state and active overrides, then exit |
+| `link <id1> <id2>` | Force-link two transactions as a transfer pair. The implied on-chain fee is auto-computed as `sent - received` in the asset's units; if non-zero it is emitted as a `fee_disposal` event at boil time. There is no user-supplied fee flag — if you need to override the computed value, edit the row in `transfer_overrides` directly or use the interactive `transfer` wizard. |
+| `unlink <id1> <id2>` | Prevent the auto-matcher from pairing these two transactions |
+| `clear <id>` | Remove all overrides that involve this transaction ID |
 
-External wallet marking is done through the interactive `transfer` wizard (REPL only —
-no non-interactive flag equivalent). See [Interactive mode](#interactive-mode) below.
+External wallet marking is done through the interactive `transfer` wizard
+(REPL only — no one-shot subcommand). See [Interactive mode](#interactive-mode)
+below.
 
 Transaction IDs (`id1`, `id2`, `id`) are the `id` values from the `transactions`
-table — shown in `stir --list` output and in the interactive display.
+table — shown in `stir list` output and in the interactive display.
+
+### Manual reconciliation adjustments
+
+When the imported transaction history is incomplete and the calculated ACB
+pool does not match your real wallet/exchange balance, record a synthetic
+acquisition or disposition to close the gap.  Every adjustment requires a
+`--reason`, must be attributed to a wallet via `--wallet`, and writes a
+permanent `audit_log` entry.
+
+| Subcommand | Effect |
+|------------|--------|
+| `adjustments` | Print all manual reconciliation adjustments and exit |
+| `adjust acquire UNITS CAD DATE --reason TEXT --wallet NAME` | Record a synthetic BTC acquisition (adds units + cost basis to the ACB pool). |
+| `adjust dispose UNITS CAD DATE --reason TEXT --wallet NAME` | Record a synthetic BTC disposition (removes units, generates a gain/loss row). |
+| `unadjust ADJ_ID` | Remove a manual adjustment by its `adj_id`. Writes a second `audit_log` row recording the removal — the original create entry is never deleted. |
+
+`--reason TEXT` is the CRA-defensible justification for the adjustment;
+mandatory and rejected if blank. `--wallet NAME` is the wallet to attribute
+the adjustment to; must already exist in the active batch — run
+`sirop stir list` to see the available names.
+
+`DATE` accepts `YYYY-MM-DD` or full ISO 8601 with offset (`YYYY-MM-DDTHH:MM:SSZ`).
+
+The wallet attribution is what lets `pour` reports re-sync a specific
+wallet's balance: an `acquire` adds units to that wallet's per-wallet
+holdings view, and a `dispose` removes them.  Legacy adjustments recorded
+before schema v13 keep `wallet_id = NULL` and continue to read back as
+batch-wide / unattributed.
+
+After adding or removing an adjustment, re-run `sirop boil --from transfer_match`
+to apply the change.
+
+Manual entries are flagged in every `pour` report (Schedule 3 dispositions,
+TP-21.4.39-V Part 3 acquisitions, and a dedicated "Manual Reconciliation
+Entries" section).  See `docs/ref/reconciliation-and-missing-data.md` for the
+CRA framing and a worked example.
 
 ---
 
@@ -104,7 +146,7 @@ stir> _
 
 ## Transfer state display
 
-`stir --list` (and the REPL on startup) prints five sections:
+`stir list` (and the REPL on startup) prints five sections:
 
 ### Auto-matched pairs
 
@@ -114,7 +156,7 @@ unless overridden.
 
 ### Forced links
 
-Pairs you manually linked with `stir --link`. Shows the implied fee if
+Pairs you manually linked with `stir link`. Shows the implied fee if
 non-zero — that fee will be emitted as a `fee_disposal` at boil time.
 
 ### External transfers
@@ -182,7 +224,7 @@ If validation fails for one ID (wrong type, already handled, etc.) the error is
 printed and the wizard moves on to the next ID without stopping the queue.
 
 `transfer` only works in the interactive REPL. For non-interactive scripting use
-`sirop stir --link <id1> <id2>` instead.
+`sirop stir link <id1> <id2>` instead.
 
 ### `link` — force a transfer pair
 
@@ -190,7 +232,7 @@ Use when sirop missed a cross-source transfer (e.g., no shared txid and
 timestamps are too far apart for auto-matching).
 
 ```bash
-sirop stir --link 41 87
+sirop stir link 41 87
 ```
 
 The implied fee is auto-computed from the two transactions as
@@ -199,7 +241,7 @@ The implied fee is auto-computed from the two transactions as
 ```bash
 # Sent 0.10 BTC from NDAX, received 0.09997000 BTC in Sparrow
 # sirop computes the implied fee as 0.00003000 BTC automatically.
-sirop stir --link 41 87
+sirop stir link 41 87
 ```
 
 The implied fee becomes a `fee_disposal` event at `boil` time — a micro-
@@ -212,7 +254,7 @@ Use when sirop incorrectly matched two transactions (e.g., coincidentally
 similar amounts near the same time from different exchanges).
 
 ```bash
-sirop stir --unlink 12 34
+sirop stir unlink 12 34
 ```
 
 Both transactions will re-enter the auto-matcher pass but the specific pair
@@ -258,7 +300,7 @@ is REPL-only via `transfer`.
 ### `clear` — remove all overrides for a transaction
 
 ```bash
-sirop stir --clear 41
+sirop stir clear 41
 ```
 
 Removes every override where `tx_id_a = 41` or `tx_id_b = 41`. Run
@@ -270,7 +312,7 @@ Removes every override where `tx_id_a = 41` or `tx_id_b = 41`. Run
 
 ```
 sirop tap <files>           # import all sources
-sirop stir --list           # review auto-detected pairs
+sirop stir list           # review auto-detected pairs
 sirop stir                  # interactive: fix mismatches, mark external wallets
 sirop boil                  # run tax calculations with overrides applied
 ```

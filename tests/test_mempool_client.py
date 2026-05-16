@@ -24,6 +24,7 @@ _TX_JSON = {
     "status": {
         "confirmed": True,
         "block_time": 1_700_000_000,
+        "block_height": 800_000,
     },
     "vin": [
         {"txid": "bbb" + "0" * 61},
@@ -72,6 +73,7 @@ class TestFetchTx:
         assert "bbb" + "0" * 61 in result.vin_txids
         assert "ccc" + "0" * 61 in result.vin_txids
         assert result.vout_count == 1
+        assert result.block_height == 800_000  # noqa: PLR2004
 
     def test_404_returns_none(self) -> None:
         with patch("urllib.request.urlopen", side_effect=_http_error(404)):

@@ -183,6 +183,25 @@ messages:
     category: output
     text: "Tap cancelled."
 
+  tap.warning.cross_wallet_dupe:
+    category: warning
+    code: W011
+    text: >-
+      {count} incoming transaction(s) appear to already exist under wallet
+      '{other_wallet}' in this batch — possible double-import.
+
+  tap.cross_wallet_dupe_row:
+    category: output
+    text: "  {ts}  {asset}  {amount}{txid_hint}"
+
+  tap.cross_wallet_dupe_more:
+    category: output
+    text: "  … and {count} more"
+
+  tap.cross_wallet_aborted:
+    category: output
+    text: "Tap cancelled — no transactions written."
+
   # ── boil ──────────────────────────────────────────────────────────────────
 
   boil.error.not_tapped:
@@ -295,6 +314,15 @@ messages:
     code: W008
     text: "Graph traversal skipped — public Mempool endpoint not confirmed. Set BTC_TRAVERSAL_ALLOW_PUBLIC=true or use --allow-public-mempool to proceed."
 
+  boil.verify.node_override:
+    category: output
+    text: "  Node fee validation — {checked} tx(s) checked, {overrides} fee override(s), {verified} confirmed on-chain"
+
+  boil.verify.node_unreachable:
+    category: warning
+    code: W012
+    text: "Node fee validation skipped — {url} unreachable; verify stage fell back to pass-through. Imported fees retained."
+
   boil.warning.reward_discount:
     category: warning
     code: W010
@@ -302,6 +330,15 @@ messages:
       {count} reward event(s) treated as purchase discounts (ACB=$0, not income).
       No CRA ruling exists for crypto-specific cashback rewards.
       To use income treatment instead, set reward_treatment in tax_rules.yaml.
+
+  boil.manual_adjustments_applied:
+    category: warning
+    code: W011
+    text: >-
+      {count} manual reconciliation adjustment(s) applied. These are reasonable-basis
+      estimates for missing transaction history — keep your supporting paperwork
+      (exchange statements, bank records, screenshots) outside sirop in case of CRA review.
+      See docs/ref/reconciliation-and-missing-data.md.
 
 
   # ── stir ──────────────────────────────────────────────────────────────────
@@ -350,6 +387,59 @@ messages:
     category: error
     code: E024
     text: "Invalid txid — must be exactly 64 lowercase hexadecimal characters."
+
+  stir.adjust_applied:
+    category: output
+    text: "Manual {kind} recorded: {units} {asset} @ {cad_value} CAD on {date} for wallet {wallet!r} (adjustment id:{adj_id}). Run 'sirop boil --from transfer_match' to apply."
+
+  stir.adjust_cleared:
+    category: output
+    text: "Removed manual adjustment id:{adj_id} ({kind} {units} {asset}). Run 'sirop boil --from transfer_match' to apply."
+
+  stir.error.adjust_reason_required:
+    category: error
+    code: E031
+    text: "A reason is required for every manual adjustment. This is your CRA-defensible justification — record what evidence supports the figure."
+
+  stir.error.adjust_invalid_kind:
+    category: error
+    code: E032
+    text: "Adjustment kind must be 'acquire' or 'dispose', got {kind!r}."
+
+  stir.error.adjust_invalid_amount:
+    category: error
+    code: E033
+    text: "Invalid {field}: {value!r}. Must be a positive decimal number."
+
+  stir.error.adjust_invalid_date:
+    category: error
+    code: E034
+    text: "Invalid date: {value!r}. Use ISO 8601 format YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ."
+
+  stir.error.adjust_invalid_asset:
+    category: error
+    code: E035
+    text: "Invalid asset symbol: {value!r}. Use 1-10 uppercase letters/digits (e.g. BTC, ETH)."
+
+  stir.error.adjust_not_found:
+    category: error
+    code: E036
+    text: "Manual adjustment id:{adj_id} not found in the active batch."
+
+  stir.error.adjust_wallet_required:
+    category: error
+    code: E037
+    text: "Manual adjustment requires --wallet NAME. Available wallets: {available}."
+
+  stir.error.adjust_wallet_unknown:
+    category: error
+    code: E038
+    text: "Unknown wallet {name!r}. Available wallets in this batch: {available}."
+
+  stir.error.adjust_no_wallets:
+    category: error
+    code: E039
+    text: "No wallets in the active batch. Run 'sirop tap' to import one first."
 
   # ── list ──────────────────────────────────────────────────────────────────
 

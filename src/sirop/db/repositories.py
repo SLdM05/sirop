@@ -24,6 +24,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Literal, cast
 
+from sirop.models.adjustment import ManualAdjustment
 from sirop.models.disposition import ACBState, AdjustedDisposition, Disposition, IncomeEvent
 from sirop.models.enums import TransactionType
 from sirop.models.event import ClassifiedEvent
@@ -35,6 +36,8 @@ from sirop.node.models import GraphMatch
 
 if TYPE_CHECKING:
     import sqlite3
+
+    from sirop.node.verify import AuditEntry, VerifiedRow
 from sirop.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -260,35 +263,51 @@ def write_transactions(conn: sqlite3.Connection, txs: list[Transaction]) -> list
 
 
 def read_transactions(conn: sqlite3.Connection) -> list[Transaction]:
-    """Deserialize all rows from ``transactions`` into ``Transaction`` dataclasses."""
+    """Deserialize all rows from ``transactions`` into ``Transaction`` dataclasses.
+
+    Overlay any node-verified ``fee_crypto`` and ``timestamp`` from
+    ``verified_transactions`` when ``node_verified=1``.  This lets downstream
+    stages (transfer_match, boil) read a single ``Transaction`` stream whose
+    fees and timestamps reflect on-chain corrections applied by the verify
+    stage, without each stage having to query both tables.
+    """
     rows = conn.execute(
         """
-        SELECT id, source, timestamp, transaction_type, asset, amount,
-               cad_amount, cad_fee, fee_crypto, txid, is_transfer, counterpart_id, notes,
-               wallet_id
-        FROM transactions
-        ORDER BY timestamp
+        SELECT t.id, t.source, t.timestamp AS t_timestamp,
+               t.transaction_type, t.asset, t.amount,
+               t.cad_amount, t.cad_fee, t.fee_crypto AS t_fee_crypto, t.txid,
+               t.is_transfer, t.counterpart_id, t.notes, t.wallet_id,
+               vt.node_verified AS v_node_verified,
+               vt.timestamp     AS v_timestamp,
+               vt.fee_crypto    AS v_fee_crypto
+        FROM transactions t
+        LEFT JOIN verified_transactions vt ON vt.tx_id = t.id
+        ORDER BY t.timestamp
         """
     ).fetchall()
 
     result: list[Transaction] = []
     for row in rows:
+        node_verified = bool(row["v_node_verified"]) if row["v_node_verified"] else False
+        timestamp_str = row["v_timestamp"] if node_verified else row["t_timestamp"]
+        fee_crypto_str = row["v_fee_crypto"] if node_verified else row["t_fee_crypto"]
         result.append(
             Transaction(
                 id=row["id"],
                 source=row["source"],
-                timestamp=datetime.fromisoformat(row["timestamp"]),
+                timestamp=datetime.fromisoformat(timestamp_str),
                 tx_type=TransactionType(row["transaction_type"]),
                 asset=row["asset"],
                 amount=Decimal(row["amount"]),
                 cad_value=Decimal(row["cad_amount"]),
                 fee_cad=Decimal(row["cad_fee"]) if row["cad_fee"] else Decimal("0"),
-                fee_crypto=Decimal(row["fee_crypto"]) if row["fee_crypto"] else Decimal("0"),
+                fee_crypto=Decimal(fee_crypto_str) if fee_crypto_str else Decimal("0"),
                 txid=row["txid"],
                 is_transfer=bool(row["is_transfer"]),
                 counterpart_id=row["counterpart_id"],
                 notes=row["notes"] or "",
                 wallet_id=row["wallet_id"],
+                node_verified=node_verified,
             )
         )
     return result
@@ -326,6 +345,71 @@ def promote_to_verified(conn: sqlite3.Connection) -> int:
         )
     count = conn.execute("SELECT COUNT(*) FROM verified_transactions").fetchone()[0]
     return int(count)
+
+
+def promote_to_verified_with_node(
+    conn: sqlite3.Connection,
+    verified: list[VerifiedRow],
+    audit: list[AuditEntry],
+) -> tuple[int, int]:
+    """Insert node-enriched verified rows + record audit_log entries.
+
+    Single SQLite transaction.  Returns ``(rows_inserted, overrides_recorded)``.
+
+    The caller (``cli/boil._run_verify``) is responsible for producing
+    *verified* and *audit* via :func:`sirop.node.verify.validate_fees`.  This
+    keeps the repository free of node I/O while still wrapping persistence in
+    one atomic write.
+    """
+    now = datetime.now(tz=UTC).isoformat()
+    rows_inserted = 0
+    with conn:
+        for vrow in verified:
+            tx = vrow.tx
+            conn.execute(
+                """
+                INSERT INTO verified_transactions
+                    (tx_id, timestamp, transaction_type, asset, amount,
+                     fee_crypto, fee_currency, cad_amount, cad_fee, cad_rate,
+                     txid, source, is_transfer, counterpart_id,
+                     node_verified, block_height, confirmations, wallet_id)
+                SELECT
+                    t.id, ?, t.transaction_type, t.asset, t.amount,
+                    ?, t.fee_currency, t.cad_amount, t.cad_fee, t.cad_rate,
+                    t.txid, t.source, t.is_transfer, t.counterpart_id,
+                    ?, ?, ?, t.wallet_id
+                FROM transactions t
+                WHERE t.id = ?
+                """,
+                (
+                    tx.timestamp.isoformat(),
+                    format(tx.fee_crypto, "f") if tx.fee_crypto else None,
+                    1 if vrow.node_verified else 0,
+                    vrow.block_height,
+                    vrow.confirmations,
+                    tx.id,
+                ),
+            )
+            rows_inserted += 1
+
+        for entry in audit:
+            conn.execute(
+                """
+                INSERT INTO audit_log
+                    (occurred_at, stage, txid, field, old_value, new_value, reason)
+                VALUES (?, 'verify', ?, ?, ?, ?, ?)
+                """,
+                (
+                    now,
+                    entry.txid,
+                    entry.field,
+                    entry.old_value,
+                    entry.new_value,
+                    entry.reason,
+                ),
+            )
+
+    return rows_inserted, len(audit)
 
 
 # ---------------------------------------------------------------------------
@@ -1140,6 +1224,24 @@ def wallet_exists(conn: sqlite3.Connection, name: str) -> bool:
     return row is not None
 
 
+def find_wallet_by_name(conn: sqlite3.Connection, name: str) -> Wallet | None:
+    """Return the wallet with *name*, or ``None`` if no row matches."""
+    row = conn.execute(
+        "SELECT id, name, source, auto_created, created_at, note FROM wallets WHERE name = ?",
+        (name,),
+    ).fetchone()
+    if row is None:
+        return None
+    return Wallet(
+        id=row["id"],
+        name=row["name"],
+        source=row["source"],
+        auto_created=bool(row["auto_created"]),
+        created_at=datetime.fromisoformat(row["created_at"]),
+        note=row["note"] or "",
+    )
+
+
 def read_wallets(conn: sqlite3.Connection) -> list[Wallet]:
     """Return all wallets ordered by name."""
     rows = conn.execute(
@@ -1156,6 +1258,94 @@ def read_wallets(conn: sqlite3.Connection) -> list[Wallet]:
         )
         for row in rows
     ]
+
+
+def find_cross_wallet_duplicates(
+    conn: sqlite3.Connection,
+    txs: list[RawTransaction],
+    current_wallet_name: str,
+    timestamp_window_seconds: int = 60,
+) -> list[tuple[RawTransaction, str]]:
+    """Return incoming transactions that appear to duplicate rows in other wallets.
+
+    A row is considered a duplicate — not a legitimate cross-wallet transfer — when
+    txid, transaction_type, AND amount all match an existing row under a different
+    wallet name.  Opposite transaction_type (withdrawal vs deposit) on the same txid
+    indicates a legitimate send/receive pair and is intentionally excluded.
+
+    For txid-less rows (most CSV sources), the fingerprint is
+    (source, asset, amount, transaction_type) with a timestamp proximity check.
+
+    Returns a list of (incoming_tx, existing_wallet_name) pairs.
+    """
+    if not txs:
+        return []
+
+    suspects: list[tuple[RawTransaction, str]] = []
+
+    # ── Pass A: txid-bearing rows ─────────────────────────────────────────────
+    txid_txs = [tx for tx in txs if tx.txid is not None]
+    if txid_txs:
+        placeholders = ",".join("?" * len(txid_txs))
+        txid_values = [tx.txid for tx in txid_txs]
+        # All values are parameterized; placeholders is only "?,?,?".
+        txid_sql = f"""
+            SELECT rt.txid, rt.transaction_type, rt.amount, w.name AS wallet_name
+            FROM raw_transactions rt
+            JOIN wallets w ON rt.wallet_id = w.id
+            WHERE w.name != ?
+              AND rt.txid IN ({placeholders})
+            """  # noqa: S608
+        rows = conn.execute(txid_sql, [current_wallet_name, *txid_values]).fetchall()
+
+        # Index existing rows by txid for O(1) lookup
+        existing_by_txid: dict[str, list[tuple[str, str, str]]] = {}
+        for row in rows:
+            existing_by_txid.setdefault(row["txid"], []).append(
+                (row["transaction_type"], row["amount"], row["wallet_name"])
+            )
+
+        for tx in txid_txs:
+            assert tx.txid is not None
+            for ex_type, ex_amount, ex_wallet in existing_by_txid.get(tx.txid, []):
+                if ex_type == tx.transaction_type and ex_amount == format(tx.amount, "f"):
+                    suspects.append((tx, ex_wallet))
+                    break  # one match per incoming tx is enough
+
+    # ── Pass B: txid-less rows ────────────────────────────────────────────────
+    for tx in txs:
+        if tx.txid is not None:
+            continue
+        row = conn.execute(
+            """
+            SELECT w.name AS wallet_name
+            FROM raw_transactions rt
+            JOIN wallets w ON rt.wallet_id = w.id
+            WHERE w.name != ?
+              AND rt.source           = ?
+              AND rt.asset            = ?
+              AND rt.amount           = ?
+              AND rt.transaction_type = ?
+              AND ABS(
+                    CAST(strftime('%s', rt.raw_timestamp) AS INTEGER)
+                  - CAST(strftime('%s', ?)               AS INTEGER)
+                ) < ?
+            LIMIT 1
+            """,
+            (
+                current_wallet_name,
+                tx.source,
+                tx.asset,
+                format(tx.amount, "f"),
+                tx.transaction_type,
+                tx.timestamp.isoformat(),
+                timestamp_window_seconds,
+            ),
+        ).fetchone()
+        if row is not None:
+            suspects.append((tx, row["wallet_name"]))
+
+    return suspects
 
 
 # ---------------------------------------------------------------------------
@@ -1364,3 +1554,237 @@ def delete_transaction_txid_override(conn: sqlite3.Connection, transaction_id: i
             "DELETE FROM transaction_txid_overrides WHERE transaction_id = ?",
             (transaction_id,),
         )
+
+
+# ---------------------------------------------------------------------------
+# Manual adjustments  (v12)
+# ---------------------------------------------------------------------------
+
+
+def write_manual_adjustment(  # noqa: PLR0913
+    conn: sqlite3.Connection,
+    *,
+    kind: Literal["acquire", "dispose"],
+    asset: str,
+    units: Decimal,
+    cad_value: Decimal,
+    timestamp: datetime,
+    reason: str,
+    note: str = "",
+    wallet_id: int | None = None,
+) -> ManualAdjustment:
+    """Persist a manual reconciliation adjustment and return it with a DB ID.
+
+    The caller is responsible for validating *reason* is non-empty, *units* and
+    *cad_value* are positive Decimals, *timestamp* is timezone-aware, *kind*
+    is one of ``'acquire'``/``'dispose'``, and (for v13+) *wallet_id* refers
+    to an existing wallets row.  This function does not validate — the CLI
+    layer rejects bad input via ``MessageCode.STIR_ERROR_*`` codes before
+    calling here.
+    """
+    now = datetime.now(tz=UTC)
+    with conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO manual_adjustments
+                (kind, asset, units, cad_value, timestamp, reason, created_at, note, wallet_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                kind,
+                asset,
+                format(units, "f"),
+                format(cad_value, "f"),
+                timestamp.isoformat(),
+                reason,
+                now.isoformat(),
+                note,
+                wallet_id,
+            ),
+        )
+    return ManualAdjustment(
+        id=cursor.lastrowid or 0,
+        kind=kind,
+        asset=asset,
+        units=units,
+        cad_value=cad_value,
+        timestamp=timestamp,
+        reason=reason,
+        created_at=now,
+        note=note,
+        wallet_id=wallet_id,
+    )
+
+
+def read_manual_adjustments(conn: sqlite3.Connection) -> list[ManualAdjustment]:
+    """Return all manual adjustments ordered by attributed timestamp.
+
+    Returns an empty list when the table is absent (pre-v12 batch opened
+    before migration).
+    """
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, kind, asset, units, cad_value, timestamp, reason,
+                   created_at, note, wallet_id
+            FROM manual_adjustments
+            ORDER BY timestamp, id
+            """
+        ).fetchall()
+    except Exception:
+        return []
+
+    return [
+        ManualAdjustment(
+            id=row["id"],
+            kind=cast("Literal['acquire', 'dispose']", row["kind"]),
+            asset=row["asset"],
+            units=Decimal(row["units"]),
+            cad_value=Decimal(row["cad_value"]),
+            timestamp=datetime.fromisoformat(row["timestamp"]),
+            reason=row["reason"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            note=row["note"] or "",
+            wallet_id=row["wallet_id"],
+        )
+        for row in rows
+    ]
+
+
+def delete_manual_adjustment(
+    conn: sqlite3.Connection, adjustment_id: int
+) -> ManualAdjustment | None:
+    """Delete a single manual adjustment by ID and return what was removed.
+
+    Returns ``None`` if no row matched.  The caller is responsible for writing
+    a corresponding ``audit_log`` entry recording the removal.
+    """
+    rows = conn.execute(
+        """
+        SELECT id, kind, asset, units, cad_value, timestamp, reason,
+               created_at, note, wallet_id
+        FROM manual_adjustments WHERE id = ?
+        """,
+        (adjustment_id,),
+    ).fetchall()
+    if not rows:
+        return None
+    row = rows[0]
+    removed = ManualAdjustment(
+        id=row["id"],
+        kind=cast("Literal['acquire', 'dispose']", row["kind"]),
+        asset=row["asset"],
+        units=Decimal(row["units"]),
+        cad_value=Decimal(row["cad_value"]),
+        timestamp=datetime.fromisoformat(row["timestamp"]),
+        reason=row["reason"],
+        created_at=datetime.fromisoformat(row["created_at"]),
+        note=row["note"] or "",
+        wallet_id=row["wallet_id"],
+    )
+    with conn:
+        conn.execute("DELETE FROM manual_adjustments WHERE id = ?", (adjustment_id,))
+    return removed
+
+
+# ---------------------------------------------------------------------------
+# Audit log
+# ---------------------------------------------------------------------------
+
+
+def write_audit_log(  # noqa: PLR0913
+    conn: sqlite3.Connection,
+    *,
+    stage: str,
+    field: str,
+    reason: str,
+    txid: str | None = None,
+    old_value: str | None = None,
+    new_value: str | None = None,
+) -> int:
+    """Append a row to ``audit_log`` and return its DB-assigned ID.
+
+    Audit log rows are append-only: never updated, never deleted.  This is the
+    permanent paper trail used to defend manual adjustments under CRA audit.
+
+    Use a single short string for *stage* (e.g. ``'manual_adjust'``,
+    ``'manual_adjust_clear'``) so the table can be filtered by event class.
+    """
+    now = datetime.now(tz=UTC).isoformat()
+    with conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO audit_log
+                (occurred_at, stage, txid, field, old_value, new_value, reason)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (now, stage, txid, field, old_value, new_value, reason),
+        )
+    return cursor.lastrowid or 0
+
+
+def read_audit_log(conn: sqlite3.Connection) -> list[dict[str, str | None]]:
+    """Return all audit log rows ordered by occurrence time.
+
+    Returns rows as plain dicts (not a dataclass) since the table is a
+    free-form audit trail rather than a typed pipeline artefact.
+    """
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, occurred_at, stage, txid, field, old_value, new_value, reason
+            FROM audit_log
+            ORDER BY occurred_at, id
+            """
+        ).fetchall()
+    except Exception:
+        return []
+    return [
+        {
+            "id": str(row["id"]),
+            "occurred_at": row["occurred_at"],
+            "stage": row["stage"],
+            "txid": row["txid"],
+            "field": row["field"],
+            "old_value": row["old_value"],
+            "new_value": row["new_value"],
+            "reason": row["reason"],
+        }
+        for row in rows
+    ]
+
+
+def read_manual_adjustment_event_ids(conn: sqlite3.Connection) -> set[int]:
+    """Return the set of ``classified_events.id`` rows that came from a manual adjustment.
+
+    Used by ``pour`` to flag manually-derived rows in the report.  Manual
+    classified events are written by the transfer_match stage with
+    ``source='manual'``.
+    """
+    try:
+        rows = conn.execute("SELECT id FROM classified_events WHERE source = 'manual'").fetchall()
+    except Exception:
+        return set()
+    return {int(row["id"]) for row in rows}
+
+
+def read_manual_disposition_ids(conn: sqlite3.Connection) -> set[int]:
+    """Return ``dispositions_adjusted.id`` values whose source event is manual.
+
+    The chain is ``dispositions_adjusted.disposition_id -> dispositions.event_id
+    -> classified_events.id`` filtered to ``source='manual'``.  Returns an
+    empty set if the upstream tables are missing.
+    """
+    try:
+        rows = conn.execute(
+            """
+            SELECT da.id
+            FROM dispositions_adjusted da
+            JOIN dispositions d ON d.id = da.disposition_id
+            JOIN classified_events ce ON ce.id = d.event_id
+            WHERE ce.source = 'manual'
+            """
+        ).fetchall()
+    except Exception:
+        return set()
+    return {int(row["id"]) for row in rows}

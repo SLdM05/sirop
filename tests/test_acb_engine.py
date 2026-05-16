@@ -387,7 +387,7 @@ def test_final_pools_returned_for_buy_sell_buy_asset() -> None:
         _sell("BTC", "0.1", "6000", cad_fee="0", offset_days=10, event_id=2),
         _buy("BTC", "0.3", "18000", cad_fee="36", offset_days=20, event_id=3),
     ]
-    disps, acb_states, final_pools, last_events, _ = run(events, _DEFAULT_RULES)
+    _disps, acb_states, final_pools, last_events, _ = run(events, _DEFAULT_RULES)
 
     # One disposal → one per-disposal acb_state entry.
     assert len(acb_states) == 1

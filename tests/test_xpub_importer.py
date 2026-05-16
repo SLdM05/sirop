@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -211,10 +212,6 @@ def test_unconfirmed_tx_uses_epoch_timestamp(importer: XpubImporter) -> None:
     This made the dedup key non-deterministic — each re-tap would get a new
     timestamp and insert the same unconfirmed transaction again.
     """
-    from datetime import UTC, datetime
-
-    from sirop.node.address_scanner import ScannedTx
-
     unconfirmed = ScannedTx(
         txid="eee" + "0" * 61,
         net_sats=100_000,

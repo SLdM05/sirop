@@ -1,5 +1,5 @@
 ---
-verified-at: b5e6b66
+verified-at: 9157e16
 tracks:
   - src/sirop/cli/boil.py
   - src/sirop/__main__.py
@@ -7,7 +7,6 @@ tracks:
   - src/sirop/normalizer
   - src/sirop/transfer_match
 ---
-
 # sirop boil — Run the Tax Calculation Pipeline
 
 ## What `boil` does
@@ -70,9 +69,12 @@ never re-fetched for the same date.
 
 ### verify
 
-Currently a pass-through stage: copies `transactions` → `verified_transactions` unchanged.
-When Bitcoin node verification is implemented, this stage will cross-check on-chain
-timestamps, amounts, and fees, writing any overrides to `audit_log`.
+Copies `transactions` → `verified_transactions`, optionally overriding the imported
+fee and timestamp with values fetched from your configured Mempool/Bitcoin node when
+the privacy gate permits. Each override is recorded in `audit_log` with the old and
+new value plus a reason. When `BTC_TRAVERSAL_MAX_HOPS=0` or the node is unreachable,
+verify is a pure pass-through (rows promoted unchanged). Amount cross-validation
+against on-chain outputs is still planned.
 
 ### transfer_match
 
@@ -119,9 +121,20 @@ Overrides written by `sirop stir` are applied first; auto-matching runs after.
 - Unmatched withdrawals → treated conservatively as sells. A warning is emitted
   so you can decide whether to `stir link` or tap the receiving wallet.
 
+**Pass 2 — inject manual reconciliation entries:**
+
+After classification, every row in `manual_adjustments` is appended as a
+`classified_event` with `source='manual'`, `is_provisional=1`, `vtx_id=NULL`.
+These flow through the ACB engine identically to imported acquisitions and
+dispositions. When any are present, sirop emits a `[W011]` warning to remind
+the user that the report contains reasonable-basis reconciliation entries.
+See `docs/ref/reconciliation-and-missing-data.md`.
+
 > **Tip:** Run `sirop stir` between `tap` and `boil` to review auto-detected
 > pairs, fix mismatches, and mark external transfers before tax calculations run.
 > Overrides survive `sirop boil --from transfer_match` so you only set them once.
+> The same is true for `manual_adjustments` — `stir adjust` writes to a separate
+> table that is re-injected on every `transfer_match` re-run.
 
 ### boil (ACB engine)
 
@@ -197,7 +210,7 @@ re-importing.
 |-------|------------|---------|
 | `transactions` | normalize | Normalised transactions with CAD values |
 | `verified_transactions` | verify | Promoted copy of `transactions` |
-| `classified_events` | transfer_match | Taxable events + non-taxable transfer markers |
+| `classified_events` | transfer_match | Taxable events + non-taxable transfer markers (also receives synthetic rows from `manual_adjustments`) |
 | `income_events` | transfer_match | Income sub-records for TP-21.4.39-V |
 | `dispositions` | boil | One row per disposal with gain/loss and ACB pool state |
 | `acb_state` | boil | Pool snapshot after every taxable event |
@@ -286,7 +299,7 @@ Detected format: Sparrow Wallet
 Tapped 8 transaction(s) from sparrow_wallet.csv [Sparrow Wallet] into 'my2025tax'.
 
 # Optional: review and fix transfer pairs before calculating
-$ sirop stir --list
+$ sirop stir list
 # (inspect auto-detected pairs, link/unlink as needed)
 
 $ sirop boil

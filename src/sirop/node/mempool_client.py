@@ -178,6 +178,10 @@ def _parse_tx(data: dict[str, Any]) -> OnChainTx | None:
             entry["txid"] for entry in vin if isinstance(entry.get("txid"), str)
         )
         vout: list[Any] = data.get("vout", [])
+        block_height_raw: Any = status.get("block_height")
+        block_height: int | None = (
+            int(block_height_raw) if isinstance(block_height_raw, int) else None
+        )
         return OnChainTx(
             txid=txid,
             fee_sat=fee_sat,
@@ -185,6 +189,7 @@ def _parse_tx(data: dict[str, Any]) -> OnChainTx | None:
             block_time=block_time,
             vin_txids=vin_txids,
             vout_count=len(vout),
+            block_height=block_height,
         )
     except (KeyError, TypeError, ValueError) as exc:
         logger.debug("mempool_client: failed to parse tx JSON — %s", exc)
