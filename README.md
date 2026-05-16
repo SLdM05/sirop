@@ -91,9 +91,10 @@ sirop stir
 
 # 4b. If your real wallet balance does not match what sirop calculated and the
 #     gap cannot be closed by importing more CSVs, record a manual reconciliation
-#     entry. Reason is mandatory and visible in every report.
-sirop stir --adjust-acquire BTC 0.5 12500.00 2017-11-15 \
-  --reason "Reconstructed from RBC statement archived 2017-11-15"
+#     entry. Reason and wallet are mandatory; both are visible in every report.
+sirop stir adjust acquire 0.5 12500.00 2017-11-15 \
+  --reason "Reconstructed from RBC statement archived 2017-11-15" \
+  --wallet ledger-cold
 
 # 5. Generate your tax reports
 sirop pour
@@ -125,11 +126,11 @@ Both are plain text Markdown, not PDFs. Open in any text editor or Markdown view
 
 - **`grade` command** — batch status and pipeline overview
 - **Textual TUI** — interactive transaction browser, ACB state viewer, and batch switcher
-- **Full on-chain node verification** — timestamp override, exact fee capture, and
-  amount cross-validation via Bitcoin Core RPC or a private Mempool node before ACB
-  calculation (graph traversal for transfer matching is already implemented)
-- **Additional import formats** — Koinly capital gains CSV (as a validation source),
-  more Canadian exchanges
+- **Complete on-chain node verification** — amount cross-validation via Bitcoin Core
+  RPC or a private Mempool node before ACB calculation. Graph traversal for transfer
+  matching, exact fee capture, and on-chain timestamp override are already implemented;
+  amount cross-validation is the remaining piece.
+- **Additional import formats** — more Canadian exchanges
 
 ---
 

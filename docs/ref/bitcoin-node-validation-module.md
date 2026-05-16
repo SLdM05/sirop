@@ -8,13 +8,18 @@ tracks:
 # Bitcoin Node Verification Module
 
 > **Status: Partial Implementation**
-> The `verify` stage currently promotes transactions to `verified_transactions`
-> unchanged (pass-through). Full node verification (timestamp override, amount
-> cross-validation, audit trail) is the design spec below.
+> The `verify` stage now overrides imported fees and timestamps with on-chain
+> values from the configured node and records each change in `audit_log`. The
+> remaining piece of the design spec below is amount cross-validation against
+> on-chain outputs.
 >
 > **What IS implemented today:**
 > - `src/sirop/node/mempool_client.py` — lightweight Mempool REST client
 >   (`fetch_tx`, `fetch_outspends`) with 1-retry error handling.
+> - `src/sirop/node/verify.py` — `validate_fees()` overrides imported
+>   `fee_crypto` with the on-chain fee for user-paid sends and `timestamp`
+>   with the block time; both overrides are written to `audit_log` via
+>   `AuditEntry`.
 > - `src/sirop/node/graph.py` — pure BFS traversal (`backward_traverse`,
 >   `forward_traverse`) to link BTC transfers through the UTXO graph.
 > - `src/sirop/node/privacy.py` — `is_private_node_url()` classifies the
@@ -23,6 +28,9 @@ tracks:
 > - `src/sirop/transfer_match/graph_analysis.py` — orchestrates Pass 1b of the
 >   transfer matcher: backward + forward BFS for unmatched BTC transactions,
 >   with fee micro-disposal emission and deduplication.
+>
+> **Still planned (the design spec below):** amount cross-validation against
+> the txn's vout amounts; deeper audit-trail integration with the pour reports.
 >
 > See `docs/usage/sirop-boil.md → BTC graph traversal` for configuration and
 > the privacy guard behaviour.

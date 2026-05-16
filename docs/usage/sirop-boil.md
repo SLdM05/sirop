@@ -69,9 +69,12 @@ never re-fetched for the same date.
 
 ### verify
 
-Currently a pass-through stage: copies `transactions` → `verified_transactions` unchanged.
-When Bitcoin node verification is implemented, this stage will cross-check on-chain
-timestamps, amounts, and fees, writing any overrides to `audit_log`.
+Copies `transactions` → `verified_transactions`, optionally overriding the imported
+fee and timestamp with values fetched from your configured Mempool/Bitcoin node when
+the privacy gate permits. Each override is recorded in `audit_log` with the old and
+new value plus a reason. When `BTC_TRAVERSAL_MAX_HOPS=0` or the node is unreachable,
+verify is a pure pass-through (rows promoted unchanged). Amount cross-validation
+against on-chain outputs is still planned.
 
 ### transfer_match
 
@@ -296,7 +299,7 @@ Detected format: Sparrow Wallet
 Tapped 8 transaction(s) from sparrow_wallet.csv [Sparrow Wallet] into 'my2025tax'.
 
 # Optional: review and fix transfer pairs before calculating
-$ sirop stir --list
+$ sirop stir list
 # (inspect auto-detected pairs, link/unlink as needed)
 
 $ sirop boil
