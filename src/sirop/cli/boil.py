@@ -20,10 +20,12 @@ from __future__ import annotations
 import csv
 import dataclasses
 import sqlite3
+import sys
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import rich_click as click
 import yaml
 from rich.table import Table
 
@@ -39,6 +41,7 @@ from sirop.models.messages import MessageCode
 from sirop.node.privacy import is_private_node_url
 from sirop.normalizer import normalizer
 from sirop.transfer_match import matcher
+from sirop.ui import NonInteractiveError, confirm
 from sirop.utils.boc import BoCRateError, fill_rate_gaps, prefetch_rates
 from sirop.utils.console import out as _out
 from sirop.utils.crypto_prices import prefetch_crypto_prices
@@ -451,11 +454,11 @@ def _resolve_graph_traversal_permission(
     # Interactive prompt.
     emit(MessageCode.BOIL_GRAPH_PRIVACY_WARNING, url=url)
     try:
-        answer = input("Proceed with graph traversal? [y/N] ").strip().lower()
-    except (EOFError, OSError):
-        answer = ""
+        proceed = confirm("Proceed with graph traversal?", default=False)
+    except NonInteractiveError:
+        proceed = False
 
-    if answer == "y":
+    if proceed:
         return True
 
     emit(MessageCode.BOIL_GRAPH_PRIVACY_SKIPPED)
@@ -1140,3 +1143,39 @@ def _print_summary(conn: object, batch_name: str) -> None:
             w=unmatched["w"] or 0,
             d=unmatched["d"] or 0,
         )
+
+
+@click.command(
+    "boil",
+    short_help="Run the tax calculation pipeline (normalize → ACB → superficial loss)",
+)
+@click.option(
+    "--from",
+    "from_stage",
+    metavar="STAGE",
+    type=click.Choice(["normalize", "verify", "transfer_match", "boil", "superficial_loss"]),
+    default=None,
+    help=("Re-run from this stage onward, invalidating downstream stages."),
+)
+@click.option(
+    "--audit",
+    is_flag=True,
+    default=False,
+    help=(
+        "After calculation, write a CSV ledger of all events and ACB math to "
+        "<DATA_DIR>/<batch>-audit.csv for manual verification."
+    ),
+)
+@click.option(
+    "--allow-public-mempool",
+    "allow_public_mempool",
+    is_flag=True,
+    default=False,
+    help=(
+        "Skip the interactive privacy prompt when BTC_MEMPOOL_URL points to a public "
+        "host. Equivalent to BTC_TRAVERSAL_ALLOW_PUBLIC=true."
+    ),
+)
+def boil_command(from_stage: str | None, audit: bool, allow_public_mempool: bool) -> None:
+    """Run the tax calculation pipeline on the active batch."""
+    sys.exit(handle_boil(from_stage, audit=audit, allow_public_mempool=allow_public_mempool))

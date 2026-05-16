@@ -30,9 +30,12 @@ Error behaviour
 import csv
 import json
 import sqlite3
+import sys
 from collections import defaultdict
 from collections.abc import Callable
 from pathlib import Path
+
+import rich_click as click
 
 from sirop.config.settings import Settings, get_settings
 from sirop.db import repositories as repo
@@ -46,6 +49,7 @@ from sirop.importers.sparrow import SparrowImporter
 from sirop.importers.xpub import XpubImporter
 from sirop.models.messages import MessageCode
 from sirop.models.raw import RawTransaction
+from sirop.ui import NonInteractiveError, confirm
 from sirop.utils.logging import get_logger
 from sirop.utils.messages import emit, spinner
 
@@ -128,11 +132,11 @@ def handle_tap_walletfolder(
 
     # ── Confirmation ──────────────────────────────────────────────────────────
     try:
-        answer = input(f"\nTap {len(tappable)} wallet folder(s)? [y/N] ").strip().lower()
-    except EOFError:
-        answer = ""
+        proceed = confirm(f"\nTap {len(tappable)} wallet folder(s)?", default=False)
+    except NonInteractiveError:
+        proceed = False
 
-    if answer not in {"y", "yes"}:
+    if not proceed:
         emit(MessageCode.TAP_WALLETFOLDER_ABORTED)
         return 0
 
@@ -247,11 +251,11 @@ def _handle_tap_folder(
 
     # ── Confirmation ──────────────────────────────────────────────────────────
     try:
-        answer = input(f"\nTap {len(tappable)} file(s)? [y/N] ").strip().lower()
-    except EOFError:
-        answer = ""
+        proceed = confirm(f"\nTap {len(tappable)} file(s)?", default=False)
+    except NonInteractiveError:
+        proceed = False
 
-    if answer not in {"y", "yes"}:
+    if not proceed:
         emit(MessageCode.TAP_FOLDER_ABORTED)
         return 0
 
@@ -502,11 +506,9 @@ def _confirm_cross_wallet_import(suspects: list[tuple[RawTransaction, str]]) -> 
             emit(MessageCode.TAP_CROSS_WALLET_DUPE_MORE, count=len(group) - _CROSS_WALLET_MAX_SHOWN)
 
     try:
-        answer = input("\nTap anyway? [y/N] ").strip().lower()
-    except EOFError:
+        return confirm("\nTap anyway?", default=False)
+    except NonInteractiveError:
         return False
-
-    return answer in {"y", "yes"}
 
 
 def _confirm_wallet_append(batch_name: str, settings: Settings, wallet_name: str) -> bool:
@@ -528,18 +530,13 @@ def _confirm_wallet_append(batch_name: str, settings: Settings, wallet_name: str
         return True
 
     try:
-        answer = (
-            input(
-                f'\nWallet "{wallet_name}" already exists. Append to it? [Y/n]'
-                " (use --wallet NAME to create a new wallet) "
-            )
-            .strip()
-            .lower()
+        return confirm(
+            f'\nWallet "{wallet_name}" already exists. Append to it?'
+            " (use --wallet NAME to create a new wallet)",
+            default=True,
         )
-    except EOFError:
+    except NonInteractiveError:
         return True
-
-    return answer not in {"n", "no"}
 
 
 def _write_to_batch(  # noqa: PLR0912 PLR0913
@@ -772,3 +769,41 @@ def _read_headers(csv_path: Path) -> set[str]:
         except StopIteration:
             return set()
     return {h.strip() for h in header_row if h.strip()}
+
+
+@click.command("tap", short_help="Import a CSV exchange export into the active batch")
+@click.argument("file", type=click.Path(path_type=Path))
+@click.option(
+    "--source",
+    metavar="NAME",
+    default=None,
+    help=(
+        "Exchange format to use (e.g. ndax, shakepay). " "Auto-detected from headers when omitted."
+    ),
+)
+@click.option(
+    "--wallet",
+    metavar="NAME",
+    default=None,
+    help=(
+        "Wallet name to assign these transactions to (e.g. 'ledger-cold'). "
+        "Defaults to the detected source format name."
+    ),
+)
+@click.option(
+    "--walletfolder",
+    "--wf",
+    "walletfolder",
+    is_flag=True,
+    default=False,
+    help=(
+        "Treat each immediate subfolder of the given directory as a separate wallet. "
+        "CSV files in each subfolder are imported under a wallet named after that "
+        "subfolder."
+    ),
+)
+def tap_command(file: Path, source: str | None, wallet: str | None, walletfolder: bool) -> None:
+    """Import the CSV export at FILE into the active batch."""
+    if walletfolder:
+        sys.exit(handle_tap_walletfolder(file, source))
+    sys.exit(handle_tap(file, source, wallet))

@@ -7,10 +7,13 @@ the new batch as the active batch.
 
 import re
 import sqlite3
+import sys
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 from pathlib import Path
+
+import rich_click as click
 
 from sirop.config.settings import Settings, get_settings
 from sirop.db.connection import get_batch_path, open_batch, set_active_batch
@@ -124,3 +127,17 @@ def _relative(path: Path) -> Path:
         return path.relative_to(Path.cwd())
     except ValueError:
         return path
+
+
+@click.command("create", short_help="Tap a new batch (tax year file)")
+@click.argument("name")
+@click.option(
+    "--year",
+    type=int,
+    metavar="YYYY",
+    default=None,
+    help="Tax year (inferred from NAME if omitted).",
+)
+def create_command(name: str, year: int | None) -> None:
+    """Create a new .sirop batch file named NAME (e.g. ``my2025tax``)."""
+    sys.exit(handle_create(name, year))

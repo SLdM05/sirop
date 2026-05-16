@@ -1,6 +1,9 @@
 """Handler for `sirop switch <name>`."""
 
+import sys
 from pathlib import Path
+
+import rich_click as click
 
 from sirop.config.settings import Settings, get_settings
 from sirop.db.connection import get_batch_path, set_active_batch
@@ -41,3 +44,13 @@ def handle_switch(name: str, settings: Settings | None = None) -> int:
     set_active_batch(name, settings)
     emit(MessageCode.SWITCH_ACTIVATED, name=name)
     return 0
+
+
+@click.command("switch", short_help="Set the active batch")
+@click.argument("name")
+def switch_command(name: str) -> None:
+    """Set the active batch to NAME.
+
+    NAME accepts bare batch names (``my2025tax``), names with the ``.sirop``
+    extension, or full/relative paths to the file."""
+    sys.exit(handle_switch(name))

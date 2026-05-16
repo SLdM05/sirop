@@ -54,10 +54,12 @@ from __future__ import annotations
 
 import dataclasses
 import re
+import sys
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Literal
 
+import rich_click as click
 from rich.table import Table
 from rich.text import Text
 
@@ -1924,3 +1926,122 @@ def _cmd_clear_adjustment(conn: sqlite3.Connection, parts: list[str]) -> None:
         _apply_clear_adjustment(conn, adj_id)
     except _StirError as exc:
         emit(exc.msg_code, **exc.msg_kwargs)
+
+
+@click.command(
+    "stir",
+    short_help=("Review transactions, inspect transfer pairs, link/unlink, record adjustments"),
+)
+@click.option(
+    "--list",
+    "list_only",
+    is_flag=True,
+    default=False,
+    help="Show current transfer match state and exit (no interactive prompt).",
+)
+@click.option(
+    "--link",
+    nargs=2,
+    type=int,
+    metavar="ID1 ID2",
+    default=None,
+    help="Force two transactions to be treated as a transfer pair.",
+)
+@click.option(
+    "--unlink",
+    nargs=2,
+    type=int,
+    metavar="ID1 ID2",
+    default=None,
+    help="Prevent two transactions from being auto-paired.",
+)
+@click.option(
+    "--clear",
+    type=int,
+    metavar="ID",
+    default=None,
+    help="Remove all stir overrides for a transaction.",
+)
+@click.option(
+    "--adjust-acquire",
+    "adjust_acquire",
+    nargs=3,
+    type=str,
+    metavar="UNITS CAD DATE",
+    default=None,
+    help=(
+        "Record a manual reconciliation BTC acquisition. Requires --reason. "
+        "DATE is YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ."
+    ),
+)
+@click.option(
+    "--adjust-dispose",
+    "adjust_dispose",
+    nargs=3,
+    type=str,
+    metavar="UNITS CAD DATE",
+    default=None,
+    help="Record a manual reconciliation BTC disposition. Requires --reason.",
+)
+@click.option(
+    "--reason",
+    metavar="TEXT",
+    default=None,
+    help=(
+        "CRA-defensible justification for a manual adjustment "
+        "(required with --adjust-acquire/--adjust-dispose)."
+    ),
+)
+@click.option(
+    "--wallet",
+    "adjust_wallet",
+    metavar="NAME",
+    default=None,
+    help=(
+        "Wallet to attribute this manual adjustment to. Required with "
+        "--adjust-acquire/--adjust-dispose."
+    ),
+)
+@click.option(
+    "--clear-adjustment",
+    "clear_adjustment",
+    type=int,
+    metavar="ADJ_ID",
+    default=None,
+    help="Remove a manual adjustment by its id (shown in `stir --list`).",
+)
+@click.option(
+    "--list-adjustments",
+    "list_adjustments",
+    is_flag=True,
+    default=False,
+    help="Show all manual reconciliation adjustments and exit.",
+)
+def stir_command(  # noqa: PLR0913
+    list_only: bool,
+    link: tuple[int, int] | None,
+    unlink: tuple[int, int] | None,
+    clear: int | None,
+    adjust_acquire: tuple[str, str, str] | None,
+    adjust_dispose: tuple[str, str, str] | None,
+    reason: str | None,
+    adjust_wallet: str | None,
+    clear_adjustment: int | None,
+    list_adjustments: bool,
+) -> None:
+    """Review imported transactions, inspect auto-detected transfer pairs, and
+    manually link or unlink pairs before boil."""
+    sys.exit(
+        handle_stir(
+            list_only=list_only,
+            link=link,
+            unlink=unlink,
+            clear=clear,
+            adjust_acquire=adjust_acquire,
+            adjust_dispose=adjust_dispose,
+            reason=reason,
+            clear_adjustment=clear_adjustment,
+            list_adjustments=list_adjustments,
+            adjust_wallet=adjust_wallet,
+        )
+    )

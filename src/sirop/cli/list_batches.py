@@ -1,5 +1,9 @@
 """Handler for `sirop list`."""
 
+import sys
+
+import rich_click as click
+
 from sirop.config.settings import Settings, get_settings
 from sirop.db.connection import get_active_batch_name
 from sirop.models.messages import MessageCode
@@ -30,3 +34,10 @@ def handle_list(settings: Settings | None = None) -> int:
         emit(MessageCode.LIST_BATCH_ITEM, name=name, marker=marker)
 
     return 0
+
+
+@click.command("list", short_help="List all batches in DATA_DIR")
+def list_command() -> None:
+    """List every ``.sirop`` batch file in ``DATA_DIR``; the active batch is
+    marked with ``*``."""
+    sys.exit(handle_list())
