@@ -204,7 +204,7 @@ class TestHandleTapFolderConfirmation:
         (folder / "spw.csv").write_text(_SPARROW_HEADER + "\n")
         (folder / "random.csv").write_text("ColA,ColB\n")
 
-        monkeypatch.setattr("builtins.input", lambda _: "y")
+        monkeypatch.setattr("sirop.cli.tap.confirm", lambda *a, **kw: True)
 
         tapped: list[Path] = []
 
@@ -282,7 +282,7 @@ class TestConfirmWalletAppend:
     ) -> None:
         """When wallet exists and user answers 'n', returns False."""
         monkeypatch.setattr("sirop.cli.tap.open_batch", lambda *_: _make_wallet_conn("sparrow"))
-        monkeypatch.setattr("builtins.input", lambda _: "n")
+        monkeypatch.setattr("sirop.cli.tap.confirm", lambda *a, **kw: False)
         result = _confirm_wallet_append("test", _make_settings(tmp_path), "sparrow")
         assert result is False
 
@@ -640,7 +640,7 @@ class TestConfirmCrossWalletImport:
         assert _confirm_cross_wallet_import([self._make_suspect()]) is False
 
     def test_returns_true_on_yes(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("builtins.input", lambda _: "y")
+        monkeypatch.setattr("sirop.cli.tap.confirm", lambda *a, **kw: True)
         assert _confirm_cross_wallet_import([self._make_suspect()]) is True
 
     def test_returns_false_on_eoferror(self, monkeypatch: pytest.MonkeyPatch) -> None:

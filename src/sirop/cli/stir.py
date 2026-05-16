@@ -54,10 +54,12 @@ from __future__ import annotations
 
 import dataclasses
 import re
+import sys
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Literal
 
+import rich_click as click
 from rich.table import Table
 from rich.text import Text
 
@@ -73,6 +75,8 @@ from sirop.transfer_match.matcher import (
     FEE_TOLERANCE_RELATIVE,
     MATCH_WINDOW_HOURS,
 )
+from sirop.ui import NonInteractiveError, ask
+from sirop.ui import confirm as ui_confirm
 from sirop.utils.console import out
 from sirop.utils.logging import get_logger
 from sirop.utils.messages import emit
@@ -1128,8 +1132,11 @@ def _cmd_link(  # noqa: PLR0911 PLR0913
             f"  Difference: {implied_fee:.8f} {tx_a.asset} — "
             f"will be recorded as a network fee (fee micro-disposal at boil time)."
         )
-        confirm = input("  Proceed? [y/N] ").strip().lower()
-        if confirm not in ("y", "yes"):
+        try:
+            proceed = ui_confirm("  Proceed?", default=False)
+        except NonInteractiveError:
+            proceed = False
+        if not proceed:
             out.print("  Cancelled.")
             return None
 
@@ -1250,8 +1257,8 @@ def _cmd_destination(  # noqa: PLR0911
     out.print(f"Transaction {tx_id} — {tx.source} {tx.tx_type.value}  BTC {tx.amount:.8f}  {ts}")
     out.print("Paste the on-chain txid (64 lowercase hex characters):")
     try:
-        raw = input("> ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
+        raw = ask("> ").strip().lower()
+    except (EOFError, KeyboardInterrupt, NonInteractiveError):
         out.print()
         out.print("Cancelled.")
         return
@@ -1325,7 +1332,7 @@ def _cmd_transfer(  # noqa: PLR0911 PLR0912 PLR0915 PLR0913
         out.print(f"    [{i}] {label}")
     out.print()
 
-    choice_raw = input("  Choice (number or wallet name): ").strip()
+    choice_raw = ask("  Choice (number or wallet name)").strip()
     wallet_name: str | None = None
     is_external = False
 
@@ -1336,7 +1343,7 @@ def _cmd_transfer(  # noqa: PLR0911 PLR0912 PLR0915 PLR0913
             if special == "__external__":
                 is_external = True
             elif special == "__new__":
-                wallet_name = input("  Wallet name: ").strip() or None
+                wallet_name = ask("  Wallet name").strip() or None
             else:
                 wallet_name = special
     except ValueError:
@@ -1345,7 +1352,7 @@ def _cmd_transfer(  # noqa: PLR0911 PLR0912 PLR0915 PLR0913
 
     # Step 2: untracked wallet path.
     if is_external:
-        ext_label = input("  Label for this external wallet (optional): ").strip()
+        ext_label = ask("  Label for this external wallet (optional)", default="").strip()
         wallet_err = _validate_wallet_name(ext_label)
         if wallet_err:
             out.print(f"  {wallet_err}")
@@ -1356,10 +1363,10 @@ def _cmd_transfer(  # noqa: PLR0911 PLR0912 PLR0915 PLR0913
         out.print("  Was there a network fee for this transfer?")
         out.print("    [N] No fee to record (exchange covered it, or already embedded)")
         out.print("    [F] Enter fee amount manually")
-        fee_choice = input("  Choice [N/F]: ").strip().upper()
+        fee_choice = ask("  Choice [N/F]", default="N").strip().upper()
         implied_fee = Decimal("0")
         if fee_choice == "F":
-            fee_raw = input(f"  Fee amount (in {tx.asset}): ").strip()
+            fee_raw = ask(f"  Fee amount (in {tx.asset})").strip()
             implied_fee, fee_err = _parse_fee_amount(fee_raw, tx.asset, tx.amount)
             if fee_err:
                 out.print(f"  {fee_err}")
@@ -1417,7 +1424,7 @@ def _cmd_transfer(  # noqa: PLR0911 PLR0912 PLR0915 PLR0913
         out.print(_cand_line)
     out.print()
 
-    sel_raw = input("  Select the counterpart transaction (number or 'none'): ").strip().lower()
+    sel_raw = ask("  Select the counterpart transaction (number or 'none')").strip().lower()
     if sel_raw in ("none", "n", ""):
         out.print("  Cancelled.")
         return None
@@ -1453,15 +1460,18 @@ def _cmd_transfer(  # noqa: PLR0911 PLR0912 PLR0915 PLR0913
         out.print("    [F] Network fee   (fee micro-disposal at boil time — most common)")
         out.print("    [C] Cancel        (go back, do not save)")
         out.print()
-        fee_choice = input("  Choice [F/C]: ").strip().upper()
+        fee_choice = ask("  Choice [F/C]", default="C").strip().upper()
         if fee_choice != "F":
             out.print("  Cancelled.")
             return None
     else:
-        confirm = (
-            input("  Clean transfer — no fee difference. Confirm link? [y/N] ").strip().lower()
-        )
-        if confirm not in ("y", "yes"):
+        try:
+            proceed = ui_confirm(
+                "  Clean transfer — no fee difference. Confirm link?", default=False
+            )
+        except NonInteractiveError:
+            proceed = False
+        if not proceed:
             out.print("  Cancelled.")
             return None
 
@@ -1503,7 +1513,7 @@ def _interactive_loop(  # noqa: PLR0912 PLR0913 PLR0915
 
     while True:
         try:
-            raw = input("stir> ").strip()
+            raw = out.input("[bold green]stir>[/] ").strip()
         except (EOFError, KeyboardInterrupt):
             out.print()
             emit(MessageCode.STIR_EXIT)
@@ -1834,8 +1844,8 @@ def _prompt_adjust_wallet(wallets: list[Wallet]) -> Wallet | None:
         out.print(f"    [{i}] {w.name}{tag}")
     out.print()
     try:
-        raw = input("  Wallet (number or name): ").strip()
-    except (EOFError, KeyboardInterrupt):
+        raw = ask("  Wallet (number or name)").strip()
+    except (EOFError, KeyboardInterrupt, NonInteractiveError):
         out.print()
         out.print("  Cancelled.")
         return None
@@ -1871,8 +1881,8 @@ def _cmd_adjust(conn: sqlite3.Connection) -> None:
         return
 
     try:
-        kind_raw = input("  Kind — [a]cquire (add units) or [d]ispose (remove units): ")
-    except (EOFError, KeyboardInterrupt):
+        kind_raw = ask("  Kind — [a]cquire (add units) or [d]ispose (remove units)")
+    except (EOFError, KeyboardInterrupt, NonInteractiveError):
         out.print()
         out.print("  Cancelled.")
         return
@@ -1885,9 +1895,9 @@ def _cmd_adjust(conn: sqlite3.Connection) -> None:
         out.print(f"  Invalid kind: {kind_raw!r}. Cancelled.")
         return
 
-    units_raw = input("  Units: ")
-    cad_raw = input("  CAD cost basis: ") if kind == "acquire" else input("  CAD proceeds: ")
-    date_raw = input("  Date (YYYY-MM-DD): ")
+    units_raw = ask("  Units")
+    cad_raw = ask("  CAD cost basis") if kind == "acquire" else ask("  CAD proceeds")
+    date_raw = ask("  Date (YYYY-MM-DD)")
 
     wallet_obj = _prompt_adjust_wallet(wallets)
     if wallet_obj is None:
@@ -1900,7 +1910,7 @@ def _cmd_adjust(conn: sqlite3.Connection) -> None:
         " what evidence supports this number? Bank statements? Exchange screenshots?"
         " Email confirmations? Where did you record them?[/dim]"
     )
-    reason_raw = input("  Reason: ")
+    reason_raw = ask("  Reason")
 
     try:
         _apply_adjust(conn, kind, (units_raw, cad_raw, date_raw), reason_raw, wallet_obj)
@@ -1924,3 +1934,139 @@ def _cmd_clear_adjustment(conn: sqlite3.Connection, parts: list[str]) -> None:
         _apply_clear_adjustment(conn, adj_id)
     except _StirError as exc:
         emit(exc.msg_code, **exc.msg_kwargs)
+
+
+@click.group(
+    "stir",
+    invoke_without_command=True,
+    short_help=("Review transactions, inspect transfer pairs, link/unlink, record adjustments"),
+)
+@click.pass_context
+def stir_command(ctx: click.Context) -> None:
+    """Review imported transactions, inspect auto-detected transfer pairs, and
+    manually link or unlink pairs before boil.
+
+    Running ``sirop stir`` with no subcommand launches an interactive REPL.
+    The subcommands below are one-shot equivalents of the REPL actions —
+    use them in scripts or when you want a single change without entering
+    the prompt loop.
+    """
+    if ctx.invoked_subcommand is None:
+        sys.exit(handle_stir())
+
+
+@stir_command.command("list", short_help="Show current transfer match state and exit")
+def stir_list_command() -> None:
+    """Print the auto-matched pairs, unmatched rows, and manual overrides."""
+    sys.exit(handle_stir(list_only=True))
+
+
+@stir_command.command("link", short_help="Force two transactions to be paired")
+@click.argument("id1", type=int)
+@click.argument("id2", type=int)
+def stir_link_command(id1: int, id2: int) -> None:
+    """Force transactions ID1 and ID2 to be treated as a transfer pair."""
+    sys.exit(handle_stir(link=(id1, id2)))
+
+
+@stir_command.command("unlink", short_help="Prevent two transactions from auto-pairing")
+@click.argument("id1", type=int)
+@click.argument("id2", type=int)
+def stir_unlink_command(id1: int, id2: int) -> None:
+    """Prevent transactions ID1 and ID2 from being auto-paired."""
+    sys.exit(handle_stir(unlink=(id1, id2)))
+
+
+@stir_command.command("clear", short_help="Remove all stir overrides for a transaction")
+@click.argument("tx_id", type=int)
+def stir_clear_command(tx_id: int) -> None:
+    """Remove every stir override touching transaction TX_ID."""
+    sys.exit(handle_stir(clear=tx_id))
+
+
+@stir_command.command("adjustments", short_help="List manual reconciliation adjustments")
+def stir_adjustments_command() -> None:
+    """Show all manual reconciliation adjustments recorded for the active batch."""
+    sys.exit(handle_stir(list_adjustments=True))
+
+
+@stir_command.command("unadjust", short_help="Remove a manual reconciliation adjustment")
+@click.argument("adj_id", type=int)
+def stir_unadjust_command(adj_id: int) -> None:
+    """Remove manual reconciliation adjustment ADJ_ID."""
+    sys.exit(handle_stir(clear_adjustment=adj_id))
+
+
+@stir_command.group(
+    "adjust",
+    short_help="Record a manual reconciliation acquisition or disposition",
+)
+def stir_adjust_command() -> None:
+    """Record a manual reconciliation adjustment.
+
+    Use the ``acquire`` subcommand when your real wallet balance exceeds
+    what sirop calculated (missing import). Use ``dispose`` when sirop's
+    pool has units that no longer exist on-chain.
+    """
+
+
+@stir_adjust_command.command("acquire", short_help="Add units via a manual adjustment")
+@click.argument("units")
+@click.argument("cad")
+@click.argument("date")
+@click.option(
+    "--reason",
+    required=True,
+    metavar="TEXT",
+    help="CRA-defensible justification for this adjustment.",
+)
+@click.option(
+    "--wallet",
+    "wallet",
+    required=True,
+    metavar="NAME",
+    help="Wallet to attribute this adjustment to.",
+)
+def stir_adjust_acquire_command(units: str, cad: str, date: str, reason: str, wallet: str) -> None:
+    """Record a manual BTC acquisition (UNITS at CAD cost basis on DATE).
+
+    DATE is YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ.
+    """
+    sys.exit(
+        handle_stir(
+            adjust_acquire=(units, cad, date),
+            reason=reason,
+            adjust_wallet=wallet,
+        )
+    )
+
+
+@stir_adjust_command.command("dispose", short_help="Remove units via a manual adjustment")
+@click.argument("units")
+@click.argument("cad")
+@click.argument("date")
+@click.option(
+    "--reason",
+    required=True,
+    metavar="TEXT",
+    help="CRA-defensible justification for this adjustment.",
+)
+@click.option(
+    "--wallet",
+    "wallet",
+    required=True,
+    metavar="NAME",
+    help="Wallet to attribute this adjustment to.",
+)
+def stir_adjust_dispose_command(units: str, cad: str, date: str, reason: str, wallet: str) -> None:
+    """Record a manual BTC disposition (UNITS for CAD proceeds on DATE).
+
+    DATE is YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ.
+    """
+    sys.exit(
+        handle_stir(
+            adjust_dispose=(units, cad, date),
+            reason=reason,
+            adjust_wallet=wallet,
+        )
+    )

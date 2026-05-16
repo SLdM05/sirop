@@ -28,7 +28,7 @@ Symptoms:
 Before reaching for a manual adjustment, exhaust the cheaper fixes:
 
 1. Re-export and re-tap CSVs you may have missed (`sirop tap`).
-2. Run `sirop stir --list` and walk through unmatched withdrawals/deposits —
+2. Run `sirop stir list` and walk through unmatched withdrawals/deposits —
    most "missing units" turn out to be unmatched transfers.
 3. If you own a wallet sirop does not know about, tap it
    (`sirop tap <file> --wallet <name>`).
@@ -97,7 +97,7 @@ sirop boil
 # 2. Add an acquisition (or disposition) to close the gap.
 #    This example reconstructs an early BTC purchase from a 2017 bank statement.
 #    --wallet names the wallet whose per-wallet holdings view should re-sync.
-sirop stir --adjust-acquire 0.5 12500.00 2017-11-15 \
+sirop stir adjust acquire 0.5 12500.00 2017-11-15 \
   --wallet quadriga \
   --reason "Reconstructed from RBC chequing statement showing CAD 12,500 transfer
             to QuadrigaCX on 2017-11-15. Statement saved at ~/Records/2017/rbc.pdf.
@@ -113,13 +113,13 @@ sirop pour
 ### Attributing an adjustment to a wallet
 
 `--wallet NAME` is required.  It points at an existing wallet in the active
-batch (run `sirop stir --list` to see available names) and tells sirop which
+batch (run `sirop stir list` to see available names) and tells sirop which
 per-wallet holdings line should absorb the adjustment.  Concretely:
 
-- `--adjust-acquire ... --wallet ledger-cold` adds units to `ledger-cold`'s
+- `stir adjust acquire ... --wallet ledger-cold` adds units to `ledger-cold`'s
   net holdings — useful when you imported a partial CSV from that wallet
   and the on-chain balance shows more BTC than sirop calculated.
-- `--adjust-dispose ... --wallet shakepay` removes units from `shakepay`'s
+- `stir adjust dispose ... --wallet shakepay` removes units from `shakepay`'s
   holdings — useful when sirop's number is higher than what your exchange
   statement actually shows.
 
@@ -145,8 +145,8 @@ output — there is no hiding them, by design.
 To remove an adjustment:
 
 ```bash
-sirop stir --list-adjustments              # see the IDs
-sirop stir --clear-adjustment 3            # remove adj_id 3 (writes audit_log)
+sirop stir adjustments                     # see the IDs
+sirop stir unadjust 3                      # remove adj_id 3 (writes audit_log)
 sirop boil --from transfer_match           # re-derive
 ```
 

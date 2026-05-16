@@ -175,22 +175,20 @@ class _RichLogHandler(logging.Handler):
 # ──────────────────────────────────────────────────────────────
 
 
-def configure_logging(*, verbose: bool = False, debug: bool = False) -> None:
+def configure_logging(*, debug: bool = False) -> None:
     """Configure sirop logging. Call exactly once at CLI entry.
 
     Parameters
     ----------
-    verbose:
-        Show sensitive values (txids, amounts, addresses) in log output.
-        Prints a warning banner. Implied by debug=True.
     debug:
-        Set log level to DEBUG and imply verbose=True.
+        Set log level to DEBUG and bypass log redaction (txids, amounts,
+        addresses shown in plain text). Prints a warning banner.
     """
     global _verbose, _configured  # noqa: PLW0603
     if _configured:
         return
 
-    _verbose = verbose or debug
+    _verbose = debug
     _configured = True
 
     root = logging.getLogger(_ROOT)
@@ -215,12 +213,14 @@ def configure_logging(*, verbose: bool = False, debug: bool = False) -> None:
 
 
 def _print_verbose_banner() -> None:
-    banner = (
-        "\n"
-        "  ⚠  VERBOSE MODE: sensitive data (txids, amounts, addresses) is being logged.\n"
-        "     Do not share this output. Run without --verbose for redacted logs.\n"
+    from rich.panel import Panel
+
+    body = (
+        "[bold]⚠  VERBOSE MODE[/bold]: sensitive data (txids, amounts, addresses) "
+        "is being logged.\nDo not share this output. Run without --verbose for "
+        "redacted logs."
     )
-    print(banner, file=sys.stderr)
+    _log_err.print(Panel(body, style="yellow", border_style="bold yellow"))
 
 
 def get_logger(name: str) -> logging.Logger:
