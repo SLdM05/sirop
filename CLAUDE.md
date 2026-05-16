@@ -83,15 +83,20 @@ the parent `feat/<name>` branch. Never open a `claude/` branch directly from `de
 
 ### Squash merge policy
 
-| Merge direction        | GitHub method         | Result on target           |
-|------------------------|-----------------------|----------------------------|
-| `claude/*` → `feat/*` | Squash and merge      | 1 commit per session       |
-| `feat/*` → `dev`       | Squash and merge      | 1 commit per feature       |
-| `dev` → `main`         | Create a merge commit | Release boundary preserved |
+Linear history is enforced on this repo. All merges are squash merges.
+The tag is the release boundary — it replaces the role a merge commit would otherwise play.
 
-Never squash `dev → main` — that merge commit is the project's release record.
-After merging to `main`, tag immediately:
+| Merge direction        | GitHub method    | Result on target           |
+|------------------------|------------------|----------------------------|
+| `claude/*` → `feat/*` | Squash and merge | 1 commit per session       |
+| `feat/*` → `dev`       | Squash and merge | 1 commit per feature       |
+| `dev` → `main`         | Squash and merge | 1 commit per release       |
+
+After merging `dev → main`, tag immediately:
 `git tag v0.x.0 main && git push sirop v0.x.0`.
+
+The tag is the authoritative release record. Individual feature history is
+preserved on `dev` and in each PR's commit list on GitHub.
 
 ### Branch naming
 
@@ -101,7 +106,6 @@ After merging to `main`, tag immediately:
 ### What NOT to do
 
 - Never commit directly to `main` or `dev` — both are branch-protected
-- Never squash `dev → main`
 - Never rebase a branch after it has been pushed and shared
 - Never open a `claude/` branch directly from `dev`
 - Never use the old `feature-` prefix — always use `feat/`
