@@ -116,8 +116,13 @@ matching manual when changing a command's flags, prompts, or output.
 - `/commit` — gather diff, draft conventional message, commit with HEREDOC.
   Never commits without `/check` passing first.
 - `/new-importer` — checklist for adding an exchange or wallet importer.
-- `/docs-audit` — frontmatter-based drift check across `docs/ref/`.
 - `/sirop-query` — read-only inspection of `.sirop` SQLite files.
+
+Skills (auto-invoked by description match):
+
+- `docs-audit` — anchor-based drift detection across `docs/ref/`. Auto-loads
+  when about to edit a reference doc or after code changes under an anchored
+  path. Also user-invokable via `/docs-audit`.
 
 Hooks (configured in `.claude/settings.json`):
 

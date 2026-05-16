@@ -1,12 +1,15 @@
 ---
-verified-at: 9f411cb
+verified-at: 872b414
 tracks:
   - src/sirop/utils/messages.py
   - src/sirop/utils/logging.py
   - src/sirop/models/messages.py
   - config/messages.yaml
+anchors:
+  - path: src/sirop/utils/messages.py
+    lines: 68-110
+    hash: 3002b2a4abef
 ---
-
 # Output channels
 
 sirop has two distinct output channels. Never mix them.
