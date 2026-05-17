@@ -4,3 +4,17 @@ repos:
     hooks:
       - id: ruff          # lint check — no --fix; gate only
       - id: ruff-format   # format check — fails if formatting differs
+  - repo: local
+    hooks:
+      # Soft drift check at push time. Exits non-zero on suspect docs, but
+      # `verbose: true` + pre-push stage means it surfaces a warning when the
+      # branch is being pushed — not on every local commit. Authors can still
+      # push with --no-verify if a doc legitimately needs a separate bump PR.
+      - id: docs-audit
+        name: docs staleness audit (pre-push warning)
+        entry: poetry run python .claude/scripts/docs_audit.py audit
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
+        verbose: true
