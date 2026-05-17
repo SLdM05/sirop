@@ -1,27 +1,42 @@
 """
 Doc staleness auditor for sirop.
 
-Reads YAML frontmatter from every `docs/**/*.md` and `docs/**/*.mermaid`,
-then asks git whether any of the tracked code paths have changed since
-the doc's `verified-at` commit. Docs whose tracked files have new commits
-are "suspect" — a human still has to decide whether the doc's claims were
-actually affected.
+Two layers of drift detection:
+
+1. **tracks** (coarse) — list of file/dir paths. A doc is suspect if any
+   commit since `verified-at` touched those paths. Cheap, but a squash-merge
+   commit that touches many files makes almost every doc suspect.
+
+2. **anchors** (precise) — list of `{path, lines, hash}` entries. Each
+   anchor pins a specific line range; its hash is recomputed at audit time
+   and compared to the stored value. Edits *outside* the cited range don't
+   trip false positives. Anchors override `tracks` when both are present.
 
 Frontmatter format the script expects:
 
     ---
     verified-at: <short-sha>
-    tracks:
+    tracks:                              # optional, coarse fallback
       - src/sirop/some/path
       - config/some.yaml
+    anchors:                             # optional, precise drift detection
+      - path: src/sirop/utils/messages.py
+        lines: 42-78
+        hash: a1b2c3d4e5f6
     notes: optional free-text
     ---
 
 Subcommands:
-    audit         scan all docs, report suspect ones with their commits
-    show <doc>    details for one doc: commits and files touched
-    list          inventory: every doc, its verified-at, tracks, status
-    bump <doc>    rewrite verified-at to HEAD (or --to <sha>)
+    audit              scan all docs, report suspect ones with their commits
+    show <doc>         details for one doc: commits and files touched
+    list               inventory: every doc, its verified-at, tracks, status
+    bump <doc>         rewrite verified-at to HEAD (or --to <sha>); also
+                       recomputes every anchor hash
+
+When suspects appear in a Claude Code session, Claude reads each suspect doc
+plus `git show <commit>` for the listed commits and replies with a verdict
+inline. There is no separate `review` subcommand — shelling to a fresh
+`claude -p` would discard the active session's context and duplicate work.
 
 Run `poetry run python .claude/scripts/docs_audit.py --help` for usage.
 """
@@ -29,10 +44,11 @@ Run `poetry run python .claude/scripts/docs_audit.py --help` for usage.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import re
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
@@ -50,12 +66,27 @@ err_console = Console(stderr=True, style="bold red")
 
 
 @dataclass
+class Anchor:
+    path: str
+    line_start: int
+    line_end: int
+    stored_hash: str | None  # None if anchor was added but not yet hashed
+
+
+@dataclass
 class DocMeta:
     path: Path
     verified_at: str | None
     tracks: list[str]
-    notes: str
+    anchors: list[Anchor] = field(default_factory=list)
+    notes: str = ""
     parse_error: str | None = None
+
+
+@dataclass
+class AnchorMismatch:
+    anchor: Anchor
+    reason: str  # "hash-mismatch" | "missing-file" | "out-of-range" | "no-stored-hash"
 
 
 @dataclass
@@ -64,6 +95,7 @@ class AuditResult:
     status: str  # "fresh" | "suspect" | "unverified" | "error" | "missing-sha"
     commits: list[str]  # commit lines (short-sha + subject)
     missing_tracks: list[str]
+    anchor_mismatches: list[AnchorMismatch] = field(default_factory=list)
 
 
 # ── frontmatter parsing ──────────────────────────────────────────────────────
@@ -106,15 +138,77 @@ def parse_frontmatter(path: Path) -> DocMeta:
             path=path,
             verified_at=verified_at,
             tracks=[],
-            notes="",
             parse_error="tracks must be a list",
         )
     tracks = [str(t) for t in raw_tracks]
 
+    anchors, anchor_err = _parse_anchors(data.get("anchors", []))
+    if anchor_err:
+        return DocMeta(
+            path=path,
+            verified_at=verified_at,
+            tracks=tracks,
+            parse_error=anchor_err,
+        )
+
     notes_val = data.get("notes", "")
     notes = str(notes_val) if notes_val is not None else ""
 
-    return DocMeta(path=path, verified_at=verified_at, tracks=tracks, notes=notes)
+    return DocMeta(
+        path=path,
+        verified_at=verified_at,
+        tracks=tracks,
+        anchors=anchors,
+        notes=notes,
+    )
+
+
+_LINE_RANGE_RE = re.compile(r"^\s*(\d+)\s*-\s*(\d+)\s*$")
+
+
+def _parse_anchors(raw: object) -> tuple[list[Anchor], str | None]:  # noqa: PLR0911
+    if raw is None or raw == []:
+        return [], None
+    if not isinstance(raw, list):
+        return [], "anchors must be a list"
+    out: list[Anchor] = []
+    for i, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            return [], f"anchors[{i}] must be a mapping"
+        apath = entry.get("path")
+        lines = entry.get("lines")
+        stored = entry.get("hash")
+        if not isinstance(apath, str) or not apath:
+            return [], f"anchors[{i}].path must be a non-empty string"
+        if not isinstance(lines, str):
+            return [], f"anchors[{i}].lines must be a string like '42-78'"
+        m = _LINE_RANGE_RE.match(lines)
+        if not m:
+            return [], f"anchors[{i}].lines must match 'START-END' (got {lines!r})"
+        start, end = int(m.group(1)), int(m.group(2))
+        if start < 1 or end < start:
+            return [], f"anchors[{i}].lines must be 1-based with end >= start"
+        if stored is not None and not isinstance(stored, str):
+            stored = str(stored)
+        out.append(Anchor(path=apath, line_start=start, line_end=end, stored_hash=stored))
+    return out, None
+
+
+def hash_anchor(repo_root: Path, anchor: Anchor) -> tuple[str | None, str | None]:
+    """Return (current_hash, error_reason)."""
+    file_path = repo_root / anchor.path
+    if not file_path.exists():
+        return None, "missing-file"
+    try:
+        lines = file_path.read_text(encoding="utf-8").splitlines()
+    except UnicodeDecodeError:
+        return None, "missing-file"
+    if anchor.line_start > len(lines):
+        return None, "out-of-range"
+    end = min(anchor.line_end, len(lines))
+    block = "\n".join(lines[anchor.line_start - 1 : end])
+    digest = hashlib.sha1(block.encode("utf-8"), usedforsecurity=False).hexdigest()[:12]
+    return digest, None
 
 
 def iter_docs(repo_root: Path) -> list[Path]:
@@ -174,7 +268,7 @@ def commits_since(
 # ── audit ────────────────────────────────────────────────────────────────────
 
 
-def audit_one(doc: DocMeta, repo_root: Path) -> AuditResult:
+def audit_one(doc: DocMeta, repo_root: Path) -> AuditResult:  # noqa: PLR0911
     if doc.parse_error == "no frontmatter":
         # Deliberate opt-out (e.g. external-tax-law reference). Not an error.
         return AuditResult(doc=doc, status="unverified", commits=[], missing_tracks=[])
@@ -182,10 +276,34 @@ def audit_one(doc: DocMeta, repo_root: Path) -> AuditResult:
         return AuditResult(doc=doc, status="error", commits=[], missing_tracks=[])
     if not doc.verified_at:
         return AuditResult(doc=doc, status="unverified", commits=[], missing_tracks=[])
-    if not doc.tracks:
+    if not doc.tracks and not doc.anchors:
         return AuditResult(doc=doc, status="unverified", commits=[], missing_tracks=[])
     if not sha_exists(doc.verified_at, repo_root):
         return AuditResult(doc=doc, status="missing-sha", commits=[], missing_tracks=[])
+
+    # Anchors, when present, are authoritative. tracks degrades to a backup
+    # heuristic for docs that haven't migrated yet.
+    if doc.anchors:
+        mismatches: list[AnchorMismatch] = []
+        for anchor in doc.anchors:
+            current, err = hash_anchor(repo_root, anchor)
+            if err:
+                mismatches.append(AnchorMismatch(anchor=anchor, reason=err))
+            elif anchor.stored_hash is None:
+                mismatches.append(AnchorMismatch(anchor=anchor, reason="no-stored-hash"))
+            elif current != anchor.stored_hash:
+                mismatches.append(AnchorMismatch(anchor=anchor, reason="hash-mismatch"))
+        if mismatches:
+            # Surface the underlying commits to help triage, but they're advisory.
+            commits, missing = commits_since(doc.verified_at, doc.tracks, repo_root)
+            return AuditResult(
+                doc=doc,
+                status="suspect",
+                commits=commits,
+                missing_tracks=missing,
+                anchor_mismatches=mismatches,
+            )
+        return AuditResult(doc=doc, status="fresh", commits=[], missing_tracks=[])
 
     commits, missing = commits_since(doc.verified_at, doc.tracks, repo_root)
     status = "suspect" if commits else "fresh"
@@ -208,6 +326,17 @@ def _print_suspect_section(results: list[AuditResult], repo_root: Path, max_comm
     for r in results:
         rel = r.doc.path.relative_to(repo_root)
         console.print(f"[yellow]●[/yellow] {rel}  [dim](verified-at {r.doc.verified_at})[/dim]")
+        for m in r.anchor_mismatches:
+            label = {
+                "hash-mismatch": "anchor drift",
+                "missing-file": "anchor file missing",
+                "out-of-range": "anchor range past EOF",
+                "no-stored-hash": "anchor never bumped",
+            }.get(m.reason, m.reason)
+            console.print(
+                f"    [yellow]→[/yellow] {label}: "
+                f"{m.anchor.path}:{m.anchor.line_start}-{m.anchor.line_end}"
+            )
         for commit in r.commits[:max_commits]:
             console.print(f"    {commit}")
         if len(r.commits) > max_commits:
@@ -289,7 +418,7 @@ def cmd_audit(args: argparse.Namespace) -> int:
 # ── show ─────────────────────────────────────────────────────────────────────
 
 
-def cmd_show(args: argparse.Namespace) -> int:
+def cmd_show(args: argparse.Namespace) -> int:  # noqa: PLR0912
     repo_root = Path(args.repo).resolve()
     path = Path(args.doc)
     if not path.is_absolute():
@@ -308,7 +437,13 @@ def cmd_show(args: argparse.Namespace) -> int:
     table.add_column(style="dim", no_wrap=True)
     table.add_column()
     table.add_row("verified-at", meta.verified_at or "[red]<missing>[/red]")
-    table.add_row("tracks", "\n".join(meta.tracks) if meta.tracks else "[red]<none>[/red]")
+    table.add_row("tracks", "\n".join(meta.tracks) if meta.tracks else "[dim]—[/dim]")
+    if meta.anchors:
+        anchor_rows = "\n".join(
+            f"{a.path}:{a.line_start}-{a.line_end}  ({a.stored_hash or 'no-hash'})"
+            for a in meta.anchors
+        )
+        table.add_row("anchors", anchor_rows)
     if meta.notes:
         table.add_row("notes", meta.notes)
     console.print(table)
@@ -316,6 +451,9 @@ def cmd_show(args: argparse.Namespace) -> int:
     result = audit_one(meta, repo_root)
     console.rule(f"status: [{_STATUS_STYLE.get(result.status, 'white')}]{result.status}")
     if result.status == "suspect":
+        for m in result.anchor_mismatches:
+            loc = f"{m.anchor.path}:{m.anchor.line_start}-{m.anchor.line_end}"
+            console.print(f"  [yellow]anchor[/yellow] {loc} → {m.reason}")
         console.print(f"commits since {meta.verified_at} touching tracked files:")
         for commit in result.commits:
             console.print(f"  {commit}")
@@ -378,6 +516,80 @@ def cmd_list(args: argparse.Namespace) -> int:
 _VERIFIED_AT_LINE_RE = re.compile(r"^(verified-at\s*:\s*)(\S+)\s*$", re.MULTILINE)
 
 
+_ANCHOR_HASH_LINE_RE = re.compile(
+    r"^(?P<indent>[ \t]+)hash\s*:\s*\S+\s*$",
+    re.MULTILINE,
+)
+
+
+def _rehash_anchors_in_fm(fm: str, doc: DocMeta, repo_root: Path) -> tuple[str, list[str]]:
+    """Rewrite each anchor's `hash:` line in the frontmatter, in order.
+
+    Returns (new_fm, errors). Anchors are matched positionally — the Nth
+    `hash:` line in the anchors block is overwritten with the Nth anchor's
+    freshly computed hash. Anchors without an existing `hash:` line need
+    one inserted; we handle that by injecting after the `lines:` line of
+    the same anchor when no hash: line is present.
+    """
+    if not doc.anchors:
+        return fm, []
+
+    errors: list[str] = []
+    new_hashes: list[str] = []
+    for anchor in doc.anchors:
+        h, err = hash_anchor(repo_root, anchor)
+        if err or h is None:
+            errors.append(f"anchor {anchor.path}:{anchor.line_start}-{anchor.line_end}: {err}")
+            new_hashes.append(anchor.stored_hash or "MISSING")
+        else:
+            new_hashes.append(h)
+
+    # Walk hash: lines positionally; for anchors without a hash: line yet,
+    # we insert one after the matching lines: line.
+    hash_iter = iter(new_hashes)
+    anchor_iter = iter(doc.anchors)
+
+    def replace(match: re.Match[str]) -> str:
+        indent = match.group("indent")
+        try:
+            new_hash = next(hash_iter)
+            next(anchor_iter, None)
+        except StopIteration:
+            return match.group(0)
+        return f"{indent}hash: {new_hash}"
+
+    new_fm, replaced = _ANCHOR_HASH_LINE_RE.subn(replace, fm)
+
+    # Any anchors past the last existing hash: line need their hash inserted.
+    remaining_hashes = list(hash_iter)
+    if remaining_hashes:
+        # Insert each missing hash after the corresponding `lines:` line.
+        # We match `- path: <p>` blocks in order and insert after the lines: line
+        # in each block that has no hash: line yet.
+        lines_seq = new_fm.split("\n")
+        out: list[str] = []
+        anchor_idx = replaced  # number already handled
+        i = 0
+        while i < len(lines_seq):
+            out.append(lines_seq[i])
+            stripped = lines_seq[i].lstrip()
+            if (
+                stripped.startswith("lines:")
+                and anchor_idx < len(doc.anchors)
+                and anchor_idx >= replaced
+            ):
+                next_i = i + 1
+                next_stripped = lines_seq[next_i].lstrip() if next_i < len(lines_seq) else ""
+                if not next_stripped.startswith("hash:"):
+                    indent = lines_seq[i][: len(lines_seq[i]) - len(stripped)]
+                    out.append(f"{indent}hash: {remaining_hashes[anchor_idx - replaced]}")
+                anchor_idx += 1
+            i += 1
+        new_fm = "\n".join(out)
+
+    return new_fm, errors
+
+
 def cmd_bump(args: argparse.Namespace) -> int:
     repo_root = Path(args.repo).resolve()
     path = Path(args.doc)
@@ -400,13 +612,28 @@ def cmd_bump(args: argparse.Namespace) -> int:
         sys.exit(f"error: {path} frontmatter has no verified-at line to replace")
 
     new_fm = _VERIFIED_AT_LINE_RE.sub(rf"\g<1>{target_sha}", fm, count=1)
+
+    doc = parse_frontmatter(path)
+    new_fm, anchor_errors = _rehash_anchors_in_fm(new_fm, doc, repo_root)
+    if anchor_errors:
+        for e in anchor_errors:
+            err_console.print(f"warn: {e}")
+
     new_text = f"---\n{new_fm}\n---\n" + text[match.end() :]
     if args.dry_run:
         console.print(f"[dim]would bump[/dim] {path} [dim]to[/dim] {target_sha}")
+        if doc.anchors:
+            console.print(f"[dim]would rehash[/dim] {len(doc.anchors)} anchor(s)")
         return 0
 
     path.write_text(new_text, encoding="utf-8")
-    console.print(f"[green]bumped[/green] {path.relative_to(repo_root)} [dim]→[/dim] {target_sha}")
+    rel = path.relative_to(repo_root)
+    summary = f"[green]bumped[/green] {rel} [dim]→[/dim] {target_sha}"
+    if doc.anchors:
+        summary += (
+            f" [dim](+ {len(doc.anchors)} anchor hash{'es' if len(doc.anchors) != 1 else ''})[/dim]"
+        )
+    console.print(summary)
     return 0
 
 

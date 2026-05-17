@@ -45,9 +45,13 @@ This module is called **after** the import/normalize pipeline steps and **before
 
 ## API Options
 
-Two interfaces are supported. The tool should prefer whichever is available, with Bitcoin Core RPC as the primary and Mempool API as the fallback.
+Two interfaces are described below. **As implemented today, sirop only uses the
+Mempool REST API** (`src/sirop/node/mempool_client.py`); the Bitcoin Core RPC
+client is design-spec future scope and is not present in the codebase. A
+self-hosted Mempool instance backed by the user's own node delivers the same
+privacy/no-rate-limit properties at a fraction of the integration cost.
 
-### Option A: Bitcoin Core RPC (direct, fastest, fully private)
+### Option A: Bitcoin Core RPC (direct, fastest, fully private) — *not implemented*
 
 Requires `bitcoin-cli` or JSON-RPC access to a local `bitcoind` instance.
 
