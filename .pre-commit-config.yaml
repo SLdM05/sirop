@@ -12,7 +12,7 @@ repos:
       # push with --no-verify if a doc legitimately needs a separate bump PR.
       - id: docs-audit
         name: docs staleness audit (pre-push warning)
-        entry: poetry run python .claude/scripts/docs_audit.py audit
+        entry: uv run python .claude/scripts/docs_audit.py audit
         language: system
         pass_filenames: false
         always_run: true

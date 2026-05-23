@@ -58,10 +58,10 @@ penalties, or interest charges arising from its use.
 
 ## Installation
 
-Requires Python 3.12+ and [Poetry](https://python-poetry.org/).
+Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
 
 ```bash
-poetry install
+uv sync
 cp .env.example .env   # set DATA_DIR and optional node config
 ```
 

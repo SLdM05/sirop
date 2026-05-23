@@ -6,7 +6,7 @@ inspect a batch without re-deriving the schema or writing throwaway SQL.
 The file is opened in read-only mode and `PRAGMA query_only=1` is set
 defensively — this script can never modify a .sirop file.
 
-Run `poetry run python .claude/scripts/sirop_query.py --help` for usage.
+Run `uv run python .claude/scripts/sirop_query.py --help` for usage.
 """
 
 from __future__ import annotations

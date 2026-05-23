@@ -17,10 +17,10 @@ If all four steps are cached and passing, print `All checks passed. (cached — 
 
 ## Full suite
 
-1. **Lint and auto-fix** — `poetry run ruff check --fix .`
-2. **Format** — `poetry run ruff format .`
-3. **Type check** — `poetry run mypy .`
-4. **Tests** — `poetry run pytest -m "not slow and not integration" -v`
+1. **Lint and auto-fix** — `uv run ruff check --fix .`
+2. **Format** — `uv run ruff format .`
+3. **Type check** — `uv run mypy .`
+4. **Tests** — `uv run pytest -m "not slow and not integration" -v`
 
 After all steps pass, print a one-line summary: `All checks passed.`
 

@@ -14,14 +14,14 @@ for the authoritative reference.
 
 ## Setup
 
-Requires Python 3.12+ and [Poetry](https://python-poetry.org/).
+Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
 
 ```bash
 git clone https://github.com/SLdM05/sirop.git
 cd sirop
-poetry install
+uv sync
 cp .env.example .env   # fill in DATA_DIR and optional node config
-poetry run pytest -m "not slow and not integration" -v   # should all pass
+uv run pytest -m "not slow and not integration" -v   # should all pass
 ```
 
 ## Branch model
@@ -71,10 +71,10 @@ Run all four before opening a PR. The pre-commit hook runs ruff automatically on
 but CI runs all four.
 
 ```bash
-poetry run ruff check --fix .
-poetry run ruff format .
-poetry run mypy .
-poetry run pytest -m "not slow and not integration" -v
+uv run ruff check --fix .
+uv run ruff format .
+uv run mypy .
+uv run pytest -m "not slow and not integration" -v
 ```
 
 ## Pull request process

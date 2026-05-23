@@ -15,10 +15,10 @@ If the question is "what does this code do," read the source. If the question is
 ## Quick start
 
 ```bash
-poetry run python .claude/scripts/sirop_query.py --help
-poetry run python .claude/scripts/sirop_query.py status
-poetry run python .claude/scripts/sirop_query.py acb BTC
-poetry run python .claude/scripts/sirop_query.py trace <txid-or-raw_id>
+uv run python .claude/scripts/sirop_query.py --help
+uv run python .claude/scripts/sirop_query.py status
+uv run python .claude/scripts/sirop_query.py acb BTC
+uv run python .claude/scripts/sirop_query.py trace <txid-or-raw_id>
 ```
 
 Defaults to the active batch (`$DATA_DIR/.active`, default `./data`). Override with `--batch <name>` or `--file <path>`. Add `--limit 0` to see every row, `--raw` for TSV output (handy for piping to `grep`/`awk`).
@@ -73,8 +73,8 @@ Repository readers in `src/sirop/db/repositories.py` return typed dataclasses fo
 ### 1. Trace one transaction end-to-end
 
 ```bash
-poetry run python .claude/scripts/sirop_query.py trace <txid>
-poetry run python .claude/scripts/sirop_query.py trace 42      # by transactions.id (the ID stir shows)
+uv run python .claude/scripts/sirop_query.py trace <txid>
+uv run python .claude/scripts/sirop_query.py trace 42      # by transactions.id (the ID stir shows)
 ```
 
 - **txid mode** (any non-numeric ident) — queries every pipeline table with `WHERE txid = ?` independently. Reliable because txid is denormalized through every stage, so it works even when `raw_id`/`tx_id` FK columns are NULL. Dispositions are reached via the matching `classified_events.id`.
@@ -85,7 +85,7 @@ If a stage shows no rows, that's the diagnostic: usually a transfer was matched 
 ### 2. "Why is my BTC ACB wrong?"
 
 ```bash
-poetry run python .claude/scripts/sirop_query.py acb BTC --limit 0
+uv run python .claude/scripts/sirop_query.py acb BTC --limit 0
 ```
 
 Chronological `acb_state` rows joined to the triggering `classified_events` (event_type, amount, cad_proceeds, cad_cost, txid, source, wallet). Walk top-to-bottom; the snapshot after each event is the new pool state. If a fee_disposal is missing, the deltas won't match.
@@ -93,7 +93,7 @@ Chronological `acb_state` rows joined to the triggering `classified_events` (eve
 ### 3. Disposition vs adjusted, side-by-side
 
 ```bash
-poetry run python .claude/scripts/sirop_query.py dispositions BTC
+uv run python .claude/scripts/sirop_query.py dispositions BTC
 ```
 
 Joins `dispositions` to `dispositions_adjusted`: `raw_gain_loss`, `is_superficial_loss`, `superficial_loss_denied`, `allowable_loss`, `adjusted_gain_loss` next to each other. Any row where `raw_gain_loss != adjusted_gain_loss` is one the superficial-loss rule touched.
@@ -101,7 +101,7 @@ Joins `dispositions` to `dispositions_adjusted`: `raw_gain_loss`, `is_superficia
 ### 4. Pipeline state and rowcounts
 
 ```bash
-poetry run python .claude/scripts/sirop_query.py status
+uv run python .claude/scripts/sirop_query.py status
 ```
 
 Shows `batch_meta`, `schema_version`, every stage's `status` + `completed_at` + `error`, and rowcounts for every pipeline and support table. The fastest way to confirm a re-run actually happened (look for `invalidated` rows or unexpectedly small counts).
@@ -111,8 +111,8 @@ Shows `batch_meta`, `schema_version`, every stage's `status` + `completed_at` + 
 Run the same subcommand twice with `--file` and diff the `--raw` output:
 
 ```bash
-poetry run python .claude/scripts/sirop_query.py acb BTC --file data/before.sirop --raw --limit 0 > /tmp/before.tsv
-poetry run python .claude/scripts/sirop_query.py acb BTC --file data/after.sirop  --raw --limit 0 > /tmp/after.tsv
+uv run python .claude/scripts/sirop_query.py acb BTC --file data/before.sirop --raw --limit 0 > /tmp/before.tsv
+uv run python .claude/scripts/sirop_query.py acb BTC --file data/after.sirop  --raw --limit 0 > /tmp/after.tsv
 diff /tmp/before.tsv /tmp/after.tsv
 ```
 
@@ -121,15 +121,15 @@ Useful after a refactor to confirm "no change to the calculation" or to localise
 ### 6. Filtered events
 
 ```bash
-poetry run python .claude/scripts/sirop_query.py events --asset BTC --type fee_disposal
-poetry run python .claude/scripts/sirop_query.py events --txid <txid>
-poetry run python .claude/scripts/sirop_query.py events --wallet 3 --taxable-only
+uv run python .claude/scripts/sirop_query.py events --asset BTC --type fee_disposal
+uv run python .claude/scripts/sirop_query.py events --txid <txid>
+uv run python .claude/scripts/sirop_query.py events --wallet 3 --taxable-only
 ```
 
 ### 7. Free-form SQL (read-only)
 
 ```bash
-poetry run python .claude/scripts/sirop_query.py sql \
+uv run python .claude/scripts/sirop_query.py sql \
   "SELECT asset, SUM(CAST(amount AS REAL)) FROM classified_events WHERE event_type='fee_disposal' GROUP BY asset"
 ```
 

@@ -126,14 +126,14 @@ Skills (auto-invoked by description match):
 
 Hooks (configured in `.claude/settings.json`):
 
-- **SessionStart**: ensures the Poetry venv has `sirop` importable; runs
-  `poetry install` once when needed. No manual preamble required.
+- **SessionStart**: ensures the uv venv has `sirop` importable; runs
+  `uv sync` once when needed. No manual preamble required.
 - **PreToolUse**: blocks `git commit` on `main` or `dev`. Use a
   `claude/<feature>-<id>` branch — see [`docs/ref/branch-model.md`](docs/ref/branch-model.md).
 
 ## Tech stack
 
-- Python 3.12+, Poetry (`pyproject.toml`)
+- Python 3.12+, uv (`pyproject.toml` + `uv.lock`)
 - `decimal.Decimal` for all money (never `float`)
 - Bank of Canada Valet API (FX rates, no key)
 - Mempool.space REST (historical BTC prices and node verification, no key)
