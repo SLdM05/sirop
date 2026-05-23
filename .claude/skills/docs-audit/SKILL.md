@@ -99,9 +99,9 @@ Claude in the active session) still confirms.
 ## Quick start
 
 ```bash
-poetry run python .claude/scripts/docs_audit.py --help
-poetry run python .claude/scripts/docs_audit.py audit
-poetry run python .claude/scripts/docs_audit.py show docs/ref/database-schema.md
+uv run python .claude/scripts/docs_audit.py --help
+uv run python .claude/scripts/docs_audit.py audit
+uv run python .claude/scripts/docs_audit.py show docs/ref/database-schema.md
 ```
 
 `audit` exits non-zero (1) when there is anything suspect, missing-sha, or with parse errors — so it can run in CI as a soft check.

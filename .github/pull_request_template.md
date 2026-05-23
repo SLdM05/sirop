@@ -15,10 +15,10 @@
 
 - [ ] Target branch is `dev` (not `main`)
 - [ ] All four quality checks pass locally:
-  - `poetry run ruff check --fix .`
-  - `poetry run ruff format .`
-  - `poetry run mypy .`
-  - `poetry run pytest -m "not slow and not integration" -v`
+  - `uv run ruff check --fix .`
+  - `uv run ruff format .`
+  - `uv run mypy .`
+  - `uv run pytest -m "not slow and not integration" -v`
 - [ ] No real transaction data, addresses, txids, or amounts in any file
 - [ ] New engine logic has known-answer unit tests
 - [ ] Commit messages follow Conventional Commits format (≤ 72 char subject)

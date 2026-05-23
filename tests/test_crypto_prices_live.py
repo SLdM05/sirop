@@ -4,7 +4,7 @@ These tests make real HTTP requests to Mempool.space and/or CoinGecko — no moc
 They are marked ``slow`` and excluded from the default test run.
 
 Run with:
-    poetry run pytest -m slow -v
+    uv run pytest -m slow -v
 """
 
 from __future__ import annotations

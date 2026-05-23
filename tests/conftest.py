@@ -5,7 +5,7 @@ import pytest
 try:
     import sirop  # noqa: F401
 except ImportError as e:
-    raise RuntimeError("sirop package not found — run 'poetry install' first") from e
+    raise RuntimeError("sirop package not found — run 'uv sync' first") from e
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 

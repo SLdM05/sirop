@@ -38,7 +38,7 @@ plus `git show <commit>` for the listed commits and replies with a verdict
 inline. There is no separate `review` subcommand — shelling to a fresh
 `claude -p` would discard the active session's context and duplicate work.
 
-Run `poetry run python .claude/scripts/docs_audit.py --help` for usage.
+Run `uv run python .claude/scripts/docs_audit.py --help` for usage.
 """
 
 from __future__ import annotations
